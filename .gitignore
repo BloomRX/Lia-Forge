@@ -1,0 +1,16 @@
+node_modules/
+dist/
+release/
+.vite/
+.spriteforge/
+.DS_Store
+*.log
+__pycache__/
+*.py[cod]
+.env*
+!.env.example
+
+# Configuração local do agente Claude; regras de projeto em .claude/rules/ são versionadas.
+.claude/skills/
+.claude/worktrees/
+.claude/settings.local.json
