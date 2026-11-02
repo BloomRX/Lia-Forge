@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 2,
+  "preparedAt": "2026-11-02",
+  "purpose": "Local renderer test provenance template. This file records user-provided facts; it does not grant a license.",
+  "agentActivity": {
+    "assetsDownloaded": false,
+    "credentialsUsed": false,
+    "toolsOrAddonsInstalled": false,
+    "blenderExecuted": false,
+    "rendererValidated": false
+  },
+  "termsReview": {
+    "status": "pending_current_official_review",
+    "reviewedAt": null,
+    "currentOfficialTermsVerified": false,
+    "note": "Current official terms have not been confirmed in this preparation. Candidate references below are not a license determination or authorization to download/use assets.",
+    "references": [
+      {
+        "provider": "Mixamo / Adobe",
+        "productUrl": "https://www.mixamo.com/",
+        "termsUrl": "https://www.adobe.com/legal/terms.html",
+        "checkedLive": false
+      },
+      {
+        "provider": "Fab",
+        "productUrl": "https://www.fab.com/",
+        "termsUrl": "https://www.fab.com/eula",
+        "checkedLive": false
+      },
+      {
+        "provider": "Unreal Engine",
+        "productUrl": "https://www.unrealengine.com/",
+        "termsUrl": "https://www.unrealengine.com/eula/unreal",
+        "checkedLive": false
+      }
+    ]
+  },
+  "rendererContract": {
+    "inputCount": 1,
+    "preferredInput": ".blend",
+    "otherCodeSupportedInputs": [".fbx", ".glb", ".gltf", ".obj", ".stl"],
+    "fbxImportOperator": "bpy.ops.import_scene.fbx",
+    "actionsMustExistIn": "bpy.data.actions",
+    "requiredCharacterActions": ["idle", "walk", "run"],
+    "framesPerAction": 8,
+    "frameSize": { "width": 48, "height": 48 },
+    "expectedGrid": { "columns": 8, "rows": 3, "sheetWidth": 384, "sheetHeight": 144 },
+    "outputFiles": ["spritesheet.png", "spritesheet.json"],
+    "note": "Inspected code contract and expected dimensions only; not evidence of a real render. Separate animation files are not passed directly to the current renderer."
+  },
+  "customSubjectTemplate": {
+    "idPattern": "custom-<safe-slug>",
+    "assetPathPattern": "assets/custom/<safe-slug>/combined.blend",
+    "requiredRecords": ["provider/source", "title", "sourceUrl", "sourceVersion or explicit not-supplied note", "license/local-render decision", "actual Blender action names and source clip titles"],
+    "note": "Duplicate this object into subjects with an actual unique id; no code or directory-layout change is needed for another custom subject."
+  },
+  "subjects": [
+    {
+      "id": "mixamo-male",
+      "optional": false,
+      "provider": "Mixamo",
+      "status": "awaiting_user_assets_and_terms_review",
+      "sourceUrl": null,
+      "sourceVersion": null,
+      "sourceFormat": null,
+      "characterTitle": null,
+      "downloadFormatActuallyShown": null,
+      "downloadDate": null,
+      "preparedWithBlenderVersion": null,
+      "licenseRecord": {
+        "status": "pending",
+        "sourceUrl": null,
+        "exactTermsUrlReviewed": null,
+        "termsReviewDate": null,
+        "localRenderingConfirmed": false,
+        "commercialRightsConfirmed": null,
+        "redistributionRightsConfirmed": null
+      },
+      "files": [
+        { "role": "skinned-character-fbx", "path": "assets/mixamo-male/source/character.fbx", "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null },
+        { "role": "idle-source-fbx", "path": "assets/mixamo-male/source/actions/idle-source.fbx", "sourceClipTitle": null, "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null },
+        { "role": "walk-source-fbx", "path": "assets/mixamo-male/source/actions/walk-source.fbx", "sourceClipTitle": null, "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null },
+        { "role": "run-source-fbx", "path": "assets/mixamo-male/source/actions/run-source.fbx", "sourceClipTitle": null, "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null },
+        { "role": "consolidated-blend", "path": "assets/mixamo-male/combined.blend", "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null }
+      ],
+      "actionMapping": [
+        { "rendererAction": "idle", "sourceClipTitle": null, "sourceFilePath": null, "blenderActionName": null, "confirmedByUser": false },
+        { "rendererAction": "walk", "sourceClipTitle": null, "sourceFilePath": null, "blenderActionName": null, "confirmedByUser": false },
+        { "rendererAction": "run", "sourceClipTitle": null, "sourceFilePath": null, "blenderActionName": null, "confirmedByUser": false }
+      ]
+    },
+    {
+      "id": "mixamo-female",
+      "optional": false,
+      "provider": "Mixamo",
+      "status": "awaiting_user_assets_and_terms_review",
+      "sourceUrl": null,
+      "sourceVersion": null,
+      "sourceFormat": null,
+      "characterTitle": null,
+      "downloadFormatActuallyShown": null,
+      "downloadDate": null,
+      "preparedWithBlenderVersion": null,
+      "licenseRecord": {
+        "status": "pending",
+        "sourceUrl": null,
+        "exactTermsUrlReviewed": null,
+        "termsReviewDate": null,
+        "localRenderingConfirmed": false,
+        "commercialRightsConfirmed": null,
+        "redistributionRightsConfirmed": null
+      },
+      "files": [
+        { "role": "skinned-character-fbx", "path": "assets/mixamo-female/source/character.fbx", "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null },
+        { "role": "idle-source-fbx", "path": "assets/mixamo-female/source/actions/idle-source.fbx", "sourceClipTitle": null, "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null },
+        { "role": "walk-source-fbx", "path": "assets/mixamo-female/source/actions/walk-source.fbx", "sourceClipTitle": null, "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null },
+        { "role": "run-source-fbx", "path": "assets/mixamo-female/source/actions/run-source.fbx", "sourceClipTitle": null, "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null },
+        { "role": "consolidated-blend", "path": "assets/mixamo-female/combined.blend", "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null }
+      ],
+      "actionMapping": [
+        { "rendererAction": "idle", "sourceClipTitle": null, "sourceFilePath": null, "blenderActionName": null, "confirmedByUser": false },
+        { "rendererAction": "walk", "sourceClipTitle": null, "sourceFilePath": null, "blenderActionName": null, "confirmedByUser": false },
+        { "rendererAction": "run", "sourceClipTitle": null, "sourceFilePath": null, "blenderActionName": null, "confirmedByUser": false }
+      ]
+    },
+    {
+      "id": "unreal-manny",
+      "optional": true,
+      "provider": "Epic / Fab / Unreal Engine; record the exact listing/source",
+      "status": "optional_not_obtained_terms_unverified",
+      "sourceUrl": null,
+      "sourceVersion": null,
+      "sourceFormat": null,
+      "characterTitle": null,
+      "downloadFormatActuallyShown": null,
+      "downloadDate": null,
+      "preparedWithBlenderVersion": null,
+      "licenseRecord": {
+        "status": "pending",
+        "sourceUrl": null,
+        "exactTermsUrlReviewed": null,
+        "termsReviewDate": null,
+        "localRenderingConfirmed": false,
+        "commercialRightsConfirmed": null,
+        "redistributionRightsConfirmed": null
+      },
+      "files": [
+        { "role": "user-exported-or-obtained-source", "path": "assets/unreal-manny/source/", "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null },
+        { "role": "consolidated-blend", "path": "assets/unreal-manny/combined.blend", "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null }
+      ],
+      "actionMapping": [
+        { "rendererAction": "idle", "sourceClipTitle": null, "sourceFilePath": null, "blenderActionName": null, "confirmedByUser": false },
+        { "rendererAction": "walk", "sourceClipTitle": null, "sourceFilePath": null, "blenderActionName": null, "confirmedByUser": false },
+        { "rendererAction": "run", "sourceClipTitle": null, "sourceFilePath": null, "blenderActionName": null, "confirmedByUser": false }
+      ]
+    },
+    {
+      "id": "unreal-quinn",
+      "optional": true,
+      "provider": "Epic / Fab / Unreal Engine; record the exact listing/source",
+      "status": "optional_not_obtained_terms_unverified",
+      "sourceUrl": null,
+      "sourceVersion": null,
+      "sourceFormat": null,
+      "characterTitle": null,
+      "downloadFormatActuallyShown": null,
+      "downloadDate": null,
+      "preparedWithBlenderVersion": null,
+      "licenseRecord": {
+        "status": "pending",
+        "sourceUrl": null,
+        "exactTermsUrlReviewed": null,
+        "termsReviewDate": null,
+        "localRenderingConfirmed": false,
+        "commercialRightsConfirmed": null,
+        "redistributionRightsConfirmed": null
+      },
+      "files": [
+        { "role": "user-exported-or-obtained-source", "path": "assets/unreal-quinn/source/", "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null },
+        { "role": "consolidated-blend", "path": "assets/unreal-quinn/combined.blend", "status": "not-provided", "sourceVersion": null, "sizeBytes": null, "sha256": null }
+      ],
+      "actionMapping": [
+        { "rendererAction": "idle", "sourceClipTitle": null, "sourceFilePath": null, "blenderActionName": null, "confirmedByUser": false },
+        { "rendererAction": "walk", "sourceClipTitle": null, "sourceFilePath": null, "blenderActionName": null, "confirmedByUser": false },
+        { "rendererAction": "run", "sourceClipTitle": null, "sourceFilePath": null, "blenderActionName": null, "confirmedByUser": false }
+      ]
+    }
+  ]
+}

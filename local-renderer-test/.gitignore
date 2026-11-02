@@ -1,0 +1,3 @@
+# Keep all user assets and local renderer results out of Git.
+/assets/
+/output/
