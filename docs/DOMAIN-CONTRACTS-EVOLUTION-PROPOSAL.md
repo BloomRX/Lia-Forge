@@ -885,6 +885,55 @@ Plano, não autorização de execução:
 | Visual evaluators | `DEFERRED` | Não implementar/alegar nesta fase. |
 | Store/manifest/provider changes | `DEFERRED` | Nenhuma alteração ou integração autorizada nesta proposta. |
 
+## 14. Impactos de identidade/consistência compartilhada entre Lia Studio e Lia Forge (2026-11-11)
+
+**Estado:** `PROPOSED` para o desenho e `REQUIRES_DECISION` para os pontos marcados. **Nada nesta seção implementa, aprova ou altera** a especificação de Domain Contracts, que continua `DRAFT_FOR_HUMAN_REVIEW — NOT AUTHORIZED FOR IMPLEMENTATION`; nenhum campo, enum, predicado ou record novo é proposto aqui. A seção apenas **indica impactos** de uma exigência arquitetural registrada em [`PRODUCT-ARCHITECTURE.md`](PRODUCT-ARCHITECTURE.md) (seção "Consistência nos dois produtos") e decorrente da pesquisa dos itens 13 a 16 de [`EXTERNAL-REPOSITORY-RESEARCH.md`](EXTERNAL-REPOSITORY-RESEARCH.md).
+
+### 14.1 O que já tem forma proposta e não precisa ser inventado
+
+| Necessidade de integração | Onde já está desenhada | Rótulo |
+|---|---|---|
+| Identidade visual do projeto, versionada e aprovada por humano | §3 (`ProjectVisualProfile` / `ProjectVisualProfileVersion`), §3.4 (origem, aprovação e evolução) e spec §3.8/§6 | `PROPOSED` |
+| Origem de cada trait (`manual`, `imported_reference` com `artifactRef`/`sha256`/`reviewRef`/`rightsRef`, `ai_proposal` com `provenanceRef`) | §3.2 e spec §3.8 (`TraitOrigin`) | `PROPOSED` |
+| Referências com função/papel ligadas a assets e versões | §5.2 (`lia.rel.uses_reference`) e spec §7.1 | `PROPOSED` |
+| Relações entre partes (cabelo, rig, motion, contenção, derivação, variante) | §5.2 e §5.3 (`uses_hair`, `uses_rig`, `uses_motion`, `animates`, `contains`, `derived_from`, `variant_of`) | `PROPOSED` |
+| Detecção de desvio e impacto, com separação entre evidência técnica e julgamento | §6 (`ConsistencyAssessment`) e §7 (`ChangeImpactReport`/`ImpactDecisionEvent`) | `PROPOSED` |
+| Desvio aprovado com justificativa registrada | spec §3.12 (`StyleDeviationDecision`) | `PROPOSED` |
+| Style Lock e modo de operação por trait | §4 (`Free`/`Guided`/`Locked`) | `PROPOSED` |
+
+**Conclusão parcial:** a *forma* de um contrato de identidade e consistência já existe nos documentos. O que a integração entre dois produtos expõe não é falta de campos, e sim **escopo, propriedade e precedência**.
+
+### 14.2 Impactos que exigem decisão humana antes de qualquer implementação
+
+| # | Impacto | Por que a integração expõe | Rótulo |
+|---|---|---|---|
+| I-1 | **Perfil scoped/projeção por produto ou por destino.** V1 prevê exatamente um perfil global por `Project`, com perfis scoped e herança adiados (§12, linha "Perfil global/scoped"; §13, "Perfil global versionado"). Um contrato compartilhado com projeções exige decidir se `scope` ganha outros `kind` além de `"project"` (spec §3.8 mantém `extensions` para isso, sem desenhá-los). | O Studio produz identidade de jogo; a Forge produz identidade de produção; Lia Desktop e outros destinos exigem projeção da mesma identidade sem fragmentar o sistema de assets. | `REQUIRES_DECISION` |
+| I-2 | **Relações cross-project.** V1 é same-project e cross-project fica para depois (§12, "Relações/cross-project"; §13, "Relations"); `AssetRelationship` porta um único `projectRef` (spec §3.9, §11 item 11). Identidade compartilhada entre dois produtos **é** um caso entre projetos distintos. | Sem isso, um asset da Forge não pode ser ligado formalmente ao personagem canônico do Studio — apenas copiado textualmente, que é exatamente a divergência que se quer evitar. | `REQUIRES_DECISION` |
+| I-3 | **Precedência entre projeções.** Não existe regra de "quem vence" quando duas fontes afirmam o mesmo trait com valores diferentes. Imutabilidade append-only e CAS no ponteiro (§4.5 da spec) resolvem concorrência de escrita, **não** conflito semântico. | Duas implementações que discordam são o risco central da exigência arquitetural. | `REQUIRES_DECISION` |
+| I-4 | **Propriedade do núcleo do contrato.** Se houver núcleo compartilhado, é preciso definir dono, versão, política de compatibilidade e um documento de fronteira com gates para trocar a dependência. | Precedente externo concreto: no ArtCraft, o contrato puro `craft-ai-core` foi promovido a `storytold/craft-libs` enquanto o workspace downstream manteve **cópia local** com adições pendentes de revisão upstream, exigindo `docs/CORE-SYNC.md` para definir fronteira e gates (item 15 da pesquisa). | `REQUIRES_DECISION` |
+| I-5 | **Meio de armazenamento e descoberta.** Arquivo no workspace, banco, serviço do ecossistema ou descoberta por `%APPDATA%\Lia\lia.json` / `HKCU\Software\Lia` (proposta do guia, sem schema comum versionado — [`lia-ecosystem-integration.md`](lia-ecosystem-integration.md), limites item 1). | A forma do contrato não deve presumir o meio; mas o meio determina viabilidade de projeções e de funcionamento offline. | `REQUIRES_DECISION` / `DEFERRED` nesta fase |
+| I-6 | **Funcionamento sem o Studio.** O perfil precisa continuar opcional e local, com traits `unknown` válidos e sem preenchimento por suposição (§12, "Perfil ausente legado"; princípio 4 da arquitetura-alvo, local-first, e requisito confirmado 9). | A Forge não pode ganhar dependência de outro produto; e precisa atender destinos sem projeto de jogo. | `PROPOSED` (regra já existente, a preservar) |
+
+### 14.3 Impactos das novas capacidades pesquisadas sobre os contratos
+
+As capacidades apontadas pelas quatro fontes **não têm representação contratual hoje** e nenhuma é acrescentada por esta seção; cada uma exigiria decisão prévia de escopo (perguntas 16 a 20 de [`DECISIONS-AND-OPEN-QUESTIONS.md`](DECISIONS-AND-OPEN-QUESTIONS.md)).
+
+| Capacidade candidata | Impacto contratual se vier a existir | Rótulo |
+|---|---|---|
+| Vídeo como produção (backend `hyperframes`) | Mídia temporal não é representada: precisaria de formato/validador de `Artifact`, gate de QA por categoria e contrato de composição. **Nenhum campo é proposto aqui.** | `DEFERRED` |
+| Gaussian splats (`.spz`) | Formato novo de `Artifact` com validador próprio; formatos são capacidades, não dependências (proposta §9.2/§9.4). | `DEFERRED` |
+| Áudio e SFX | Categoria de asset nova (taxonomia extensível já prevista) com formatos, validador de duração/loop e relações com o asset dono. | `DEFERRED` |
+| Nó de *staging* de cena (câmera/pose/posicionamento/máscaras antes de gerar) | Entra como nós e contratos de I/O de `WorkflowDefinition`/`WorkflowPlan`, não como record de domínio novo; reusa a rota `Manequim → 2D` já documentada. | `PROPOSED` como forma, `DEFERRED` como implementação |
+| Checklist de pureza determinística (sem relógio, sem random não semeado, sem rede durante o render, saída fixa, duração finita) | Não é contrato de domínio: é **critério de evidência** para promover `VERIFIED` em render, aplicável ao renderer Blender existente. | `PROPOSED` como critério de QA |
+
+### 14.4 O que esta seção não faz
+
+1. Não implementa, não aprova e não altera a especificação nem o protótipo `shared/domain/contracts.mjs`.
+2. Não cria campos, enums, predicados, records nem shapes novos.
+3. Não escolhe alternativa de contrato compartilhado (A/B/C), dono, precedência nem meio de armazenamento.
+4. Não transforma recomendação em decisão aprovada, nem altera a precedência documental (ADR-001 > proposta consolidada > especificação > auditorias/pesquisas).
+5. Não promove nenhum estado: sem execução, nada vira `EXISTING` ou `VERIFIED`.
+
 ## Conclusão
 
 A evolução mais econômica é adicionar perfis visuais versionados, relações, assessments e impacto como contracts de domínio puros; manter Workflow Engine, providers, Artifact Storage e manifest de spritesheet independentes; conectá-los depois apenas por adaptadores testados. Isso preserva histórico, não fixa taxonomia em enum e não transforma snapshots de execução em versões de Asset.
