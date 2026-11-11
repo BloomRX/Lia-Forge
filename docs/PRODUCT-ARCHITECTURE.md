@@ -154,11 +154,11 @@ A forma necessária já está desenhada e **não precisa de campos novos** para 
 - `AssetRelationship` porta **um único `projectRef`** e, portanto, **não representa relação entre endpoints de Projects diferentes**; se isso for necessário, é decisão pendente (spec §11, item 11). Identidade compartilhada entre dois produtos **é** um caso entre projetos distintos.
 - `ProjectVisualProfile` tem **um único scope em v1** (`kind: "project"`). Projeções por produto ou por destino exigiriam extensão de scope — caminho previsto no campo `extensions`, mas **não desenhado** e não aprovado.
 
-### O que precisa ser refletido no Lia Studio — e o documento inexistente
+### O que precisa ser refletido no Lia Studio — documento localizado no repositório do Studio (correção de 2026-11-12)
 
-**Verificação de 2026-11-11 UTC:** o arquivo **`docs/LIA-FORGE-NA-PIPELINE.md` não existe**. Não está no workspace, não está na árvore publicada desta branch (104 arquivos, 43 `.md`), nenhuma referência a esse nome aparece em `docs/` nem nos `.md` da raiz deste repositório, e a busca no GitHub por esse nome retornou **0 repositórios e 0 resultados de código**. **O documento não foi inventado, criado nem substituído por um equivalente fictício nesta tarefa.** Se ele existe, está em outro repositório não acessível a partir deste checkout; se foi planejado, ainda não foi escrito. Os destinos reais desta documentação para o mesmo assunto são [`lia-ecosystem-integration.md`](lia-ecosystem-integration.md) (políticas do ecossistema Lia, caminhos de dados e limites em aberto; **tem revisão local de 2026-11-06 não publicada**) e esta seção.
+**Verificação de 2026-11-11 UTC (escopo: este repositório):** `docs/LIA-FORGE-NA-PIPELINE.md` não existe no workspace da Forge, não está na árvore publicada desta branch (104 arquivos, 43 `.md`), nenhuma referência a esse nome aparece em `docs/` nem nos `.md` da raiz, e a busca de código/repositórios no GitHub então disponível retornou 0 resultados. **Correção de 2026-11-12 UTC (escopo: repositório correto):** o arquivo **existe** em [`BloomRX/Lia-Studio`](https://github.com/BloomRX/Lia-Studio), branch **`arena/01a0f4ab-lia-gamedev`** (commit `49eedeec09ce`, 2026-11-11T21:07:11Z), com 19.340 bytes, 175 linhas e blob `82f27727858208166fce34dc050525d0dffff9c3`; a branch `main` do Studio **não** o contém (tem apenas `docs/BRAND-STANDARDS.md` e `docs/UI-UX-DESIGN-SYSTEM-LIA-STUDIO.md` com o conteúdo `PLACEHOLDER`). A conclusão anterior era verdadeira apenas para o repositório da Forge e está corrigida aqui; o documento **não foi criado nem alterado** por esta revisão (leitura via GitHub API, sem clone). Ele registra como **decisão de produto do Dev** a fronteira Studio × Forge e declara que o protocolo/bridge entre apps **não está aprovado nem implementado**; o primeiro corte existente é o brief manual de `app/lia/forge_brief.py` (tipos `concept`/`model`/`rig`/`spritesheet`, IDs `[0-9a-f]{8}`, sem ler GDD, mídia, decisões ou credenciais, com `sent`/`saved`/`verified_result` = `False`). Análise completa em [`STUDIO-FORGE-CONSISTENCY-ARCHITECTURE.md`](STUDIO-FORGE-CONSISTENCY-ARCHITECTURE.md) §1 e [`T8-ARCHITECTURAL-DECISIONS-REVIEW.md`](T8-ARCHITECTURAL-DECISIONS-REVIEW.md).
 
-O que o lado **Lia Studio** precisaria refletir, quando e se aquele documento for escrito ou localizado:
+O que o lado **Lia Studio** precisa refletir (o documento localizado já cobre os itens 1, 4, 5 e 6 em nível de fronteira; os demais continuam pendentes dos dois lados):
 
 1. Que a Forge mantém **sistema próprio** de consistência de produção e não é apenas consumidora de um perfil enviado.
 2. Que o contexto enviado pelo Studio precisa ser **versionado, com hash e origem** (perfil + referências aprovadas + relações relevantes), e não texto livre.
@@ -166,7 +166,7 @@ O que o lado **Lia Studio** precisaria refletir, quando e se aquele documento fo
 4. Que o julgamento de **compatibilidade visual no contexto do jogo** pertence ao Studio, com decisão humana registrada.
 5. Que mudanças de direção artística geram **Change Impact informativo** e revisão, nunca reescrita automática de assets.
 6. Que a Forge precisa funcionar **sem** o Studio (perfil opcional, `unknown` válido) e atender destinos sem projeto de jogo (Lia Desktop e outros) por projeção de perfil, sem fragmentar o sistema de assets.
-7. Que **nenhum contrato compartilhado foi aprovado**: alternativa A/B/C, dono do núcleo, precedência em conflito e meio de armazenamento continuam como decisões humanas em aberto.
+7. Que **nenhum contrato compartilhado foi aprovado**: alternativa A/B/C, dono do núcleo, precedência em conflito e meio de armazenamento continuam como decisões humanas em aberto — e que a especificação Domain Contracts da Forge **não é** protocolo Studio ↔ Forge, conforme o próprio documento do Studio já registra.
 
 ### Ambiguidade de nomes a resolver
 
@@ -180,7 +180,7 @@ Três "Studio" diferentes aparecem nesta documentação e não devem ser confund
 4. `ProjectVisualProfile` ganha scope além de `kind: "project"` (por produto, por destino), ou cada produto mantém aggregate próprio ligado por relação?
 5. Onde vive o registro compartilhado: arquivo no workspace, banco, serviço do ecossistema ou descoberta por `%APPDATA%\Lia\lia.json`/`HKCU\Software\Lia`? (Decisão posterior e independente da forma do contrato.)
 6. Como o Studio detecta "asset tecnicamente correto e visualmente incompatível" — rubrica própria, `ConsistencyAssessment` recebido da Forge, ou ambos?
-7. O documento `docs/LIA-FORGE-NA-PIPELINE.md` deve ser criado, localizado em outro repositório ou substituído por `lia-ecosystem-integration.md` como fonte?
+7. `docs/LIA-FORGE-NA-PIPELINE.md` foi **localizado** na branch `arena/01a0f4ab-lia-gamedev` do repositório do Studio: ele deve ser consolidado na `main` do Studio, e a referência cruzada a partir da Forge deve apontar para a branch ou para um commit pinado?
 8. Publica-se a revisão local 2026-11-06 de `lia-ecosystem-integration.md` e a revisão 2026-10-28 de `product-gap-analysis.md`, hoje divergentes entre workspace e árvore publicada?
 
 ## O que não está decidido aqui
