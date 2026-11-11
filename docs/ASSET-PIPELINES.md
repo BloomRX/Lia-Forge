@@ -87,6 +87,33 @@ Para cada tentativa — inclusive incompleta ou falha — preservar e registrar,
 - **proveniência e hashes** de input/output por etapa, backend, versões e consentimentos;
 - **resultados parciais e falhas**, com motivo e estado (`partial`/`failed`/`blocked`/`unknown`).
 
+### Rota 3D local image→game-ready — etapas, candidatos observados e bloqueios (referência externa, não rota aprovada)
+
+Rota estudada a partir de fonte externa de terceiro (pesquisa [`EXTERNAL-REPOSITORY-RESEARCH.md`](EXTERNAL-REPOSITORY-RESEARCH.md), item 12: vídeo [`Local AI Now Makes Game-Ready 3D Characters (Fully Animated!)`](https://www.youtube.com/watch?v=bEiW6L7Y7NM), canal `PixelArtistry`, upload declarado 2026-11-06, 24:12, e repositório [`pixelartistry/PixelArtistry-Animated-Characters`](https://github.com/pixelartistry/PixelArtistry-Animated-Characters) @ `77f1462dab42`). Como na rota 2.5D, **cada etapa é uma capability independente com provider substituível**; nenhuma dupla de ferramentas forma dependência indivisível. Registrar a rota **não** cria decisão de produto, de provider nem de formato: a seleção permanece em aberto (proposta §15.2) e, no pacote de contracts, os IDs de slot/role/`formatId` continuam pendentes (especificação §11, item 5). Nada foi clonado, baixado, instalado, executado ou medido por nós.
+
+| Etapa (capability candidata) | O que precisa produzir | Candidato observado na fonte externa | Alternativas previstas |
+|---|---|---|---|
+| Gerar mesh a partir de imagem 2D | mesh bruto + proveniência (modelo, versão, seed/parâmetros redigidos, hash de input/output) | `microsoft/TRELLIS.2` @ `75fbf0183001` (MIT “model and code”) e/ou `TencentARC/Pixal3D` @ `f7cf38429b0b` (MIT + `NOTICE` de terceiros) via ComfyUI | Serviço hospedado com direitos resolvidos; `hunyuan3d` (item 5 da pesquisa, documentação apenas); modelagem manual; implementação própria |
+| Tornar o mesh watertight | malha fechada, sem buracos, com relatório do que foi reparado | `Mstafa-awad/WTiVo-WatertightVoxel-ComfyuiNode` @ `fb9e9ea6a7de` (**GPL-3.0**) | Reparo em DCC; implementação própria; `WTiVo-FastMergeByDistance` (MIT) |
+| Reduzir para low-poly de jogo | malha decimada com contagem de triângulos declarada (no vídeo, ~12k) e LODs quando aplicável | `Mstafa-awad/LODTailor-The-Mesh-Trimmer-ComfyuiNode` @ `3d25b7d4aa38` (**GPL-3.0**) | Decimate/LOD em DCC; implementação própria |
+| Baker mapas a partir do high-poly | normal map (e demais mapas) com resolução e espaço declarados | `Mstafa-awad/LODTailor-Bake-Forger` @ `f13589c22558` (**GPL-3.0**) | Bake em DCC; implementação própria |
+| Texturizar a partir da imagem de referência | texturas 2K/PBR ligadas à imagem fonte | `Mstafa-awad/UltraTex-ComfyUI-nodes` @ `8b3715605fa5` (**GPL-3.0**) sobre **FLUX.2 Klein base 9B** (**FLUX Non-Commercial License v2.1**) | Provider de textura com direitos comerciais resolvidos; pintura manual; textura procedural |
+| Gerar prop compatível e combinar | prop low-poly coerente em escala/estilo + combinação e attach no DCC | Segundo workflow do repositório do autor + **Blender** (interface técnica auxiliar, ADR-001 Decisão 5) | Prop modelado manualmente; biblioteca com licença verificada (ex.: CC0 confirmado na fonte) |
+| Auto-rig, finger rig e attach de props | rig com ossos, pesos e attach de prop, com relatório do que foi automático e do que exige revisão | `actionforge.app` — serviço **web hospedado**, licença **não verificada**, sem repositório público identificado | Auto-rig em DCC; rig manual; retarget a partir de rig existente |
+| Animar | clips com licença conhecida, proveniência e retarget declarado | Animações de `Quaternius`, **CC0 declarado pelo autor do vídeo** (não re-verificado na fonte) | Captura de movimento; keyframe manual; retarget de clips licenciados |
+| Exportar para o destino de consumo | arquivos + manifesto de importação com escala, eixos, unidades, FPS, root motion e pontos de colisão/hitbox | **Godot** (`godotengine/godot` @ `069458825a8e`, MIT) como **destino de consumo** Game Asset | Outras engines/consumidores como novos targets (§Destinos de utilização), sem criar módulo de geração por destino |
+
+**Preservação obrigatória nesta rota** (mesma disciplina da rota 2.5D): imagem 2D fonte; mesh bruto, watertight, high-poly e low-poly; mapas e texturas geradas; prop e combinação no DCC; rig e pesos; clips de animação; projeto/arquivos de engine; **todo conteúdo gerado por modelo identificado como tal na proveniência** (mesh, mapas, texturas), com modelo/versão/seed/parâmetros redigidos e hashes de input e output; ajustes manuais preservados como eventos próprios; versões e iterações encadeadas, sem sobrescrever a anterior.
+
+**Bloqueios e limites registrados:**
+
+1. **Hardware/backend:** os requisitos declarados são Windows + GPU **NVIDIA** com **CUDA 12**/PyTorch 2.8/Python 3.12, ~26 GB de disco, testados em RTX 5080 (16 GB) e declarados funcionais em 8–12 GB com configurações menores. O alvo de homologação da Forge é **Windows + AMD RX 580 8 GB** (ADR-001 Decisão 5): para esse alvo a rota é **`BLOCKED`/`unknown`** — nenhuma adaptação (ROCm, DirectML ou outro backend) foi testada ou aprovada aqui.
+2. **Direitos por componente:** GPL-3.0 nos nós de malha/mapa/textura; MIT **escopado** no repositório do autor (exclui explicitamente nós e modelos); **FLUX.2 Klein não comercial** para texturização; ActionForge e VARCO 3D sem licença verificada; CC0 de animações declarado por terceiro. Wrapper, instalador ou workflow **não** cobre pesos, modelos, datasets nem outputs.
+3. **Rotas não offline:** ActionForge e VARCO 3D são serviços hospedados — implicam envio de mesh/dados para fora do ambiente local, com termos e retenção desconhecidos.
+4. **Conteúdo patrocinado e afiliados:** o vídeo de origem é patrocinado (VARCO 3D, da NC AI) e traz links de afiliados declarados (TripoAI, 3DAIStudio, Hitem3D, MeshyAI, RunPod), que **não** são ferramentas usadas no vídeo nem candidatos avaliados.
+5. **Estado por etapa:** todos os candidatos acima permanecem `EXPERIMENTAL`/`NOT_VERIFIED`; nenhum vira claim `supported`/`partial` sem probing runtime, conformance e licença verificada ([`TOOL-PROVIDER-HUB.md`](TOOL-PROVIDER-HUB.md)).
+
+
 ## Destinos de utilização
 
 Dois destinos de primeira classe são registrados explicitamente. Eles são **consumidores dos assets, não módulos de geração separados**:

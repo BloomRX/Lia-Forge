@@ -91,6 +91,8 @@ Ver análise detalhada e recomendações em [`EXTERNAL-REPOSITORY-RESEARCH.md`](
 
 O adendo 2D/2.5D acrescenta dois repositórios do mesmo autor, pesquisados como itens 10 e 11 daquele documento: [`link-ding/image-to-psd`](https://github.com/link-ding/image-to-psd) (skill de agente + script Python de export de PSD em camadas) e [`link-ding/doll-studio`](https://github.com/link-ding/doll-studio) (leitor PSD/PSB, auto-rig, runtime 2.5D, editor/player web e app desktop Electron). Ambos são candidatos experimentais com direitos pendentes; nenhum foi incorporado.
 
+O adendo 3D local (item 12 daquela pesquisa, [vídeo `PixelArtistry` de 2026-11-06](https://www.youtube.com/watch?v=bEiW6L7Y7NM)) acrescenta candidatos para a rota **imagem 2D → mesh → texturas → rig/animação → engine**: `microsoft/TRELLIS.2` (MIT), `TencentARC/Pixal3D` (MIT + `NOTICE` de terceiros), nós GPL-3.0 de `Mstafa-awad` (WTiVo, LODTailor, Bake Forger, UltraTex), `Tavris1/ComfyUI-Easy-Install` (MIT), o serviço hospedado `actionforge.app` (licença não verificada) e `godotengine/godot` (MIT) como **destino de consumo**. Registro e direitos no item 12; nenhum é capability da Forge.
+
 ## Providers 2D/2.5D em avaliação (registro documental, não hub)
 
 Rota atendida: **imagem 2D → separação de partes → reconstrução de áreas ocultas → PSD em camadas e máscaras → revisão de partes → rig 2.5D → animação → exportação** (detalhes e preservação em [`ASSET-PIPELINES.md`](ASSET-PIPELINES.md)). Os dois providers são **independentes e substituíveis**: ocupam etapas diferentes e cada etapa admite alternativa (outro separador de camadas, editor/rig próprio, outro runtime 2.5D, exportação para formatos intercambiáveis quando suportada). Nenhum par forma dependência indivisível e nenhum é obrigatório para a Forge.
@@ -165,6 +167,33 @@ Regras de registro para estes candidatos:
 5. **Conteúdo reconstruído identificado.** Pixels inferidos em áreas ocultas entram como conteúdo gerado na proveniência e na revisão, com tool/model/parâmetros quando conhecidos.
 6. **Implementação independente possível.** Havendo impedimento de direitos ou técnico, a Forge pode desenvolver separador de camadas, editor/rig ou runtime 2.5D próprios, **sem copiar código, prompts, exemplos ou assets** dos repositórios.
 7. **Formatos não são contratos semânticos.** PSD/PSB, `.doll`, HTML autocontido e formatos compatíveis com Live2D são formatos de saída/entrada com validação própria; extensão ou nome não prova conteúdo, compatibilidade nem direitos. Live2D só entra quando houver provider adequado e licenciado.
+
+## Providers 3D locais e rota image→game-ready em avaliação (registro documental, não hub)
+
+Rota estudada a partir de fonte externa — [`EXTERNAL-REPOSITORY-RESEARCH.md`](EXTERNAL-REPOSITORY-RESEARCH.md) item 12: vídeo [`Local AI Now Makes Game-Ready 3D Characters (Fully Animated!)`](https://www.youtube.com/watch?v=bEiW6L7Y7NM) (canal `PixelArtistry`, upload declarado 2026-11-06, 24:12): **imagem 2D → geração de mesh (TRELLIS.2/Pixal3D) → watertight → decimation/low-poly → bake de normal map → texturização (UltraTex) → combinação de prop em DCC → auto-rig/animação → importação em engine**. Nada abaixo é capability registrada, claim `supported`/`partial`, adapter aprovado ou evidência de execução: são candidatos observados em material de terceiro, com direitos pendentes.
+
+| Etapa/capability candidata | Candidatos observados (verificados na pesquisa item 12) | Direitos verificados | Modo | Limite registrado |
+|---|---|---|---|---|
+| `image3d.generate-mesh` | `microsoft/TRELLIS.2` (MIT, “model and code”); `TencentARC/Pixal3D` (MIT + componentes de terceiros em `NOTICE`); empacotamentos ComfyUI de terceiros | MIT nos repositórios; **pesos/`NOTICE` a verificar** (um wrapper de terceiro descreve “academic-only model license”, não confirmado upstream) | Local (GPU) | Exige GPU/VRAM não testadas no alvo da Forge; modelo ≠ código quanto a direitos |
+| `mesh.make-watertight` | `Mstafa-awad/WTiVo-WatertightVoxel-ComfyuiNode` (GPL-3.0); `WTiVo-FastMergeByDistance` (MIT) | GPL-3.0 / MIT | Local | Nós pré-compilados exigem Python 3.12 + PyTorch 2.8 + **CUDA 12** |
+| `mesh.decimate-lowpoly` | `Mstafa-awad/LODTailor-The-Mesh-Trimmer-ComfyuiNode` (GPL-3.0) | GPL-3.0; variante `LODTailor-The-Mesh-Trimmer` **sem licença** (fail-closed) | Local | Copyleft: cópia/adaptação/redistribuição exige compliance e revisão |
+| `texture.bake-normal` | `Mstafa-awad/LODTailor-Bake-Forger` (GPL-3.0) | GPL-3.0 | Local | Idem |
+| `texture.generate-from-image` | `Mstafa-awad/UltraTex-ComfyUI-nodes` (GPL-3.0) + `pixelartistry/PixelArtistry-UltraTex` (MIT **escopado**) sobre **FLUX.2 Klein base 9B** | GPL-3.0 nos nós; modelo sob **FLUX Non-Commercial License v2.1** (Black Forest Labs) | Local (GPU) | **Bloqueio comercial:** executar o modelo é uso não comercial; outputs declarados como do usuário pelo autor do repositório, sem parecer jurídico |
+| `rig.auto-rig` / `motion.animate` | `actionforge.app` (aplicação web hospedada, “free in your browser”; crédito a “CG Stuff”); clips de `Quaternius` declarados **CC0** | **Não verificada** (nenhum repositório público identificado); CC0 declarado por terceiro, não re-verificado na fonte | **Remoto/hospedado** | Envio de mesh/dados a serviço externo; termos, retenção e direitos desconhecidos; auto-rig de vídeo **não** é rigging profissional garantido |
+| `dcc.combine-and-place-prop` | Blender (ADR-001 Decisão 5: interface técnica auxiliar; sem renderer padrão) | GPL-2.0-or-later conforme o projeto; não re-verificado nesta revisão | Local | Nenhuma decisão de renderer padrão; comparação Blender × WebGL/SpriteForge continua aberta |
+| `destination.game-engine-import` | `godotengine/godot` (MIT) | MIT | Local | **Destino de consumo (Game Asset)**, não módulo de geração; nenhuma integração autorizada, testada ou homologada |
+| `service.hosted-3d-flow` (patrocinado) | VARCO 3D (NC AI), “Flow + MCP” | **Não verificada**; sem repositório oficial identificado | **Remoto/hospedado** | Segmento **patrocinado** do vídeo; `DO NOT INTEGRATE` neste estágio |
+
+Regras que se aplicam a todos os candidatos acima, sem exceção:
+
+1. **Nenhum claim de capability.** Nada aqui é `supported`/`partial`; claims exigem versão de contrato, escopo, evidência aplicável à combinação exata e probing runtime (§Registro de capability/provider).
+2. **Substituição sem ruptura.** Qualquer etapa pode ser atendida por outro provider, por implementação própria ou por fluxo manual: o contrato é de input/output da etapa, não do fornecedor.
+3. **Gate de direitos fail-closed e por componente.** GPL-3.0 (nós de malha/textura), MIT **escopado** (instalador/workflows do autor, excluindo explicitamente nós e modelos), **FLUX Non-Commercial v2.1** (modelo de texturização), licenças não verificadas (ActionForge, VARCO 3D) e CC0 declarado por terceiro (animações) são decisões **separadas**; wrapper, instalador ou workflow não cobre pesos, modelos, datasets nem outputs.
+4. **Efeitos revelados antes da execução.** Instalação one-click, download de nós/modelos/pesos (~26 GB declarados), execução em GPU, envio de mesh a serviço hospedado e importação em engine exigem consentimento por efeito e autorização explícita.
+5. **Hardware é alvo de homologação, não suporte.** Os requisitos declarados (Windows + NVIDIA, RTX 5080 16 GB testado, 8–12 GB declarado, CUDA 12) **não** cobrem o alvo registrado no ADR-001 (Windows + AMD RX 580 8 GB): para esse alvo a rota permanece `BLOCKED`/`unknown`, sem adaptação ROCm/DirectML testada.
+6. **Conteúdo patrocinado e afiliados não são evidência.** O vídeo de origem é patrocinado (VARCO 3D) e contém links de afiliados declarados; isso não invalida os repositórios verificados, mas impede tratar a demonstração como medição independente.
+7. **Nada foi executado.** Nenhum clone, download, instalação, execução, cópia de código/prompts/workflows, fork ou redistribuição; apenas leitura de metadados públicos e de licenças.
+
 
 ## Critérios de aceite futuros
 
