@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 2,
+  "preparedAt": "2026-11-12",
+  "exampleOnly": true,
+  "exampleNotice": "EXEMPLO SINTETICO da T11 (Eixo B). NENHUM dado abaixo descreve um asset real: autoria, licenca, hashes e datas sao marcadores de exemplo para mostrar o preenchimento completo. Nao constitui aprovacao, autorizacao de uso ou determinacao de licenca. Substitua por um manifesto proprio com fatos reais antes de qualquer render.",
+  "purpose": "Modelo de manifesto aprovado para asset PROPRIO ou devidamente licenciado, no mesmo schema de source-license-manifest.json.",
+  "agentActivity": {
+    "assetsDownloaded": false,
+    "credentialsUsed": false,
+    "toolsOrAddonsInstalled": false,
+    "blenderExecuted": false,
+    "rendererValidated": false
+  },
+  "termsReview": {
+    "status": "reviewed_by_user",
+    "reviewedAt": "EXEMPLO-AAAA-MM-DD",
+    "currentOfficialTermsVerified": true,
+    "note": "EXEMPLO: para asset proprio, a 'revisao de termos' e a declaracao do proprio autor; para asset de terceiro, e a leitura datada dos termos oficiais vigentes.",
+    "references": []
+  },
+  "rendererContract": {
+    "inputCount": 1,
+    "preferredInput": ".blend",
+    "requiredCharacterActions": ["idle", "walk", "run"],
+    "framesPerAction": 8,
+    "frameSize": { "width": 48, "height": 48 },
+    "expectedGrid": { "columns": 8, "rows": 3, "sheetWidth": 384, "sheetHeight": 144 },
+    "outputFiles": ["spritesheet.png", "spritesheet.json"],
+    "note": "Contrato atual preservado; nenhum valor alterado para facilitar teste."
+  },
+  "subjects": [
+    {
+      "id": "custom-exemplo-proprio",
+      "optional": false,
+      "provider": "EXEMPLO: asset criado pelo proprio usuario (sem terceiro)",
+      "status": "approved_for_internal_test",
+      "sourceUrl": "EXEMPLO: origem interna / arquivo local do autor",
+      "sourceVersion": "EXEMPLO: v1 ou 'not supplied by source'",
+      "sourceFormat": ".blend",
+      "characterTitle": "EXEMPLO: Personagem Sintetico T11",
+      "downloadFormatActuallyShown": null,
+      "downloadDate": null,
+      "preparedWithBlenderVersion": "EXEMPLO: 5.x.y",
+      "authorship": {
+        "author": "EXEMPLO: nome do autor proprietario",
+        "modifications": "EXEMPLO: nenhuma / lista de modificacoes reais",
+        "derivedFrom": null
+      },
+      "licenseRecord": {
+        "status": "reviewed_by_user",
+        "sourceUrl": "EXEMPLO: onde a licenca esta publicada (ou declaracao assinada do autor)",
+        "exactTermsUrlReviewed": "EXEMPLO: url exata revisada",
+        "termsReviewDate": "EXEMPLO-AAAA-MM-DD",
+        "localRenderingConfirmed": true,
+        "commercialRightsConfirmed": "EXEMPLO: sim/nao/parcial com escopo",
+        "redistributionRightsConfirmed": "EXEMPLO: nao marcar sem evidencia",
+        "evidence": "EXEMPLO: arquivo de licenca, registro de autoria ou declaracao datada"
+      },
+      "restrictions": [
+        "EXEMPLO: uso apenas interno ate revisao final",
+        "EXEMPLO: nao redistribuir texturas de terceiros embutidas"
+      ],
+      "authorizationForTest": {
+        "grantedBy": "EXEMPLO: pessoa proprietaria/decisora",
+        "grantedAt": "EXEMPLO-AAAA-MM-DD",
+        "scope": "render interno de validacao E3; sem publicacao"
+      },
+      "animations": [
+        {
+          "action": "idle",
+          "sourceClipTitle": "EXEMPLO: titulo real do clip",
+          "sourceFilePath": "assets/custom-exemplo-proprio/source/actions/idle-source.fbx",
+          "blenderActionName": "EXEMPLO: nome real visto em bpy.data.actions",
+          "confirmedByUser": false
+        },
+        {
+          "action": "walk",
+          "sourceClipTitle": "EXEMPLO",
+          "sourceFilePath": "assets/custom-exemplo-proprio/source/actions/walk-source.fbx",
+          "blenderActionName": "EXEMPLO",
+          "confirmedByUser": false
+        },
+        {
+          "action": "run",
+          "sourceClipTitle": "EXEMPLO",
+          "sourceFilePath": "assets/custom-exemplo-proprio/source/actions/run-source.fbx",
+          "blenderActionName": "EXEMPLO",
+          "confirmedByUser": false
+        }
+      ],
+      "files": [
+        {
+          "role": "consolidated-blend",
+          "path": "assets/custom-exemplo-proprio/combined.blend",
+          "status": "example-not-provided",
+          "sourceVersion": "EXEMPLO",
+          "sizeBytes": null,
+          "sha256": "EXEMPLO-SHA256-DO-ARQUIVO-REAL"
+        }
+      ]
+    }
+  ]
+}
