@@ -62,6 +62,9 @@ Esta documentação já usa dois conjuntos de rótulos. A política **não** cri
 11. **Compatibilidade de hardware:** SO, GPU/CPU, VRAM, disco e runtime declarados **pelo autor**, e separadamente o que foi **testado na máquina-alvo**; `unknown` é resposta válida e não vira compatibilidade presumida.
 12. **Custo:** conhecido, desconhecido ou zero — registrado como tal, com teto por tentativa quando pago.
 13. **Evidência de execução:** para qualquer promoção a `VERIFIED`, registrar OS/hardware exatos, versão do componente, inputs/fixtures, outputs com hash, testes executados e responsável pela revisão.
+14. **Licença derivada (acrescentado na T9, 2026-11-12 UTC):** verificar se o código **deriva** de componente restrito, lendo **cabeçalhos de arquivo** e não apenas a licença da capa. Caso verificado: `VAST-AI-Research/TripoSG` e `HoloPart` são MIT na capa, mas o transformer é "based on Tencent HunyuanDiT … portions copied or adapted" e a atenção carrega FlashVDM (mesma família de licença) — **código derivado de componente restrito herda a restrição**.
+15. **Propagação de restrição por linhagem (acrescentado na T9):** se um componente admitido carrega restrição (territorial, não comercial, de atribuição), **toda versão derivada da sua saída herda a marca** até o fim da cadeia, com registro na proveniência e **recusa de exportação** sem confirmação explícita da pessoa. Precedente observado: motor experimental cercado por venv própria, aceite explícito das cláusulas citadas, confirmação de residência, exclusão de qualquer preset e exportação recusada.
+16. **Inventário de licenças por componente + teste (acrescentado na T9):** manter inventário com `name`, `kind` (`code`/`weights`/`tool`/`data`), `license`, `commercial`, e opcionalmente `region_note`, `attribution`, `flag`, `experimental`; **um teste automatizado** que afirma que o conjunto **padrão** é comercialmente limpo; e **tags de licença copiadas para a proveniência de cada passo**, de modo que a licença viaje com o artefato.
 
 ## 4. Processo de revisão
 
@@ -109,6 +112,9 @@ Esta documentação já usa dois conjuntos de rótulos. A política **não** cri
 6. **Conteúdo patrocinado e links de afiliado** são sinalizados como tal e não sustentam conclusão técnica.
 7. **Copyleft é compatível com processo separado**, não com linkagem ou redistribuição sem revisão.
 8. **Licença não comercial em qualquer componente da cadeia** impede `ADMIT` para produto com uso comercial, independentemente da licença do código da Forge.
+9. **Existe caminho tecnicamente equivalente sem componente não comercial** — verificado na T9: `nvdiffrast`/`nvdiffrec` (não comerciais) são substituíveis por `JeffreyXiang/CuMesh` + `JeffreyXiang/FlexGEMM` + `o_voxel` (MIT) com rasterizador pure-torch; `MeshInspector/MeshLib` (não comercial/educacional) é substituível por `elalish/manifold` (Apache-2.0); `FLUX.2 [klein] 9B` (não comercial) tem variante **4B Apache-2.0**. Antes de `REJECT` por licença, procurar a alternativa limpa.
+10. **Modelo *gated* exige aceite humano e pessoal** (DINOv3, SAM 3, Llama 3). O produto não aceita em nome do usuário. "Espelho não gated dos mesmos pesos" é **questão jurídica em aberto**, não solução automática.
+11. **Pesos sem licença declarada ficam bloqueados** independentemente de popularidade: `Aero-Ex/Trellis2-GGUF` tem 66 mil downloads/mês e **nenhum model card**.
 
 ## 7. O que esta política não faz
 
