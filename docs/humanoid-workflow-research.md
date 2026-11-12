@@ -1,5 +1,7 @@
 # Fluxo humanoide: auditoria, contrato, providers e validação
 
+> Documento de pesquisa delimitado ao caso humanoide, não arquitetura universal. Para a fonte de verdade por capability, consulte [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md); para múltiplas categorias/rotas, consulte [`ASSET-PIPELINES.md`](ASSET-PIPELINES.md). As seções históricas sobre o renderer Mixamo/Blender pertencem a uma tarefa anterior separada e **não foram retomadas nem executadas** nesta consolidação.
+
 **Revisado em:** 2026-11-02
 
 **Escopo:** primeira fatia para personagem humanoide estilizado de corpo inteiro. Este documento separa capacidades observadas em código de etapas apenas contratadas. Nenhum provider foi selecionado ou executado; não houve instalação, download de pesos, aceite de licença, envio de dados ou chamada paga.

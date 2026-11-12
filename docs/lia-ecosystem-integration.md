@@ -1,6 +1,8 @@
 # Lia Forge no ecossistema Lia
 
-Atualizado em 2026-11-02. Esta é a adaptação do kit `docs/Lia.zip` ao app já existente: **Electron + React/Vite**, com um launcher de desenvolvimento auxiliar em Python. O kit Windows é referência, não um comando para trocar a stack.
+Atualizado em 2026-11-06. Esta é a adaptação do kit `docs/Lia.zip` ao app já existente: **Electron + React/Vite**, com um launcher de desenvolvimento auxiliar em Python. O kit Windows é referência, não um comando para trocar a stack.
+
+> A visão e arquitetura-alvo foram consolidadas em [`PRODUCT-ARCHITECTURE.md`](PRODUCT-ARCHITECTURE.md); o estado real por arquivo está em [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md); marcos estão em [`MASTER-ROADMAP.md`](MASTER-ROADMAP.md). Esta página continua sendo a fonte de políticas do ecossistema Lia e paths atuais.
 
 ## Princípios adotados
 

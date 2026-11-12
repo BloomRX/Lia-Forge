@@ -1,5 +1,7 @@
 # Lia Forge + ComfyUI
 
+> Esta página descreve o adapter ComfyUI específico e a pesquisa de setup; não define o Hub geral nem prova compatibilidade GPU. Veja [`TOOL-PROVIDER-HUB.md`](TOOL-PROVIDER-HUB.md), [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md) e [`MASTER-ROADMAP.md`](MASTER-ROADMAP.md).
+
 ## Estado e limites
 
 A Lia Forge consulta uma instância ComfyUI configurada (conexão, fila, dispositivos reportados e nomes de checkpoints/LoRAs/VAEs/ControlNet). Além disso, na etapa **Referências** do Asset Studio, a pessoa pode iniciar explicitamente um dos dois workflows de conceito, escolher um checkpoint já listado como instalado e acompanhar a geração. O prompt usa o brief e a descrição do asset; o PNG retornado é salvo dentro da pasta do asset, verificado por assinatura, estrutura de chunks, CRCs, IHDR, dados IDAT e encerramento IEND, e registrado como output real da etapa. A configuração de modelos do pack continua vazia (`models: []`): não há seleção padrão nem download automático.
@@ -53,7 +55,7 @@ Os dois exemplos estão em `workflows/comfyui/` e também aparecem na tela **Ati
 
 São grafos API simples (`CheckpointLoaderSimple → CLIPTextEncode → KSampler → VAEDecode → SaveImage`), sem pesos. O formato API é próprio para envio ao servidor e não contém o layout visual completo do canvas. No ComfyUI, workflows de canvas podem ser exportados por **File → Export Workflow (API)**.
 
-Os prompts de conceito são apenas um primeiro rascunho: modelos de imagem podem variar identidade, pose, proporções e vistas. Depois de receber e validar o PNG, a Lia Forge conclui somente a etapa de referência visual; a revisão de qualidade/consistência continua com a pessoa. Uma imagem não conclui modelo 3D, rig, animações ou spritesheet. O workflow atual é text-to-image: referências de imagem existentes não são enviadas nem usadas como condicionamento.
+Os prompts de conceito são apenas um primeiro rascunho: modelos de imagem podem variar identidade, pose, proporções e vistas. Depois de receber e validar o PNG, a Lia Forge o registra como progresso parcial; a prancha de referências só pode ser concluída quando houver três caminhos de imagem distintos para frente, perfil e costas. Essa contagem não prova a semântica nem a qualidade das vistas: a revisão continua com a pessoa. Uma imagem não conclui a prancha, o modelo 3D, rig, animações ou spritesheet. O workflow atual é text-to-image: referências de imagem existentes não são enviadas nem usadas como condicionamento.
 
 ## Detecção de hardware e escolha do backend
 

@@ -9,6 +9,10 @@ contextBridge.exposeInMainWorld('liaForge', Object.freeze({
   skipOptionalAssetStage: (payload) => ipcRenderer.invoke('lia-forge:assets:manual:skip-stage', payload),
   renderSpritesheetFromExistingModel: (payload) => ipcRenderer.invoke('lia-forge:assets:auto:render-spritesheet', payload),
   generateComfyUiConcept: (payload) => ipcRenderer.invoke('lia-forge:assets:auto:generate-concept', payload),
+  getHumanoidWorkflowPlan: (payload) => ipcRenderer.invoke('lia-forge:workflow:humanoid:plan', payload),
+  listWorkflowRuns: () => ipcRenderer.invoke('lia-forge:workflow:runs:list'),
+  readWorkflowRun: (runId) => ipcRenderer.invoke('lia-forge:workflow:runs:read', runId),
+  resumeBlenderWorkflowRun: (payload) => ipcRenderer.invoke('lia-forge:workflow:runs:resume-blender', payload),
   onWorkflowEvent: (callback) => {
     if (typeof callback !== 'function') return () => {};
     const listener = (_event, payload) => callback(payload);

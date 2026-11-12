@@ -91,6 +91,37 @@ try {
   }), /não aparece na lista/);
   assert.equal(promptCount, 0, 'An uninstalled checkpoint must never be submitted.');
 
+  const redirectServer = http.createServer((request, response) => {
+    if (request.method === 'GET' && request.url === '/models/checkpoints') {
+      response.setHeader('Content-Type', 'application/json');
+      response.end(JSON.stringify(['mock-checkpoint.safetensors']));
+      return;
+    }
+    if (request.method === 'POST' && request.url === '/prompt') {
+      response.statusCode = 307;
+      response.setHeader('Location', `http://127.0.0.1:${port}/prompt`);
+      response.end();
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise((resolve) => redirectServer.listen(0, '127.0.0.1', resolve));
+  try {
+    const redirectPort = redirectServer.address().port;
+    process.env.COMFYUI_URL = `http://127.0.0.1:${redirectPort}`;
+    await assert.rejects(runComfyUiConcept({
+      workflowId: 'item-concept',
+      prompt: 'A private prompt that must not follow a redirect.',
+      checkpoint: 'mock-checkpoint.safetensors',
+      outputDirectory: path.join(tempDir, 'redirect-blocked'),
+    }), (error) => error instanceof Error);
+    assert.equal(promptCount, 0, 'A redirected POST must not forward the workflow or prompt to another destination.');
+  } finally {
+    await new Promise((resolve) => redirectServer.close(resolve));
+    process.env.COMFYUI_URL = `http://127.0.0.1:${port}`;
+  }
+
   const progress = [];
   const generation = await runComfyUiConcept({
     workflowId: 'item-concept',

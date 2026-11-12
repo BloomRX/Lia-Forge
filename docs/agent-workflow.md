@@ -1,6 +1,8 @@
 # Contrato de agent handoff
 
-A Lia Forge separa o **brief do asset**, a **orquestração** e os **adapters de ferramentas**. No desktop, o usuário pode exportar o brief, produzir em ferramentas próprias e registrar outputs reais sem agente. Se escolher delegar, a UI/MCP exporta a tarefa; o game agent (Claude Code, Codex, OpenCode ou outro) coordena subagents e ferramentas no ambiente local do projeto.
+> Este é o contrato de delegação opcional, não a especificação do Intelligent Orchestrator nem prova de que a Forge executou um agente. Veja [`INTELLIGENT-ORCHESTRATOR.md`](INTELLIGENT-ORCHESTRATOR.md), [`WORKFLOW-ENGINE.md`](WORKFLOW-ENGINE.md) e a matriz atual em [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md).
+
+A Lia Forge separa o **brief do asset**, a **orquestração-alvo** e os **adapters de ferramentas**. No desktop, o usuário pode exportar o brief, produzir em ferramentas próprias e registrar outputs reais sem agente. Se escolher delegar, a UI/MCP exporta a tarefa; o game agent (Claude Code, Codex, OpenCode ou outro) coordena subagents e ferramentas no ambiente local do projeto.
 
 ## Entrada
 
@@ -19,7 +21,7 @@ O browser não deve tentar chamar providers diretamente. Referências do usuári
 
 Task spec v2 usa `asset.startStageIndex` (zero-based) para indicar a primeira etapa desta execução e `asset.existingInputs[]` para indicar arquivos existentes (`path`, relativo à raiz do projeto, e `stageIndex`, etapa que produziu o arquivo). O runner deve validar que cada path existe, é legível e permanece dentro do projeto antes de usar. Caminhos inválidos bloqueiam a preparação do handoff MCP.
 
-As etapas anteriores ao ponto de entrada aparecem com `execution: "skip"`. Isso significa **fora do escopo desta tarefa**, não “concluída”; não regenere, não reescreva e não atualize como completas. Quando um novo estágio for concluído, só então registre outputs reais e existentes com `spriteforge_update_stage`. Ao verificar dependências, o MCP exige conclusão apenas das etapas desde o ponto de entrada (além de exigir outputs reais da etapa a marcar).
+As etapas anteriores ao ponto de entrada aparecem com `execution: "skip"`. Isso significa **fora do escopo desta tarefa**, não “concluída”; não regenere, não reescreva e não atualize como completas. Quando um novo estágio for concluído, só então registre outputs reais e existentes com `spriteforge_update_stage`. A prancha de referências precisa de três caminhos de imagem distintos; um conceito isolado do ComfyUI permanece parcial. A contagem não verifica se as imagens são realmente frente/perfil/costas. Status legado com menos de três caminhos não desbloqueia o avanço normal, e os arquivos existentes não são apagados nem migrados automaticamente. Ao verificar dependências, o MCP exige conclusão apenas das etapas desde o ponto de entrada (além de exigir outputs reais da etapa a marcar).
 
 Pontos de entrada 3D → 2D atuais: prompt/brief; brief pronto; conceito/vistas/poses 2D; modelo 3D; modelo rigado com animações. A ferramenta ainda não executa Code → 2D, Manequim → 2D ou produção de ambientes; isso está listado em [`usage-workflows.md`](./usage-workflows.md).
 

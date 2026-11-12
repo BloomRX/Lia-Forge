@@ -51,6 +51,21 @@ function stageLabel(assetType, stageIndex) {
   return labels[stageIndex];
 }
 
+function countReferenceImageOutputs(outputPaths) {
+  if (!Array.isArray(outputPaths)) return 0;
+  const imagePaths = outputPaths
+    .filter((outputPath) => typeof outputPath === 'string' && IMAGE_EXTENSIONS.includes(path.extname(outputPath).slice(1).toLowerCase()))
+    .map((outputPath) => path.posix.normalize(outputPath.replace(/\\/g, '/')).toLocaleLowerCase('en-US'));
+  return new Set(imagePaths).size;
+}
+
+function assertThreeReferenceImages(outputPaths) {
+  if (countReferenceImageOutputs(outputPaths) < 3) {
+    throw new Error('A prancha de referências salva não tem três caminhos de imagem distintos; revise ou registre frente, perfil e costas antes de avançar. Os outputs existentes foram preservados.');
+  }
+  return true;
+}
+
 function stageFilters(assetType, stageIndex) {
   if (!STAGE_FOLDERS[assetType] || !Number.isInteger(stageIndex) || stageIndex < 0 || stageIndex > 4) {
     throw new Error('Etapa manual inválida.');
@@ -64,7 +79,7 @@ function stageFilters(assetType, stageIndex) {
   return [{ name: 'Spritesheet e metadados', extensions: ['png', 'json'] }];
 }
 
-function validateStageOutputs(assetType, stageIndex, outputPaths) {
+function validateStageOutputs(assetType, stageIndex, outputPaths, { allowSingleConcept = false } = {}) {
   if (!Array.isArray(outputPaths) || outputPaths.length === 0) {
     throw new Error('Selecione ao menos um arquivo real para registrar esta etapa.');
   }
@@ -72,8 +87,14 @@ function validateStageOutputs(assetType, stageIndex, outputPaths) {
   if (stageIndex === 0 && !extensions.has('md')) {
     throw new Error('O brief precisa ser um arquivo Markdown (.md).');
   }
-  if (stageIndex === 1 && ![...extensions].some((extension) => IMAGE_EXTENSIONS.includes(extension))) {
-    throw new Error('Selecione ao menos uma imagem de referência (.png, .jpg, .jpeg ou .webp).');
+  if (stageIndex === 1) {
+    const referenceImageCount = countReferenceImageOutputs(outputPaths);
+    const minimumImages = allowSingleConcept ? 1 : 3;
+    if (referenceImageCount < minimumImages) {
+      throw new Error(allowSingleConcept
+        ? 'Selecione uma imagem de conceito real (.png, .jpg, .jpeg ou .webp).'
+        : 'A prancha de referências precisa conter ao menos três imagens reais (frente, perfil e costas).');
+    }
   }
   if (stageIndex === 2 && ![...extensions].some((extension) => MODEL_EXTENSIONS.includes(extension))) {
     throw new Error('Selecione ao menos um modelo 3D (.blend, .glb, .gltf, .fbx, .obj ou .stl).');
@@ -96,5 +117,7 @@ module.exports = {
   stageDirectory,
   stageFilters,
   stageLabel,
+  countReferenceImageOutputs,
+  assertThreeReferenceImages,
   validateStageOutputs,
 };

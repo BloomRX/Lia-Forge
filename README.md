@@ -4,7 +4,17 @@ A Lia Forge foi pensada para **facilitar a criação de assets de jogos**. No fl
 
 Como parte do ecossistema Lia, o app permanece autônomo: não depende da Lia Waifu, de agente externo, conta ou conexão permanente à internet. Não existe uma ponte funcional com a Waifu neste repositório. O nome e os ícones da marca não fazem parte da licença MIT do código. Consulte [`docs/lia-ecosystem-integration.md`](docs/lia-ecosystem-integration.md), [`LICENSE`](LICENSE) e [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
-**Estado atual:** há duas fatias automáticas explícitas, ainda sem fluxo completo: gerar uma imagem de conceito no ComfyUI usando um checkpoint já instalado que a pessoa escolhe, e renderizar spritesheet + metadados no Blender a partir de um modelo 3D existente. A cadeia prompt → 3D → rig/animação → 2D, geração de modelos e rigging continuam pendentes. Veja [`docs/usage-workflows.md`](docs/usage-workflows.md) e [`docs/product-gap-analysis.md`](docs/product-gap-analysis.md).
+**Estado atual:** há duas fatias automáticas explícitas, ainda sem fluxo completo: gerar uma imagem de conceito no ComfyUI usando um checkpoint já instalado que a pessoa escolhe, e renderizar spritesheet + metadados no Blender a partir de um modelo 3D existente. Foi adicionado um contrato provider-neutral para personagem humanoide (vistas → modelo → rig → animações → spritesheet), com persistência, validação e autorização; as etapas de provider continuam bloqueadas porque nenhum foi escolhido ou integrado. Veja [`docs/humanoid-workflow-research.md`](docs/humanoid-workflow-research.md), [`docs/usage-workflows.md`](docs/usage-workflows.md) e [`docs/product-gap-analysis.md`](docs/product-gap-analysis.md).
+
+## Documentação e fonte de verdade
+
+- [`docs/README.md`](docs/README.md) — índice e precedência dos documentos.
+- [`docs/IMPLEMENTATION-AUDIT.md`](docs/IMPLEMENTATION-AUDIT.md) — matriz do que existe no código, evidências, testes e limitações.
+- [`docs/PRODUCT-ARCHITECTURE.md`](docs/PRODUCT-ARCHITECTURE.md) e [`docs/ASSET-PIPELINES.md`](docs/ASSET-PIPELINES.md) — visão-alvo, módulos e rotas diversas; não são declarações de implementação.
+- [`docs/WORKFLOW-ENGINE.md`](docs/WORKFLOW-ENGINE.md), [`docs/INTELLIGENT-ORCHESTRATOR.md`](docs/INTELLIGENT-ORCHESTRATOR.md) e [`docs/TOOL-PROVIDER-HUB.md`](docs/TOOL-PROVIDER-HUB.md) — contratos e fronteiras dos módulos-alvo.
+- [`docs/SKILLS-KNOWLEDGE-ENGINE.md`](docs/SKILLS-KNOWLEDGE-ENGINE.md), [`docs/ASSET-MANAGEMENT.md`](docs/ASSET-MANAGEMENT.md) e [`docs/VISUAL-QA-BENCHMARK.md`](docs/VISUAL-QA-BENCHMARK.md) — skills, provenance/versionamento e QA/comparação.
+- [`docs/EXTERNAL-REPOSITORY-RESEARCH.md`](docs/EXTERNAL-REPOSITORY-RESEARCH.md) — pesquisa individual dos nove repositórios indicados.
+- [`docs/MASTER-ROADMAP.md`](docs/MASTER-ROADMAP.md) e [`docs/DECISIONS-AND-OPEN-QUESTIONS.md`](docs/DECISIONS-AND-OPEN-QUESTIONS.md) — marcos não lineares e decisões pendentes.
 
 ## Abrir em janela desktop
 
@@ -75,6 +85,7 @@ Se o downloader do bootstrap vier a receber pesos configurados, ele usará a pas
 - Indicadores de atividade local, tarefas registradas via MCP, fila ComfyUI e dispositivos reportados.
 - Geração explícita de conceito pelo ComfyUI: checkpoint escolhido da lista instalada, progresso real e PNG salvo/verificado na pasta de referências; não baixa pesos.
 - Renderização explícita via Blender de spritesheet + JSON a partir de modelo 3D já registrado; valida dimensões do atlas, metadados e retângulos dos frames antes de concluir a etapa.
+- Infraestrutura provider-neutral para runs: contratos de I/O, estados, logs, gates de autorização/revisão, verificações reais de formatos/checksums e retomada compatível; sem providers humanoides configurados, o plano permanece bloqueado.
 - Modo sem agente na interface desktop: abra Blender (incluindo instalação Steam), ComfyUI local ou outro aplicativo instalado; o brief exporta `brief.md` e outputs manuais podem ser registrados. Nada é instalado automaticamente.
 - Handoff estruturado opcional para Claude Code, Codex, OpenCode ou outro agente, com JSON de tarefa e contrato de saídas.
 - Servidor MCP opcional para briefs, tarefas e validação de saídas reais; ferramentas `spriteforge_*` mantidas por compatibilidade.
@@ -82,7 +93,7 @@ Se o downloader do bootstrap vier a receber pesos configurados, ele usará a pas
 
 ## Limites atuais
 
-A Lia Forge não inicia agentes e ainda não executa a cadeia completa prompt → 3D → 2D. A geração ComfyUI limita-se a PNG de conceito; o Blender exige modelo existente e, para personagem, ações de animação compatíveis. Não há geração de modelo 3D, rigging, criação de animações, rotas Code → 2D/Manequim → 2D ou cenários. As verificações de arquivo não substituem revisão visual, checagem de pixels transparentes (o Blender só confirma que o PNG declara canal alpha), qualidade artística, consistência das vistas nem validação semântica de modelo/rig. O MCP continua opcional.
+A Lia Forge não inicia agentes e ainda não executa a cadeia completa prompt → 3D → 2D. O contrato humanoide/provider-neutral existe, mas geração de vistas/modelo 3D, auto-rig e criação de animações não têm adapters/providers selecionados ou executáveis. A geração ComfyUI limita-se a PNG de conceito; o Blender exige modelo existente e, para personagem, ações de animação compatíveis. Code → 2D, Manequim → 2D e cenários continuam ausentes. As verificações de arquivo não substituem revisão visual, checagem de pixels transparentes (o Blender só confirma que o PNG declara canal alpha), qualidade artística, consistência das vistas nem validação semântica de modelo/rig. Build/UI desta fatia e execução Blender real não foram validados neste sandbox. O MCP continua opcional.
 
 Nenhum peso, licença ou GPU é presumido.
 
@@ -106,8 +117,3 @@ npm test
 python -m unittest discover -s tests -v
 npm run build
 ```
-
-
-## Padrão comum da marca
-
-Consulte [`docs/BRAND-STANDARDS.md`](docs/BRAND-STANDARDS.md) para identidade, linguagem, licenças e princípios transversais. `docs/guia-externo/00-PADRAO-DA-MARCA.md` continua sendo referência de distribuição/armazenamento desktop; não é o design system geral da marca.

@@ -54,6 +54,7 @@ async function request(endpoint, pathname, { method = 'GET', body, signal, heade
       headers: { Accept: 'application/json', ...headers },
       body,
       signal: controller.signal,
+      redirect: 'error',
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const declaredLength = Number(response.headers.get('content-length') || 0);

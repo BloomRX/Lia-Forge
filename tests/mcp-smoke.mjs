@@ -89,6 +89,15 @@ try {
     arguments: { assetId: asset.id, sourcePath: 'incoming/sketch.png' },
   }));
   assert.equal(reference.reference, `.spriteforge/assets/${asset.id}/references/sketch.png`);
+  const viewReferences = [reference];
+  for (const view of ['profile', 'back']) {
+    const filename = `${view}.png`;
+    await fs.writeFile(path.join(referenceDirectory, filename), Buffer.from(`synthetic ${view} view`));
+    viewReferences.push(parseResult(await client.callTool({
+      name: 'spriteforge_add_reference',
+      arguments: { assetId: asset.id, sourcePath: `incoming/${filename}` },
+    })));
+  }
 
   const prepared = parseResult(await client.callTool({
     name: 'spriteforge_prepare_task',
@@ -125,16 +134,57 @@ try {
   }));
   assert.equal(completedBrief.status, 'completed');
 
+  const incompleteViews = await client.callTool({
+    name: 'spriteforge_update_stage',
+    arguments: { assetId: asset.id, stageIndex: 1, status: 'completed', outputs: [reference.reference] },
+  });
+  assert.equal(incompleteViews.isError, true, 'one concept image must not complete a three-view reference stage');
+
   const completedViews = parseResult(await client.callTool({
     name: 'spriteforge_update_stage',
     arguments: {
       assetId: asset.id,
       stageIndex: 1,
       status: 'completed',
-      outputs: [reference.reference],
+      outputs: viewReferences.map((item) => item.reference),
     },
   }));
   assert.equal(completedViews.status, 'completed');
+
+  const assetStorePath = path.join(temporaryRoot, '.spriteforge', 'assets.json');
+  const legacyStore = JSON.parse(await fs.readFile(assetStorePath, 'utf8'));
+  const legacyAsset = legacyStore.assets.find((candidate) => candidate.id === asset.id);
+  legacyAsset.stageStatus[1] = { status: 'completed', outputs: [reference.reference], note: 'Legacy one-image completion.' };
+  legacyAsset.completed[1] = true;
+  await fs.writeFile(assetStorePath, `${JSON.stringify(legacyStore, null, 2)}\n`);
+
+  const legacyPrepared = parseResult(await client.callTool({
+    name: 'spriteforge_prepare_task',
+    arguments: { assetId: asset.id, agent: 'agnostic' },
+  }));
+  const legacyTask = JSON.parse(await fs.readFile(path.join(temporaryRoot, legacyPrepared.task), 'utf8'));
+  assert.equal(legacyTask.asset.startStageIndex, 1, 'a legacy one-image completion resumes at the incomplete references stage');
+  assert.deepEqual(legacyTask.workflow.map((stage) => stage.execution), ['skip', 'run', 'run', 'run', 'run']);
+
+  const legacyModelOutput = `${asset.outputPath}/3d/model.glb`;
+  const legacyModelAbsolute = path.join(temporaryRoot, legacyModelOutput);
+  await fs.mkdir(path.dirname(legacyModelAbsolute), { recursive: true });
+  await fs.writeFile(legacyModelAbsolute, Buffer.from('synthetic existing model'));
+  const legacyAdvance = await client.callTool({
+    name: 'spriteforge_update_stage',
+    arguments: { assetId: asset.id, stageIndex: 2, status: 'completed', outputs: [legacyModelOutput] },
+  });
+  assert.equal(legacyAdvance.isError, true, 'a stale one-image reference status cannot unlock downstream completion');
+  assert.match(legacyAdvance.content?.find((part) => part.type === 'text')?.text || '', /status salvo.*três imagens/i);
+  const preservedLegacyStore = JSON.parse(await fs.readFile(assetStorePath, 'utf8'));
+  const preservedLegacyAsset = preservedLegacyStore.assets.find((candidate) => candidate.id === asset.id);
+  assert.deepEqual(preservedLegacyAsset.stageStatus[1].outputs, [reference.reference], 'legacy artifacts are retained when progression is blocked');
+
+  const restoredViews = parseResult(await client.callTool({
+    name: 'spriteforge_update_stage',
+    arguments: { assetId: asset.id, stageIndex: 1, status: 'completed', outputs: viewReferences.map((item) => item.reference) },
+  }));
+  assert.equal(restoredViews.status, 'completed', 're-registering three real paths restores the reference-stage completion');
 
   const resumedPrepared = parseResult(await client.callTool({
     name: 'spriteforge_prepare_task',
@@ -144,7 +194,7 @@ try {
   assert.equal(resumedTask.asset.startStageIndex, 2, 'handoff resumes at the first stage without verified outputs');
   assert.deepEqual(resumedTask.asset.existingInputs.map((input) => input.path), [
     `${asset.outputPath}/brief.md`,
-    reference.reference,
+    ...viewReferences.map((item) => item.reference),
   ]);
   assert.deepEqual(resumedTask.workflow.map((stage) => stage.execution), ['skip', 'skip', 'run', 'run', 'run']);
   assert.equal(resumedPrepared.brief, null, 'resuming after completed brief does not recreate it');

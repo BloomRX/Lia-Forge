@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { assetCompletionFlags, isLegacyIncompleteReferenceCompletion } from './asset-progress.js';
 import {
   Activity,
   ArrowRight,
@@ -32,6 +33,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Server,
   Settings2,
   ShieldCheck,
   Sparkles,
@@ -123,7 +125,7 @@ const SEED_ASSETS = [
 
 const CHARACTER_STAGES = [
   { id: 'direction', short: 'Brief', title: 'Direção de arte', description: 'Defina a identidade visual, a silhueta e as regras que mantêm o personagem consistente.', icon: FileText, output: 'brief.md' },
-  { id: 'references', short: 'Referências', title: 'Prancha de referências', description: 'Frente, ¾, perfil e costas — mesma escala, pose neutra e paleta em todas as vistas.', icon: Image, output: 'references/*.png' },
+  { id: 'references', short: 'Referências', title: 'Prancha de referências', description: 'Frente, perfil e costas — mesma escala, pose neutra e paleta em todas as vistas.', icon: Image, output: 'references/*.png' },
   { id: 'model', short: 'Modelo 3D', title: 'Modelo 3D', description: 'Crie um modelo otimizado para jogo, alinhado com as referências e pronto para rigging.', icon: Box, output: 'model.glb' },
   { id: 'rig', short: 'Rig & animação', title: 'Rig & animação', description: 'Prepare o esqueleto e os clips solicitados; Mixamo, Blender ou outro adapter.', icon: Activity, output: 'rig/ + animations/' },
   { id: 'spritesheet', short: 'Spritesheet', title: 'Spritesheet 2D', description: 'Renderize animações em câmera e escala fixas, com transparência e metadados.', icon: Layers3, output: 'spritesheet.png + json' },
@@ -137,8 +139,18 @@ const ITEM_STAGES = [
   { id: 'spritesheet', short: 'Spritesheet', title: 'Spritesheet 2D', description: 'Renderize o item com pivô previsível, transparência e metadados por frame.', icon: Layers3, output: 'spritesheet.png + json' },
 ];
 
-const CHAR_ANIMATION_OPTIONS = ['Idle', 'Walk', 'Run', 'Jump', 'Attack', 'Hit', 'Death', 'Emote'];
+const CHAR_ANIMATION_OPTIONS = ['idle', 'walk', 'run', 'jump', 'attack', 'hit', 'death', 'emote'];
 const ITEM_ANIMATION_OPTIONS = ['Idle glow', 'Sway', 'Spin', 'Slash', 'Pulse', 'Pickup'];
+const ANIMATION_LABELS = Object.freeze({ idle: 'Idle', walk: 'Walk', run: 'Run', jump: 'Jump', attack: 'Attack', hit: 'Hit', death: 'Death', emote: 'Emote' });
+const canonicalAnimation = (name) => {
+  const value = String(name || '').trim();
+  const lower = value.toLocaleLowerCase('en-US');
+  return Object.hasOwn(ANIMATION_LABELS, lower) ? lower : value;
+};
+const canonicalAnimations = (values) => Array.isArray(values)
+  ? [...new Set(values.map(canonicalAnimation).filter(Boolean))]
+  : [];
+const animationLabel = (name) => ANIMATION_LABELS[canonicalAnimation(name)] || name;
 const ENTRY_OPTIONS = [
   { id: 'prompt', startStageIndex: 0, sourceStageIndex: null, label: 'Começar pelo prompt / brief', detail: 'A tarefa começa na direção de arte; imagem de referência é opcional.', requiresPath: false },
   { id: 'brief', startStageIndex: 1, sourceStageIndex: 0, label: 'Brief já definido', detail: 'Use o brief atual e comece pela organização das referências.', requiresPath: false },
@@ -307,7 +319,7 @@ function requiredStageCount(asset) {
 }
 
 function statusLabel(asset) {
-  const progress = asset?.completed?.slice(asset?.startStageIndex || 0).filter(Boolean).length || 0;
+  const progress = assetCompletionFlags(asset).slice(asset?.startStageIndex || 0).filter(Boolean).length || 0;
   const required = requiredStageCount(asset);
   if (progress >= required) return 'Pronto';
   if (progress === 0 && (asset?.startStageIndex || 0) > 0) {
@@ -400,7 +412,7 @@ function taskSpecFor(asset, agent, outputPath, animations) {
 function assetForNextHandoff(asset) {
   const stages = stageListFor(asset.type);
   const originalStart = Math.max(0, Math.min(stages.length - 1, Number.isInteger(asset.startStageIndex) ? asset.startStageIndex : 0));
-  const completed = stages.map((_, index) => asset.stageStatus?.[index]?.status === 'completed');
+  const completed = assetCompletionFlags(asset);
   const nextStage = Math.min(firstPending(completed, originalStart, asset.stageStatus || []), stages.length - 1);
   const existingInputs = [...(asset.existingInputs || [])];
   for (let index = originalStart; index < nextStage; index += 1) {
@@ -430,6 +442,7 @@ function App() {
   const [comfyLoading, setComfyLoading] = useState(false);
   const [externalToolStatus, setExternalToolStatus] = useState({});
   const [workflowRun, setWorkflowRun] = useState(null);
+  const [humanoidPlanReport, setHumanoidPlanReport] = useState(null);
   const [toast, setToast] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [assetStoreReady, setAssetStoreReady] = useState(false);
@@ -500,6 +513,20 @@ function App() {
       if (event?.run) setWorkflowRun(event.run);
     });
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!assetStoreReady || !selectedId || workflowRun?.assetId === selectedId || !window.liaForge?.listWorkflowRuns || !window.liaForge?.readWorkflowRun) return undefined;
+    window.liaForge.listWorkflowRuns()
+      .then((runs) => (Array.isArray(runs) ? runs : []).find((run) => run.assetId === selectedId && run.workflowId === 'render-spritesheet-from-existing-3d'))
+      .then(async (summary) => {
+        if (!summary || cancelled) return;
+        const run = await window.liaForge.readWorkflowRun(summary.id);
+        if (!cancelled) setWorkflowRun(run);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [assetStoreReady, selectedId, workflowRun?.assetId]);
 
   useEffect(() => {
     try {
@@ -589,7 +616,7 @@ function App() {
   useEffect(() => {
     window.liaForge?.reportActivities?.(workspaceActivities);
   }, [workspaceActivities]);
-  const completedCount = assets.reduce((total, asset) => total + ((asset.completed || []).slice(asset.startStageIndex || 0).filter(Boolean).length || 0), 0);
+  const completedCount = assets.reduce((total, asset) => total + (assetCompletionFlags(asset).slice(asset.startStageIndex || 0).filter(Boolean).length || 0), 0);
   const completedStages = assets.reduce((total, asset) => total + requiredStageCount(asset), 0);
 
   function notify(message) {
@@ -612,14 +639,14 @@ function App() {
     setKind(nextKind);
     const first = assets.find((asset) => asset.type === nextKind);
     if (first) setSelectedId(first.id);
-    setActiveStage(first ? firstPending(first.completed || [], first.startStageIndex || 0, first.stageStatus || []) : 0);
+    setActiveStage(first ? firstPending(assetCompletionFlags(first), first.startStageIndex || 0, first.stageStatus || []) : 0);
     setPage('studio');
     setSearchTerm('');
   }
 
   function selectAsset(asset) {
     setSelectedId(asset.id);
-    setActiveStage(Math.min(firstPending(asset.completed || [], asset.startStageIndex || 0, asset.stageStatus || []), stageListFor(asset.type).length - 1));
+    setActiveStage(Math.min(firstPending(assetCompletionFlags(asset), asset.startStageIndex || 0, asset.stageStatus || []), stageListFor(asset.type).length - 1));
   }
 
   function saveAsset(nextAsset) {
@@ -631,7 +658,7 @@ function App() {
     });
     setKind(nextAsset.type);
     setSelectedId(nextAsset.id);
-    setActiveStage(Math.min(firstPending(nextAsset.completed || [], nextAsset.startStageIndex || 0, nextAsset.stageStatus || []), stageListFor(nextAsset.type).length - 1));
+    setActiveStage(Math.min(firstPending(assetCompletionFlags(nextAsset), nextAsset.startStageIndex || 0, nextAsset.stageStatus || []), stageListFor(nextAsset.type).length - 1));
     setPage('studio');
     setModalOpen(false);
     setEditingAsset(null);
@@ -639,11 +666,12 @@ function App() {
   }
 
   function addAnimationToSelected(name) {
-    if (!selectedAsset || selectedAsset.animations?.includes(name)) return;
+    const animation = canonicalAnimation(name);
+    if (!selectedAsset || canonicalAnimations(selectedAsset.animations).includes(animation)) return;
     setAssets((current) => current.map((asset) => asset.id === selectedAsset.id
-      ? { ...asset, animations: [...(asset.animations || []), name] }
+      ? { ...asset, animations: [...canonicalAnimations(asset.animations), animation] }
       : asset));
-    notify(`“${name}” foi adicionado à lista de pedidos.`);
+    notify(`“${animationLabel(animation)}” foi adicionado à lista de pedidos.`);
   }
 
   async function completeManualStage(asset, stageIndex) {
@@ -657,7 +685,7 @@ function App() {
       if (result.cancelled) return;
       const updatedAsset = { ...asset, completed: result.completed, stageStatus: result.stageStatus };
       setAssets((current) => current.map((item) => item.id === asset.id ? updatedAsset : item));
-      setActiveStage(Math.min(firstPending(result.completed, asset.startStageIndex || 0, result.stageStatus), stageListFor(asset.type).length - 1));
+      setActiveStage(Math.min(firstPending(assetCompletionFlags(updatedAsset), asset.startStageIndex || 0, updatedAsset.stageStatus), stageListFor(asset.type).length - 1));
       notify(`${result.stage}: arquivos reais conferidos e registrados.`);
     } catch (error) {
       notify(`Não foi possível registrar a etapa: ${error.message || 'erro desconhecido'}`);
@@ -672,7 +700,7 @@ function App() {
       if (result.cancelled) return;
       const updatedAsset = { ...asset, completed: result.completed, stageStatus: result.stageStatus };
       setAssets((current) => current.map((item) => item.id === asset.id ? updatedAsset : item));
-      setActiveStage(Math.min(firstPending(result.completed, asset.startStageIndex || 0, result.stageStatus), stageListFor(asset.type).length - 1));
+      setActiveStage(Math.min(firstPending(assetCompletionFlags(updatedAsset), asset.startStageIndex || 0, updatedAsset.stageStatus), stageListFor(asset.type).length - 1));
       notify(`${result.stage} foi pulada como etapa opcional; nenhum arquivo foi inventado.`);
     } catch (error) {
       notify(`Não foi possível pular a etapa: ${error.message || 'erro desconhecido'}`);
@@ -730,8 +758,8 @@ function App() {
       notify('A execução automática do Blender está disponível na janela desktop da Lia Forge.');
       return;
     }
-    if (workflowRun?.status === 'running') {
-      notify('Já existe uma execução em andamento. Aguarde a etapa terminar antes de iniciar outra.');
+    if (['running', 'awaiting_authorization', 'awaiting_review'].includes(workflowRun?.status)) {
+      notify('Já existe uma execução em andamento ou aguardando autorização/revisão. Resolva essa etapa antes de iniciar outra.');
       return;
     }
     try {
@@ -747,13 +775,46 @@ function App() {
     }
   }
 
+  async function resumeBlenderWorkflow(asset) {
+    if (!window.liaForge?.resumeBlenderWorkflowRun || !workflowRun?.id) {
+      notify('A retomada da etapa Blender está disponível na janela desktop da Lia Forge.');
+      return;
+    }
+    try {
+      await writeWorkspaceAssets(assets);
+      const result = await window.liaForge.resumeBlenderWorkflowRun({ runId: workflowRun.id });
+      const updatedAsset = { ...asset, completed: result.completed, stageStatus: result.stageStatus };
+      setAssets((current) => current.map((item) => item.id === asset.id ? updatedAsset : item));
+      setWorkflowRun(result.run || null);
+      notify(result.run?.reusedSteps?.length ? 'Retomada concluída com artefatos anteriores revalidados; etapas compatíveis não foram repetidas.' : 'Etapa Blender retomada e outputs verificados.');
+    } catch (error) {
+      if (error.run) setWorkflowRun(error.run);
+      notify(`A retomada foi bloqueada ou falhou: ${error.message || 'erro desconhecido'}`);
+    }
+  }
+
+  async function inspectHumanoidPipeline(asset) {
+    if (!window.liaForge?.getHumanoidWorkflowPlan) {
+      notify('O contrato de planejamento do fluxo está disponível na janela desktop da Lia Forge.');
+      return;
+    }
+    try {
+      const report = await window.liaForge.getHumanoidWorkflowPlan({ assetId: asset.id });
+      setHumanoidPlanReport({ assetId: asset.id, ...report });
+      if (report.ready) notify('Contrato validado: os adapters necessários estão registrados. Nenhuma geração foi iniciada.');
+      else notify(`Fluxo bloqueado em ${report.blockedAt}: ${report.blockedReason} Nenhuma etapa foi executada.`);
+    } catch (error) {
+      notify(`Não foi possível inspecionar o contrato humanoide: ${error.message || 'erro desconhecido'}`);
+    }
+  }
+
   async function generateConceptAutomatically(asset, checkpoint) {
     if (!window.liaForge?.generateComfyUiConcept) {
       notify('A geração de conceito pelo ComfyUI está disponível na janela desktop da Lia Forge.');
       return;
     }
-    if (workflowRun?.status === 'running') {
-      notify('Já existe uma execução em andamento. Aguarde a etapa terminar antes de iniciar outra.');
+    if (['running', 'awaiting_authorization', 'awaiting_review'].includes(workflowRun?.status)) {
+      notify('Já existe uma execução em andamento ou aguardando autorização/revisão. Resolva essa etapa antes de iniciar outra.');
       return;
     }
     try {
@@ -762,7 +823,7 @@ function App() {
       const updatedAsset = { ...asset, completed: result.completed, stageStatus: result.stageStatus };
       setAssets((current) => current.map((item) => item.id === asset.id ? updatedAsset : item));
       setWorkflowRun(result.run || null);
-      notify(`ComfyUI salvou e validou ${result.generatedOutputs?.length || 1} concept PNG(s). Revise a imagem; ela ainda não é um modelo 3D.`);
+      notify(`ComfyUI salvou e validou ${result.generatedOutputs?.length || 1} concept PNG(s). A imagem é referência parcial; a prancha só conclui com frente, perfil e costas aprovados.`);
     } catch (error) {
       if (error.run) setWorkflowRun(error.run);
       notify(`A geração de conceito foi bloqueada ou falhou: ${error.message || 'erro desconhecido'}`);
@@ -990,7 +1051,7 @@ function StudioPage({
 }) {
   const progressTotal = Math.round((completedCount / Math.max(completedStages, 1)) * 100);
   const inProduction = assets.filter((asset) => {
-    const count = (asset.completed || []).slice(asset.startStageIndex || 0).filter(Boolean).length;
+    const count = assetCompletionFlags(asset).slice(asset.startStageIndex || 0).filter(Boolean).length;
     return count > 0 && count < requiredStageCount(asset);
   }).length;
   const activeStageData = currentStages[activeStage] || currentStages[0];
@@ -1047,7 +1108,6 @@ function StudioPage({
         <div className="middle-column">
           <StageNavigator
             stages={currentStages}
-            completed={selectedAsset.completed || []}
             activeStage={activeStage}
             onSelect={onSelectStage}
             asset={selectedAsset}
@@ -1056,7 +1116,6 @@ function StudioPage({
             asset={selectedAsset}
             stage={activeStageData}
             stageIndex={activeStage}
-            completed={selectedAsset.completed || []}
             onHandoff={onHandoff}
             onManualComplete={onManualComplete}
             onSkipOptional={onSkipOptional}
@@ -1065,6 +1124,9 @@ function StudioPage({
             onChooseExternalApplication={onChooseExternalApplication}
             onGenerateSpritesheet={onGenerateSpritesheet}
             onGenerateConcept={onGenerateConcept}
+            onInspectHumanoidPlan={inspectHumanoidPipeline}
+            onResumeBlenderWorkflow={resumeBlenderWorkflow}
+            humanoidPlanReport={humanoidPlanReport}
             workflowRun={workflowRun}
             externalToolStatus={externalToolStatus}
             comfyUiConnected={comfyUiConnected}
@@ -1126,24 +1188,27 @@ function hasRegistered3dInput(asset) {
   return paths.some((file) => typeof file === 'string' && /\.(blend|glb|gltf|fbx|obj|stl)$/i.test(file));
 }
 
-function StageNavigator({ stages, completed, activeStage, onSelect, asset }) {
+function StageNavigator({ stages, activeStage, onSelect, asset }) {
   const startAt = Math.max(0, Math.min(stages.length - 1, Number.isInteger(asset.startStageIndex) ? asset.startStageIndex : 0));
-  const first = firstPending(completed, startAt, asset.stageStatus || []);
+  const effectiveCompleted = assetCompletionFlags(asset);
+  const referencesNeedCompletion = startAt <= 1 && !(effectiveCompleted[1] && asset.stageStatus?.[1]?.status === 'completed');
+  const first = firstPending(effectiveCompleted, startAt, asset.stageStatus || []);
   const required = requiredStageCount(asset);
-  const doneCount = completed.slice(startAt).filter(Boolean).length;
+  const doneCount = effectiveCompleted.slice(startAt).filter(Boolean).length;
   return (
     <section className="panel stage-navigator-panel">
       <div className="stage-navigator-head"><div><span className="panel-kicker">FLUXO 3D → 2D</span><strong>{required} etapas a partir daqui</strong></div><button className="mini-icon-button" aria-label="Ver detalhes do fluxo"><MoreHorizontal size={16} /></button></div>
       <div className="stage-steps">
         {stages.map((step, index) => {
           const Icon = step.icon;
-          const done = Boolean(completed[index]);
+          const done = Boolean(effectiveCompleted[index]);
+          const legacyIncompleteReference = index === 1 && index >= startAt && isLegacyIncompleteReferenceCompletion(asset);
           const optionalSkipped = asset.stageStatus?.[index]?.status === 'skipped';
           const provided = inputsForStage(asset, index).length > 0 || (index === 1 && Boolean(asset.referenceName || asset.references?.length));
           const skipped = index < startAt;
-          const locked = !skipped && !optionalSkipped && index > first && !done;
+          const locked = !skipped && !optionalSkipped && index > first && (!done || (referencesNeedCompletion && index > 1));
           const active = activeStage === index;
-          const sublabel = done ? 'Output verificado' : optionalSkipped ? 'Opcional · pulada' : provided ? 'Artefato existente' : skipped ? 'Fora do ponto de entrada' : locked ? 'Na fila' : index === startAt ? 'Ponto de entrada' : active ? 'Em foco' : 'Próxima etapa';
+          const sublabel = legacyIncompleteReference ? 'Prancha incompleta' : done ? 'Output verificado' : optionalSkipped ? 'Opcional · pulada' : provided ? 'Artefato existente' : skipped ? 'Fora do ponto de entrada' : locked ? 'Na fila' : index === startAt ? 'Ponto de entrada' : active ? 'Em foco' : 'Próxima etapa';
           return (
             <button key={step.id || step.short} className={`stage-step ${active ? 'is-active' : ''} ${done ? 'is-done' : ''} ${provided ? 'is-provided' : ''} ${skipped || optionalSkipped ? 'is-skipped' : ''} ${locked ? 'is-locked' : ''}`} onClick={() => onSelect(index)}>
               <span className="stage-step-icon">{done ? <Check size={14} /> : optionalSkipped ? <Circle size={13} /> : <Icon size={15} />}</span>
@@ -1158,20 +1223,23 @@ function StageNavigator({ stages, completed, activeStage, onSelect, asset }) {
   );
 }
 
-function StageWorkspace({ asset, stage, stageIndex, completed, onHandoff, onManualComplete, onSkipOptional, onOpenStageFolder, onOpenTool, onChooseExternalApplication, onGenerateSpritesheet, onGenerateConcept, workflowRun, externalToolStatus, comfyUiConnected, comfyCheckpoints = [], manualModeAvailable, onNotify }) {
+function StageWorkspace({ asset, stage, stageIndex, onHandoff, onManualComplete, onSkipOptional, onOpenStageFolder, onOpenTool, onChooseExternalApplication, onGenerateSpritesheet, onGenerateConcept, onInspectHumanoidPlan, onResumeBlenderWorkflow, humanoidPlanReport, workflowRun, externalToolStatus, comfyUiConnected, comfyCheckpoints = [], manualModeAvailable, onNotify }) {
   const [selectedCheckpoint, setSelectedCheckpoint] = useState('');
   useEffect(() => { setSelectedCheckpoint(''); }, [asset.id]);
   useEffect(() => {
     if (selectedCheckpoint && !comfyCheckpoints.includes(selectedCheckpoint)) setSelectedCheckpoint('');
   }, [comfyCheckpoints, selectedCheckpoint]);
   const startAt = Math.max(0, Math.min(4, Number.isInteger(asset.startStageIndex) ? asset.startStageIndex : 0));
-  const isDone = Boolean(completed[stageIndex]);
-  const stageRunStatus = asset.stageStatus?.[stageIndex]?.status;
+  const effectiveCompleted = assetCompletionFlags(asset);
+  const isDone = Boolean(effectiveCompleted[stageIndex]);
+  const legacyIncompleteReference = stageIndex === 1 && stageIndex >= startAt && isLegacyIncompleteReferenceCompletion(asset);
+  const referencesNeedCompletion = startAt <= 1 && !(effectiveCompleted[1] && asset.stageStatus?.[1]?.status === 'completed');
+  const stageRunStatus = legacyIncompleteReference ? 'in_progress' : asset.stageStatus?.[stageIndex]?.status;
   const optionalSkipped = stageRunStatus === 'skipped';
   const isProvided = inputsForStage(asset, stageIndex).length > 0 || (stageIndex === 1 && Boolean(asset.referenceName || asset.references?.length));
   const isSkipped = stageIndex < startAt;
-  const first = firstPending(completed, startAt, asset.stageStatus || []);
-  const isLocked = !isSkipped && !optionalSkipped && stageIndex > first && !isDone;
+  const first = firstPending(effectiveCompleted, startAt, asset.stageStatus || []);
+  const isLocked = !isSkipped && !optionalSkipped && stageIndex > first && (!isDone || (referencesNeedCompletion && stageIndex > 1));
   const canChangeStage = !isSkipped && !isLocked;
   const providedInputs = inputsForStage(asset, stageIndex);
   const badge = isDone ? 'Output verificado' : optionalSkipped ? 'Opcional ignorada' : stageRunStatus === 'blocked' ? 'Bloqueado' : stageRunStatus === 'failed' ? 'Falha · revisar' : stageRunStatus === 'cancelled' ? 'Cancelado' : stageRunStatus === 'in_progress' ? 'Em andamento' : isProvided ? 'Entrada existente' : isSkipped ? 'Fora do ponto de entrada' : isLocked ? 'Na fila' : stageIndex === startAt ? 'Ponto de entrada' : 'Pendente';
@@ -1179,12 +1247,13 @@ function StageWorkspace({ asset, stage, stageIndex, completed, onHandoff, onManu
   const primaryToolLabel = primaryTool === 'krita' ? 'Krita' : 'Blender';
   const primaryToolStatus = primaryTool ? externalToolStatus?.[primaryTool] : null;
   const activeWorkflowRun = workflowRun?.assetId === asset.id ? workflowRun : null;
+  const workflowIsBusy = ['running', 'awaiting_authorization', 'awaiting_review'].includes(workflowRun?.status);
   const isAutomatedRenderRunning = activeWorkflowRun?.status === 'running' && activeWorkflowRun.workflowId === 'render-spritesheet-from-existing-3d';
   const isConceptWorkflowRunning = activeWorkflowRun?.status === 'running' && activeWorkflowRun.workflowId?.startsWith(`generate-${asset.type}-concept`);
-  const isAnotherWorkflowRunning = workflowRun?.status === 'running' && !isAutomatedRenderRunning && !isConceptWorkflowRunning;
+  const isAnotherWorkflowRunning = workflowIsBusy && !isAutomatedRenderRunning && !isConceptWorkflowRunning;
   const hasRequestedAnimations = Array.isArray(asset.animations) && asset.animations.some((animation) => typeof animation === 'string' && animation.trim());
   const canRenderWithBlender = asset.type === 'item' || hasRequestedAnimations;
-  const currentWorkflowStep = activeWorkflowRun?.steps?.find((step) => step.status === 'in_progress');
+  const currentWorkflowStep = activeWorkflowRun?.steps?.find((step) => step.status === 'running');
 
   return (
     <section className="panel stage-workspace-panel">
@@ -1198,6 +1267,15 @@ function StageWorkspace({ asset, stage, stageIndex, completed, onHandoff, onManu
       </div>
 
       <StagePreview asset={asset} stageIndex={stageIndex} isDone={isDone} />
+
+      {legacyIncompleteReference && <div className="automated-stage-card"><div><strong>Prancha de referências incompleta</strong><small>Um status legado marcou a etapa como concluída com menos de três imagens distintas. Os arquivos cadastrados foram preservados; registre as vistas que faltam ou escolha um ponto de entrada posterior com um modelo existente verificado.</small></div></div>}
+
+      {asset.type === 'character' && stageIndex === 0 && <div className="automated-stage-card workflow-contract-card">
+        <div><strong>Fluxo humanoide ponta a ponta · contrato preparado</strong><small>Brief/prompt → vistas frente/lado/costas → 3D → rigging → animação → 2D. Ainda faltam providers/adapters de vistas, geração 3D, auto-rig e animação; nenhum serviço será chamado e nenhum output será simulado.</small>
+          {humanoidPlanReport?.assetId === asset.id && <span className="automated-stage-hint">{humanoidPlanReport.ready ? 'Contrato pronto para revisão; nenhuma etapa foi executada.' : `Bloqueado em ${humanoidPlanReport.blockedAt}: ${humanoidPlanReport.blockedReason}`}</span>}
+        </div>
+        <button className="button button-quiet" onClick={() => onInspectHumanoidPlan?.(asset)}><ShieldCheck size={13} />Verificar contrato e bloqueios</button>
+      </div>}
 
       {providedInputs.length > 0 && <div className="existing-input-callout"><FolderOpen size={13} /><span><strong>Insumo informado:</strong> {providedInputs.map((input) => input.path).join(' · ')}</span></div>}
       {manualModeAvailable && stageIndex > 0 && <div className="stage-tool-access">
@@ -1231,9 +1309,12 @@ function StageWorkspace({ asset, stage, stageIndex, completed, onHandoff, onManu
           {asset.type === 'character' && !hasRequestedAnimations && <span className="automated-stage-hint">Informe ao menos um nome de animação e confirme que o modelo contém a ação correspondente.</span>}
           {isAutomatedRenderRunning && <span className="automated-stage-progress">{currentWorkflowStep?.note || 'Renderizando no Blender…'}{currentWorkflowStep?.progress > 0 ? ` · ${currentWorkflowStep.progress}%` : ''}</span>}
         </div>
-        <button className="button button-primary" disabled={!canChangeStage || isAutomatedRenderRunning || isAnotherWorkflowRunning || !canRenderWithBlender} onClick={() => onGenerateSpritesheet(asset)}>
-          {isAutomatedRenderRunning ? <RefreshCw className="spin" size={14} /> : <Sparkles size={14} />}{isAutomatedRenderRunning ? 'Gerando…' : 'Gerar com Blender'}
-        </button>
+        <div className="stage-tool-access-actions">
+          <button className="button button-primary" disabled={!canChangeStage || isAutomatedRenderRunning || isAnotherWorkflowRunning || !canRenderWithBlender} onClick={() => onGenerateSpritesheet(asset)}>
+            {isAutomatedRenderRunning ? <RefreshCw className="spin" size={14} /> : <Sparkles size={14} />}{isAutomatedRenderRunning ? 'Gerando…' : 'Gerar com Blender'}
+          </button>
+          {activeWorkflowRun?.workflowId === 'render-spritesheet-from-existing-3d' && ['failed', 'blocked', 'cancelled'].includes(activeWorkflowRun.status) && <button className="button button-quiet" disabled={isAnotherWorkflowRunning} onClick={() => onResumeBlenderWorkflow?.(asset)}><RefreshCw size={13} />Retomar etapa compatível</button>}
+        </div>
       </div>}
       <div className="stage-workspace-footer">
         <div className="stage-output-summary"><div className="output-icon"><FileImage size={15} /></div><div><span>SAÍDA ESPERADA</span><strong>{stage.output}</strong></div><span className="output-format-tag">{stageIndex === 2 ? '3D' : stageIndex === 4 ? '2D' : 'ASSET'}</span></div>
@@ -1325,7 +1406,7 @@ function RigPreview({ asset, isDone }) {
         <div className="rig-bone-tag">{isDone ? 'FILES REGISTERED' : (isCharacter ? 'RIG TARGET' : 'PIVOT TARGET')}</div>
         <div className="rig-scale">SCALE TARGET <span>│</span> PROJECT UNITS</div>
       </div>
-      <div className="rig-controls"><div className="rig-control-info"><span>REQUESTED CLIP / MOVEMENT</span><strong title={(asset.animations || []).join(', ')}>{asset.animations?.[0] || (isCharacter ? 'Idle' : 'Idle glow')}</strong><span className="rig-duration">{isDone ? 'Files registered · inspect in your 3D tool' : 'Static guide · no animation playback'}</span></div></div>
+      <div className="rig-controls"><div className="rig-control-info"><span>REQUESTED CLIP / MOVEMENT</span><strong title={(asset.animations || []).join(', ')}>{animationLabel(asset.animations?.[0] || (isCharacter ? 'idle' : 'Idle glow'))}</strong><span className="rig-duration">{isDone ? 'Files registered · inspect in your 3D tool' : 'Static guide · no animation playback'}</span></div></div>
     </div>
   );
 }
@@ -1358,13 +1439,14 @@ function SpritePreview({ asset, isDone }) {
 function InspectorPanel({ asset, stage, onEdit, onAddAnimation, onNotify }) {
   const [showAllAnimations, setShowAllAnimations] = useState(false);
   const shownAnimations = showAllAnimations ? asset.animations : asset.animations.slice(0, 5);
-  const progress = (asset.completed || []).slice(asset.startStageIndex || 0).filter(Boolean).length;
+  const progress = assetCompletionFlags(asset).slice(asset.startStageIndex || 0).filter(Boolean).length;
   const totalStages = requiredStageCount(asset);
   const directory = asset.outputPath || `game/assets/${asset.type === 'character' ? 'characters' : 'items'}/${slugify(asset.name)}`;
 
   function addAnimation() {
     const available = asset.type === 'character' ? CHAR_ANIMATION_OPTIONS : ITEM_ANIMATION_OPTIONS;
-    const next = available.find((name) => !asset.animations.includes(name));
+    const existing = canonicalAnimations(asset.animations);
+    const next = available.find((name) => !existing.includes(canonicalAnimation(name)));
     if (!next) {
       onNotify('Todas as sugestões de animação já foram adicionadas.');
       return;
@@ -1383,7 +1465,7 @@ function InspectorPanel({ asset, stage, onEdit, onAddAnimation, onNotify }) {
       <div className="inspector-palette"><span>COLOR TOKENS</span><div>{['coat', 'cloak', 'accent', 'skin', 'hair'].map((key) => <i key={key} title={key} style={{ background: asset.palette?.[key] || '#667354' }} />)}</div></div>
       <div className="inspector-divider" />
       <div className="inspector-section-heading"><span>{asset.type === 'character' ? 'ANIMAÇÕES PEDIDAS' : 'MOVIMENTO / VARIAÇÕES'}</span><button onClick={addAnimation}><Plus size={12} /> ADD</button></div>
-      <div className="animation-chip-list">{shownAnimations.map((animation, index) => <span className="animation-chip" key={`${animation}-${index}`}><span className="animation-chip-dot" />{animation}</span>)}{asset.animations.length > 5 && <button className="more-animation-chip" onClick={() => setShowAllAnimations((value) => !value)}>{showAllAnimations ? 'menos' : `+${asset.animations.length - 5}`}</button>}</div>
+      <div className="animation-chip-list">{shownAnimations.map((animation, index) => <span className="animation-chip" key={`${animation}-${index}`}><span className="animation-chip-dot" />{animationLabel(animation)}</span>)}{asset.animations.length > 5 && <button className="more-animation-chip" onClick={() => setShowAllAnimations((value) => !value)}>{showAllAnimations ? 'menos' : `+${asset.animations.length - 5}`}</button>}</div>
       <div className="inspector-divider" />
       <div className="inspector-specs"><div><span>FRAME TARGET</span><strong>{asset.target || '48 × 48 px'}</strong></div><div><span>CAMERA</span><strong>Ortográfica · fixa</strong></div></div>
       <button className="output-path-card" onClick={() => onNotify(`Pasta do asset: ${directory}. Produza manualmente nas suas ferramentas ou use o handoff opcional; registre só arquivos reais verificados.`)}><span className="output-path-icon"><FolderOpen size={14} /></span><span><small>PASTA DE SAÍDA</small><strong>{directory}</strong></span><ArrowUpRight size={13} /></button>
@@ -1502,7 +1584,7 @@ function ItemArtwork({ asset, angle = 'front', className = '' }) {
 function HandoffPage({ assets, selectedAsset, onSelectAsset, onGoToStudio, onNotify }) {
   const [agent, setAgent] = useState('claude');
   const [outputPath, setOutputPath] = useState(selectedAsset.outputPath || `game/assets/${selectedAsset.type === 'character' ? 'characters' : 'items'}/${slugify(selectedAsset.name)}`);
-  const [animations, setAnimations] = useState(selectedAsset.animations || []);
+  const [animations, setAnimations] = useState(() => canonicalAnimations(selectedAsset.animations));
   const [copied, setCopied] = useState(false);
   const handoffAsset = useMemo(() => assetForNextHandoff(selectedAsset), [selectedAsset]);
   const prompt = useMemo(() => makeAgentPrompt(handoffAsset, agent, outputPath, animations), [handoffAsset, agent, outputPath, animations]);
@@ -1511,7 +1593,7 @@ function HandoffPage({ assets, selectedAsset, onSelectAsset, onGoToStudio, onNot
 
   useEffect(() => {
     setOutputPath(selectedAsset.outputPath || `game/assets/${selectedAsset.type === 'character' ? 'characters' : 'items'}/${slugify(selectedAsset.name)}`);
-    setAnimations(selectedAsset.animations || []);
+    setAnimations(canonicalAnimations(selectedAsset.animations));
   }, [selectedAsset.id]);
 
   async function copyPrompt() {
@@ -1568,7 +1650,7 @@ function HandoffPage({ assets, selectedAsset, onSelectAsset, onGoToStudio, onNot
             <button className={agent === 'opencode' ? 'is-selected' : ''} onClick={() => setAgent('opencode')}><span className="agent-choice-icon opencode-icon"><Bot size={15} /></span><span><strong>OpenCode</strong><small>Ollama / modelo local</small></span>{agent === 'opencode' && <CheckCircle2 size={15} />}</button>
             <button className={`agent-choice-wide ${agent === 'agnostic' ? 'is-selected' : ''}`} onClick={() => setAgent('agnostic')}><Terminal size={15} /><span><strong>Prompt genérico</strong><small>para outro agente local</small></span>{agent === 'agnostic' && <CheckCircle2 size={15} />}</button>
           </div></div>
-          <div className="form-field animation-request-field"><div className="form-field-title"><span>{selectedAsset.type === 'character' ? 'ANIMAÇÕES A SOLICITAR' : 'MOVIMENTOS / VARIAÇÕES'}</span><small>{animations.length} selecionadas</small></div><div className="handoff-animation-grid">{animationOptions.map((name) => <button key={name} className={`handoff-animation-option ${animations.includes(name) ? 'checked' : ''}`} onClick={() => toggleAnimation(name)}><span>{animations.includes(name) && <Check size={11} />}</span>{name}</button>)}</div></div>
+          <div className="form-field animation-request-field"><div className="form-field-title"><span>{selectedAsset.type === 'character' ? 'ANIMAÇÕES A SOLICITAR' : 'MOVIMENTOS / VARIAÇÕES'}</span><small>{animations.length} selecionadas</small></div><div className="handoff-animation-grid">{animationOptions.map((name) => <button key={name} className={`handoff-animation-option ${animations.includes(name) ? 'checked' : ''}`} onClick={() => toggleAnimation(name)}><span>{animations.includes(name) && <Check size={11} />}</span>{animationLabel(name)}</button>)}</div></div>
           <div className="handoff-workflow-mini"><div className="mini-workflow-head"><span>PIPELINE 3D → 2D</span><span>{5 - (handoffAsset.startStageIndex || 0)} etapas neste handoff</span></div><div className="mini-workflow-track">{stageListFor(handoffAsset.type).map((step, index) => { const skipped = index < (handoffAsset.startStageIndex || 0); return <div className={`mini-workflow-step ${skipped ? 'is-skipped' : ''}`} key={step.id || step.short}><span className="mini-workflow-node">{index + 1}</span><span>{step.short}</span>{index < 4 && <i />}</div>; })}</div></div>
         </section>
 
@@ -1705,7 +1787,7 @@ function NewAssetModal({ initialAsset, defaultType, storageAvailable, onClose, o
   const [name, setName] = useState(initialAsset?.name || '');
   const [description, setDescription] = useState(initialAsset?.prompt || '');
   const [itemKind, setItemKind] = useState(initialAsset?.itemKind || 'prop');
-  const [animations, setAnimations] = useState(initialAsset?.animations || []);
+  const [animations, setAnimations] = useState(() => canonicalAnimations(initialAsset?.animations));
   const [reference, setReference] = useState(initialAsset?.referenceName || '');
   const [referenceData, setReferenceData] = useState(initialAsset?.referenceData || '');
   const [referencePreview, setReferencePreview] = useState(initialAsset?.referenceData || '');
@@ -1803,7 +1885,7 @@ function NewAssetModal({ initialAsset, defaultType, storageAvailable, onClose, o
           <div className="modal-lower-grid"><div className="form-field"><span>IMAGEM DE REFERÊNCIA <small>OPCIONAL</small></span><button type="button" disabled={referenceProcessing} className={`reference-upload ${dragOver ? 'drag-over' : ''} ${referencePreview ? 'has-file' : ''}`} onClick={() => fileInput.current?.click()} onDragOver={(event) => { event.preventDefault(); setDragOver(true); }} onDragLeave={() => setDragOver(false)} onDrop={(event) => { event.preventDefault(); setDragOver(false); handleFile(event.dataTransfer.files[0]); }}>
             {referencePreview ? <img src={referencePreview} alt="Prévia da referência" /> : <span className="upload-icon"><Upload size={16} /></span>}<span><strong>{reference || 'Arraste uma imagem ou clique para escolher'}</strong><small>{referenceProcessing ? 'Preparando imagem...' : reference ? 'Referência anexada ao briefing' : 'PNG, JPG ou WEBP · mantida localmente'}</small></span><Plus size={15} />
           </button><input ref={fileInput} className="visually-hidden" type="file" accept="image/*" onChange={(event) => handleFile(event.target.files?.[0])} /></div>
-            <div className="form-field modal-animation-field"><div className="form-field-title"><span>{type === 'character' ? 'ANIMAÇÕES INICIAIS' : 'MOVIMENTOS INICIAIS'}</span><small>Você pode editar depois</small></div><div className="modal-animation-options">{animationOptions.slice(0, 6).map((animation) => <button type="button" key={animation} className={animations.includes(animation) ? 'checked' : ''} onClick={() => toggleAnimation(animation)}><i>{animations.includes(animation) && <Check size={10} />}</i>{animation}</button>)}</div></div></div>
+            <div className="form-field modal-animation-field"><div className="form-field-title"><span>{type === 'character' ? 'ANIMAÇÕES INICIAIS' : 'MOVIMENTOS INICIAIS'}</span><small>Você pode editar depois</small></div><div className="modal-animation-options">{animationOptions.slice(0, 6).map((animation) => <button type="button" key={animation} className={animations.includes(animation) ? 'checked' : ''} onClick={() => toggleAnimation(animation)}><i>{animations.includes(animation) && <Check size={10} />}</i>{animationLabel(animation)}</button>)}</div></div></div>
           {!canSubmitEntry && <p className="entry-validation-note">Informe ao menos um caminho existente para este ponto de entrada, ou anexe uma imagem de conceito/poses.</p>}
           <div className="modal-footer"><span><ShieldCheck size={13} /> {storageAvailable ? 'Salvo no workspace local' : 'Salvo neste navegador'}</span><div><button className="button button-quiet" type="button" onClick={onClose}>Cancelar</button><button className="button button-primary" type="submit" disabled={!name.trim() || referenceProcessing || !canSubmitEntry}><Sparkles size={14} />{initialAsset ? 'Salvar briefing' : 'Criar asset'}<ArrowRight size={13} /></button></div></div>
         </form>

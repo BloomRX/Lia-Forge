@@ -162,6 +162,14 @@ function stageDefinitions(type) {
   return type === 'item' ? ITEM_STAGES : CHARACTER_STAGES;
 }
 
+function countDistinctReferenceImages(outputs) {
+  if (!Array.isArray(outputs)) return 0;
+  const imagePaths = outputs
+    .filter((output) => typeof output === 'string' && /\.(?:png|jpe?g|webp)$/i.test(output))
+    .map((output) => path.posix.normalize(output.replace(/\\/g, '/')).toLocaleLowerCase('en-US'));
+  return new Set(imagePaths).size;
+}
+
 function assetForNextPendingStage(asset, stages) {
   const originalStart = Math.max(0, Math.min(stages.length - 1, Number.isInteger(asset.startStageIndex) ? asset.startStageIndex : 0));
   let nextStage = stages.length - 1;
@@ -169,7 +177,8 @@ function assetForNextPendingStage(asset, stages) {
     const state = asset.stageStatus?.[index];
     if (stages[index].optional && state?.status === 'skipped') continue;
     const hasVerifiedOutputs = Array.isArray(state?.outputs) && state.outputs.length > 0;
-    if (state?.status === 'completed' && (hasVerifiedOutputs || stages[index].optional)) continue;
+    const referenceBoardVerified = index !== 1 || countDistinctReferenceImages(state?.outputs) >= 3;
+    if (state?.status === 'completed' && referenceBoardVerified && (hasVerifiedOutputs || stages[index].optional)) continue;
     nextStage = index;
     break;
   }
@@ -540,7 +549,7 @@ registerTool(server, 'spriteforge_prepare_task', {
 
 registerTool(server, 'spriteforge_update_stage', {
   title: 'Atualizar etapa e outputs',
-  description: 'Registra status de etapa do pipeline. Ao concluir, exige caminhos de arquivos que existam dentro da pasta do asset.',
+  description: 'Registra status de etapa do pipeline. Ao concluir, exige arquivos existentes dentro da pasta do asset; a prancha de referências precisa de ao menos três imagens distintas para frente, perfil e costas.',
   inputSchema: {
     assetId: z.string().trim().min(1).max(120),
     stageIndex: z.number().int().min(0).max(4),
@@ -560,8 +569,12 @@ registerTool(server, 'spriteforge_update_stage', {
   }
   if (status === 'completed') {
     for (let previous = startStageIndex; previous < stageIndex; previous += 1) {
+      const previousState = asset.stageStatus?.[previous];
+      if (previous === 1 && previousState?.status === 'completed' && countDistinctReferenceImages(previousState.outputs) < 3) {
+        fail('O status salvo da prancha é legado e registra menos de três imagens distintas. Preserve os outputs, confirme/registe frente, perfil e costas antes de avançar ou selecione um ponto de entrada posterior com modelo existente.');
+      }
       if (definitions[previous].optional) continue;
-      if (asset.stageStatus?.[previous]?.status !== 'completed') {
+      if (previousState?.status !== 'completed') {
         fail(`Registre outputs reais e conclua a etapa ${previous + 1} (${definitions[previous].name}) antes de marcar esta etapa.`);
       }
     }
@@ -584,7 +597,10 @@ registerTool(server, 'spriteforge_update_stage', {
       const stat = await fs.stat(realOutput);
       if (!stat.isFile() && !stat.isDirectory()) fail(`Output não é arquivo ou pasta: ${relativePath}`);
     }
-    verifiedOutputs.push(path.relative(PROJECT_ROOT, output).split(path.sep).join('/'));
+    verifiedOutputs.push(path.relative(PROJECT_ROOT, realOutput).split(path.sep).join('/'));
+  }
+  if (status === 'completed' && stageIndex === 1) {
+    if (countDistinctReferenceImages(verifiedOutputs) < 3) fail('Para concluir a prancha de referências, registre ao menos três imagens distintas: frente, perfil e costas.');
   }
   asset.stageStatus ||= definitions.map(() => ({ status: 'pending', outputs: [], note: '' }));
   asset.stageStatus[stageIndex] = { status, outputs: verifiedOutputs, note };

@@ -14,3 +14,7 @@ __pycache__/
 .claude/skills/
 .claude/worktrees/
 .claude/settings.local.json
+
+# Assets de terceiros/licenciados e renders locais do E2E manual; os helpers e docs ficam versionados.
+local-renderer-test/assets/
+local-renderer-test/output/

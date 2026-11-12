@@ -1,5 +1,7 @@
 # Lia Forge MCP e opção OpenCode + Ollama
 
+> O MCP atual é um handoff/adapter opcional, não o Tool/Provider Hub ou o Intelligent Orchestrator. Veja [`TOOL-PROVIDER-HUB.md`](TOOL-PROVIDER-HUB.md), [`INTELLIGENT-ORCHESTRATOR.md`](INTELLIGENT-ORCHESTRATOR.md) e [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md).
+
 O servidor MCP local da Lia Forge conecta um agente ao workspace do jogo quando o usuário escolhe delegar. **MCP/agente são opcionais:** no desktop, também é possível seguir manualmente, usar as próprias ferramentas e registrar arquivos reais pela UI. O servidor MCP roda por **stdio**: não abre uma porta de rede para o MCP, não chama um provider pago e não gera arte por conta própria. O ID de configuração e os nomes de ferramentas `spriteforge_*` são mantidos para compatibilidade.
 
 ## Instalação em um projeto
