@@ -127,3 +127,19 @@ if (Get-Command vulkaninfo -EA SilentlyContinue) { vulkaninfo --summary } else {
 6. Critério de sucesso **duplo e honesto**: produzir um `.glb` estruturalmente válido **ou** falhar com mensagem identificável (ex.: falta de extensão Vulkan, OOM). **Ambos encerram o `UNKNOWN`.**
 7. Repetir 2× para comparar hashes/tempos e registrar determinismo.
 8. Publicar o resultado como adendo datado a este documento, promovendo (ou não) a rota de `UNKNOWN` para `VERIFIED_ON_TARGET_HARDWARE` / `NOT_FEASIBLE_ON_TARGET`.
+
+
+## 9. Comparação consolidada E3 × E1 (o que foi verificado onde)
+
+| Pergunta do enunciado | Resposta com evidência |
+|---|---|
+| **O que a Forge já executa** | Por execução real nesta tarefa: validação estrutural de spritesheet no contrato 384×144/8×3/24 frames; resolução de nomes de Action; planejador de caminhos/argumentos/pastas de saída; gate de procedência/licença fail-closed; detecção de Blender; 14 testes Node e 29/30 Python. **Render Blender: não executado** (ambiente sem Blender/GPU/Windows e sem `.blend`). |
+| **O que foi verificado no Windows** | **Nada.** Nenhuma execução desta tarefa ocorreu em Windows; o harness `.ps1` sequer é acionável no ambiente do agente. Tudo o que se sabe sobre Windows vem de fontes primárias externas (releases, README), não de medição própria. |
+| **O que foi verificado especificamente na RX 580** | **Nada.** Zero execuções e zero referências a `gfx803`/Polaris em qualquer fonte primária lida. O estado permanece `UNKNOWN`, não "compatível". |
+| **O que depende apenas de CPU** | Na Forge: validadores, manifestos, hashes, planejador e toda a suíte de testes (executados aqui em CPU). No trellis.cpp: o caminho de inferência CPU existe mas é declarado "**very slow, RAM-hungry**"; o postprocess tem **fallback automático de CPU**; os dois kernels próprios caem em CPU onde não há GPU. |
+| **O que depende de Vulkan** | A rota de inferência `--backend Vulkan` do trellis.cpp/pixal3d.cpp (binário Windows publicado; medido pelo autor apenas em gfx1151). Nada na Forge atual depende de Vulkan. |
+| **O que permanece desconhecido** | Hardware/Vulkan do alvo; pico de VRAM/RAM da rota `--res 512`; comportamento de ggml Vulkan em gfx803; efeito real da quantização GGUF sobre o pico (não só sobre o tamanho em disco); termos de serviços hospedados; preços. |
+| **O que pode ser feito localmente** | Todo o pipeline de validação/contrato da Forge (já executado); e, **se** o probe for autorizado e o checklist local confirmar Vulkan, a geração res-512 via binário Vulkan — ainda assim sem garantia em gfx803. |
+| **O que provavelmente precisará de execução remota** | Geração em cascade 1024/2K, texturização 2K com FLUX.2-klein-4B (~13 GB VRAM) e qualquer rota que exceda 8 GB de VRAM — isto é, o núcleo de image→3D de alta resolução (conclusão herdada da T9, não re-medida aqui). |
+
+**Duas advertências mantidas:** (i) o sucesso de E3 **não promove** capacidades 3D completas a disponíveis — E3 valida contrato e validadores, não geração; (ii) **benchmarks de terceiros** (Strix Halo, M5, RTX 5060 Ti, Colab A100/T4) **não são resultados próprios** e são citados apenas como declaração/medição de terceiro.

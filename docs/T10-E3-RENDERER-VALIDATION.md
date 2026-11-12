@@ -167,3 +167,6 @@ Na máquina Windows com Blender instalado, em PowerShell, na raiz do checkout:
 6. Abrir `output/<run>/spritesheet.png` e inspecionar as **24 células** (corpo inteiro, recorte, pés/pivô, escala, poses, diferença semântica entre idle/walk/run).
 7. Repetir a execução e comparar hashes/dimensões/tempos para medir determinismo (§2.5 da tarefa).
 8. Registrar o resultado em `docs/T10-E3-RENDERER-VALIDATION.md` como adendo datado, mantendo a separação entre `VERIFIED_IN_FORGE` e `VERIFIED_ON_TARGET_HARDWARE`.
+
+
+A comparação consolidada **E3 × E1** — o que a Forge já executa, o que foi verificado em Windows (nada), o que foi verificado na RX 580 (nada), o que depende só de CPU, o que depende de Vulkan, o que permanece desconhecido, o que é local e o que exigirá execução remota — está em [`T10-E1-RX580-VULKAN-PREFLIGHT.md`](T10-E1-RX580-VULKAN-PREFLIGHT.md) §9.
