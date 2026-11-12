@@ -12,10 +12,12 @@
     "build": "vite build",
     "desktop": "electron .",
     "postinstall": "install-electron",
-    "test": "node tests/mcp-smoke.mjs && node tests/vite-store-smoke.mjs && node tests/comfyui-client-smoke.mjs && node tests/task-manager-smoke.cjs && node tests/navigation-guard-smoke.cjs && node tests/ipc-guard-smoke.cjs && node tests/asset-progress-smoke.mjs && node tests/manual-artifacts-smoke.cjs && node tests/external-tools-smoke.cjs && node tests/workflow-runner-smoke.cjs && node tests/workflow-run-store-smoke.cjs && node tests/blender-workflow-plan-smoke.cjs && node tests/blender-adapter-smoke.cjs && node tests/lia-paths-smoke.cjs",
+    "test": "node tests/mcp-smoke.mjs && node tests/vite-store-smoke.mjs && node tests/domain-contracts-smoke.mjs && node tests/capability-registry-smoke.mjs && node tests/adapter-sdk-smoke.mjs && node tests/qa-content-smoke.mjs && node tests/imaging-smoke.mjs && node tests/rig2d-vfx-smoke.mjs && node tests/glb-inspect-smoke.mjs && node tests/preflight-destinations-smoke.mjs && node tests/production-pipeline-smoke.mjs && node tests/comfyui-client-smoke.mjs && node tests/task-manager-smoke.cjs && node tests/navigation-guard-smoke.cjs && node tests/ipc-guard-smoke.cjs && node tests/asset-progress-smoke.mjs && node tests/manual-artifacts-smoke.cjs && node tests/external-tools-smoke.cjs && node tests/workflow-runner-smoke.cjs && node tests/workflow-run-store-smoke.cjs && node tests/blender-workflow-plan-smoke.cjs && node tests/blender-adapter-smoke.cjs && node tests/lia-paths-smoke.cjs",
     "preview": "vite preview --host 0.0.0.0",
     "package:win": "npm run build && electron-builder --win nsis --x64",
-    "package:win:portable": "npm run build && electron-builder --win portable --x64"
+    "package:win:portable": "npm run build && electron-builder --win portable --x64",
+    "test:python": "python3 -m unittest discover -s tests -p 'test_*.py' -v",
+    "test:all": "npm test && npm run test:python"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
@@ -43,6 +45,7 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "shared/**/*",
       "scripts/comfyui-client.mjs",
       "scripts/blender_spritesheet.py",
       "workflows/comfyui/**/*",

@@ -2,7 +2,7 @@ const { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } = require('ele
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { ManagedProcessRegistry, buildCloseReport } = require('./task-manager.cjs');
 const {
@@ -44,65 +44,85 @@ let reportedActivities = [];
 let approvedClose = false;
 let closePromptOpen = false;
 let comfyClientPromise = null;
-const workflowRunner = new WorkflowRunner({
-  adapters: {
-    'blender-spritesheet': async ({ asset, inputPath, inputsById, outputDirectory, scriptPath, frameSize, projectRoot: runProjectRoot, signal, reportProgress }) => {
-      const executable = findExternalTool('blender');
-      if (!executable) throw Object.assign(new Error('Blender não foi detectado. Instale/adicione o aplicativo por conta própria ou escolha um adapter compatível.'), { code: 'WORKFLOW_BLOCKED' });
-      const artifactInput = inputsById?.['animated-model'] || inputsById?.model;
-      const resolvedInputPath = inputPath || (artifactInput?.path ? path.resolve(runProjectRoot, artifactInput.path) : null);
-      if (!resolvedInputPath || !outputDirectory || !scriptPath || !asset || !frameSize) {
-        throw Object.assign(new Error('O contrato Blender precisa receber modelo animado, pasta de saída, script, personagem e dimensões.'), { code: 'WORKFLOW_BLOCKED' });
-      }
-      const args = buildBlenderSpritesheetArgs({ scriptPath, inputPath: resolvedInputPath, outputDirectory, asset, frameSize });
-      const { child } = taskRegistry.start(`Lia Forge · spritesheet · ${asset.name}`, executable, args, {
-        cwd: outputDirectory,
-        stdio: ['ignore', 'pipe', 'pipe'],
+/**
+ * Adapter Registry (F2): os adapters deixam de viver inline aqui e passam a ser
+ * construídos pelo SDK com as dependências do processo principal injetadas.
+ * O carregamento é dinâmico porque o registro é ESM; falha fechado se qualquer
+ * adapter não puder ser criado (nenhum passo roda sem adapter real).
+ */
+let adapterRegistryPromise = null;
+const adapterConfiguration = {};
+
+function adapterDependencies() {
+  return {
+    findExternalTool,
+    taskRegistry,
+    assertPathInsideProject,
+    buildBlenderSpritesheetArgs,
+    runProcess,
+    validateSpritesheetFiles,
+    validateStageOutputs,
+    getWorkflowClient,
+    hash: (bytes) => createHash('sha256').update(bytes).digest('hex'),
+    configuration: adapterConfiguration,
+  };
+}
+
+function loadAdapterRegistry() {
+  if (!adapterRegistryPromise) {
+    adapterRegistryPromise = import('./adapters/index.mjs')
+      .then(({ createAdapterRegistry }) => createAdapterRegistry(adapterDependencies()))
+      .catch((error) => {
+        adapterRegistryPromise = null;
+        throw error;
       });
-      await runProcess(child, { signal, onProgress: reportProgress });
-      const pngPath = path.join(outputDirectory, 'spritesheet.png');
-      const metadataPath = path.join(outputDirectory, 'spritesheet.json');
-      const realPngPath = await assertPathInsideProject(pngPath, { mustExist: true, label: 'Spritesheet PNG' });
-      const realMetadataPath = await assertPathInsideProject(metadataPath, { mustExist: true, label: 'Metadados JSON' });
-      const [pngBuffer, metadataContents] = await Promise.all([fs.readFile(realPngPath), fs.readFile(realMetadataPath, 'utf8')]);
-      let metadata;
-      try { metadata = JSON.parse(metadataContents); } catch { throw new Error('O Blender gerou um JSON de metadados inválido.'); }
-      const checked = validateSpritesheetFiles({
-        pngBuffer,
-        metadata,
-        frameSize,
-        assetType: asset.type,
-        animations: asset.type === 'character' ? asset.animations || [] : undefined,
-      });
-      const outputs = [realPngPath, realMetadataPath].map((output) => path.relative(runProjectRoot, output).split(path.sep).join('/'));
-      validateStageOutputs(asset.type, 4, outputs);
-      return {
-        outputs,
-        execution: { kind: 'process', executable, args, cwd: outputDirectory },
-        note: `Blender renderizou ${checked.frameCount} frames reais em ${checked.sheetWidth}×${checked.sheetHeight}px; revise visualmente a consistência e o pivô.`,
-      };
-    },
-    'comfyui-concept': async ({ asset, outputDirectory, projectRoot: runProjectRoot, prompt, checkpoint, workflowId, signal, reportProgress }) => {
-      const client = await getWorkflowClient();
-      const endpoint = client.getComfyUiEndpoint();
-      const result = await client.runComfyUiConcept({ workflowId, prompt, checkpoint, outputDirectory, signal, onProgress: reportProgress });
-      const outputs = [];
-      for (const outputPath of result.outputs) {
-        const realPath = await assertPathInsideProject(outputPath, { mustExist: true, label: 'Concept PNG do ComfyUI' });
-        const bytes = await fs.readFile(realPath);
-        validatePngBuffer(bytes);
-        outputs.push(path.relative(runProjectRoot, realPath).split(path.sep).join('/'));
-      }
-      validateStageOutputs(asset.type, 1, outputs, { allowSingleConcept: true });
-      return {
-        outputs,
-        promptId: result.promptId,
-        checkpoint: result.checkpoint,
-        execution: { kind: 'http', method: 'POST', host: new URL(endpoint).host, route: '/prompt', provider: 'ComfyUI', taskId: result.promptId },
-        note: `ComfyUI gerou e validou ${outputs.length} imagem(ns) usando o checkpoint já instalado “${result.checkpoint}”. Revise a arte; ela não é um modelo 3D nem garante vistas ortográficas.`,
-      };
-    },
+  }
+  return adapterRegistryPromise;
+}
+
+async function resolveAdapter(adapterId) {
+  const registry = await loadAdapterRegistry();
+  if (!registry.has(adapterId)) {
+    throw Object.assign(new Error(`Adapter "${adapterId}" não existe no registro. Adapters disponíveis: ${registry.ids.join(', ')}.`), { code: 'WORKFLOW_BLOCKED' });
+  }
+  return registry.adapter(adapterId);
+}
+
+const KNOWN_ADAPTER_IDS = Object.freeze([
+  'blender-spritesheet',
+  'comfyui-concept',
+  'comfyui-remote',
+  'local-image-ops',
+  'rig2d-software',
+  'glb-inspect',
+  'export-package',
+]);
+
+/**
+ * Mapa de adapters do runner. É um Proxy para que planos novos (2D, 2.5D, VFX,
+ * exportação) usem qualquer adapter do registro sem editar este arquivo, e para
+ * que `validatePlan` continue vendo uma função por adapter registrado.
+ */
+const runnerAdapters = new Proxy({}, {
+  get(_target, adapterId) {
+    if (typeof adapterId !== 'string') return undefined;
+    return (context) => resolveAdapter(adapterId).then((adapter) => adapter.execute(context));
   },
+  has(_target, adapterId) {
+    return typeof adapterId === 'string' && KNOWN_ADAPTER_IDS.includes(adapterId);
+  },
+  ownKeys() {
+    return [...KNOWN_ADAPTER_IDS];
+  },
+  getOwnPropertyDescriptor(_target, adapterId) {
+    return KNOWN_ADAPTER_IDS.includes(adapterId)
+      ? { configurable: true, enumerable: true, value: (context) => resolveAdapter(adapterId).then((adapter) => adapter.execute(context)) }
+      : undefined;
+  },
+});
+
+const workflowRunner = new WorkflowRunner({
+  adapters: runnerAdapters,
   persist: persistWorkflowRun,
   onEvent: (event) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lia-forge:workflow:event', event);
