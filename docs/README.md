@@ -33,6 +33,8 @@ Cadeia de autoridade documental (a mais alta primeiro). Cada documento declara o
 
 ## Uso atual e contratos existentes
 
+- [`LIBRARY-VISUAL-REFERENCE-INVENTORY.md`](LIBRARY-VISUAL-REFERENCE-INVENTORY.md) — inventário das referências visuais Lia Forge identificadas na Biblioteca, usos recomendados, limites de proveniência e verificação pendente dos arquivos já presentes em `docs/concepts/`/`assets/`.
+
 - [`usage-workflows.md`](usage-workflows.md) — rotas documentadas, pontos de entrada e retomada.
 - [`asset-task.schema.json`](asset-task.schema.json) — schema atual da tarefa MCP; hoje limitado a `character`/`item` e à rota 3D → 2D.
 - [`agent-workflow.md`](agent-workflow.md) — contrato de handoff para agente externo opcional; não é o orquestrador interno da Forge.
