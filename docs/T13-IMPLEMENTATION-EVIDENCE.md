@@ -113,7 +113,35 @@ Correções de honestidade que essa integração revelou:
 
 Nenhuma linha desse teste afirma "Blender renderizou" ou "ComfyUI difundiu": afirma que o produto chama, valida e registra corretamente uma ferramenta externa — a execução na ferramenta real continua pendente de instalação pelo usuário.
 
-## 7. Testes que provam o acima
+## 7. Entradas do usuário: referências e modelos entram pelo produto
+
+Até esta rodada o caminho da imagem de entrada era um **campo de texto livre** (`input/sprite.png`): quem não conhece a pasta do projeto não tinha como acertar, e nada do que o usuário enviasse era medido antes de entrar no pipeline. Não havia também como olhar duas variações lado a lado — a comparação existia só na cabeça de quem abria o explorador de arquivos.
+
+O que passou a existir (mesmo serviço, mesmos gates, dois transportes):
+
+- `<projeto>/input/` é a pasta das entradas. `listInputs()` percorre até 3 níveis e 400 arquivos, aceita imagem (`png/jpg/jpeg/webp`), modelo (`glb/gltf/fbx/obj/stl/blend`) e documento (`md/json/txt`), e mede o que dá para medir aqui: PNG é decodificado (dimensões, cores únicas, cobertura, bounding box), GLB é inspecionado (meshes, triângulos, materiais, animações, skin). O que não pôde ser verificado volta com `contentChecked: false` e o motivo em `problem` — nunca como "ok".
+- `saveInput({filename, bytes, note})` sanitiza o nome (sem caminho, sem `..`, sem acento, teto de 120 caracteres), verifica o conteúdo **antes** de gravar, escreve de forma atômica (`wx` + rename) e resolve colisão com sufixo — inclusive ignorando caixa, porque o projeto pode viver em um sistema de arquivos que também ignora. O arquivo existente nunca é sobrescrito e o original do usuário nunca é movido nem recomprimido.
+- `readInput()` e `compareArtifacts({paths})` (teto de 8) usam o mesmo `assertSafeWriteTarget` dos artefatos: traversal, caminho absoluto e symlink são recusados com o motivo dito.
+- HTTP: `GET`/`POST /api/lia-forge/studio/inputs`, `GET /input-file`, `POST /compare` (403 fora de `input/`, 400 formato inválido ou PNG falso, 413 acima de 32 MB). IPC: `lia-forge:studio:inputs:list|save|pick|read` e `lia-forge:studio:compare`. O `pick` abre o seletor do sistema e diz na própria janela que o arquivo será **copiado** para `input/`.
+- Interface: o campo de texto de "imagem de entrada" e de "modelo 3D" virou um seletor com miniaturas medidas (`InputPicker`), botão de envio de arquivo e, no desktop, o seletor nativo. O **Comparison Lab** (`ComparisonLab`) compara entradas e artefatos de run lado a lado com as métricas medidas e um botão para gravar a escolha como **versão do asset** (`lia-forge:studio:assets:versions`), levando o `runId` de origem quando o artefato veio de um run. O produto mostra os números e não decide pelo usuário: nada aqui afirma qual variação é "melhor".
+
+### O que foi executado de verdade (HTTP no dev-server, projeto real em disco)
+
+| Verificação | Resultado medido |
+|---|---|
+| `GET /inputs` | `input/modelo.glb` (1.504 B, 1 mesh, **12 triângulos**, 1 animação, `skinned: true`, `contentChecked: true`) e `input/sprite.png` (48×48, 4 cores, `contentChecked: true`, SHA-256 `dd81079e…`) |
+| `POST /inputs` com `filename: '../../etc/Referência Herói.PNG'` | gravado em `input/Referencia-Heroi.PNG` (32×32, 21 cores, cobertura 1,0, SHA-256 `3f8186d6…`), traversal neutralizado, acentos removidos, nota preservada |
+| Mesmo envio de novo | `input/Referencia-Heroi-2.png` — o primeiro arquivo continua intacto |
+| `POST /inputs` com `.exe` | `400` e nada gravado |
+| `GET /input-file?path=input/sprite.png` | `200 image/png`, 182 B |
+| `GET /input-file?path=../../../etc/passwd` | `403` |
+| `POST /compare` com 2 caminhos válidos + 1 traversal | 2 entradas `ok: true` com dimensões/cores/cobertura/SHA-256 e 1 entrada `ok: false` com "Caminho fora do projeto foi recusado." |
+| Entrada enviada → workflow completo | `POST /run` com `params.sourceImage = 'input/Referencia-Heroi.PNG'` → `blocked` → 2 revisões aprovadas (retomada real) → **`succeeded`** em 5 passos; validações `animation-loop`, `png-content`, `spritesheet-manifest` e `destination-profile` = `passed`; 7 artefatos; export Godot 4.x com 7 arquivos, 60 fps, pivô `bottom-center`, `verifiedOnDestination: false` |
+| Artefato final medido | folha **384×144** servida por `/artifact` com **21 cores** — as mesmas 21 cores da referência enviada pelo usuário, ou seja, o pipeline consumiu a entrada de verdade |
+
+O envio de arquivos para **serviços externos** continua fora: nada sai da máquina, e a pendência de upload segue em §11.
+
+## 8. Testes que provam o acima
 
 | Comando | Resultado |
 |---|---|
@@ -121,9 +149,11 @@ Nenhuma linha desse teste afirma "Blender renderizou" ou "ComfyUI difundiu": afi
 | `npm run test:python` | **30 testes OK** |
 | `npx vite build` | build de produção sem erro |
 
+Nesta rodada, `tests/studio-service-smoke.mjs` ganhou a seção 11 (medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada e Comparison Lab com caminho recusado) e `tests/studio-ui-render-smoke.mjs` passou a enviar um arquivo por HTTP, conferir `400`/`403`, servir a prévia, comparar artefatos, gravar a escolha como versão do asset e renderizar `InputPicker` e `ComparisonLab`.
+
 Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: integração real com processo externo e ComfyUI em loopback, providers, recusas e gates — ver §6), `tests/workflow-coverage-smoke.mjs` (novo: 11 casos sobre os 8 workflows, com matriz de evidência impressa), `tests/studio-service-smoke.mjs` (passo opcional que produz prévia e passo opcional com erro que vira skip), `tests/orchestrator-engine-smoke.mjs` (entradas pendentes, `pendingInputs`, bloqueio nomeado por passo), `tests/studio-ui-render-smoke.mjs` (rig entre runs pela API, entradas pendentes, validações e o painel de providers renderizados na UI), `tests/preflight-destinations-smoke.mjs` (conformidade do pacote com o perfil publicado do destino), `tests/adapter-sdk-smoke.mjs` (caminho de executável inválido não vira ferramenta disponível), `tests/studio-service-smoke.mjs` (brief como entrada de texto do passo de conceito).
 
-## 8. O que **não** foi executado (e o que seria necessário)
+## 9. O que **não** foi executado (e o que seria necessário)
 
 | Item | Estado | O que falta |
 |---|---|---|
@@ -133,8 +163,9 @@ Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: in
 | Backend remoto / GPU alugada / hosted | não autorizado | decisão humana sobre envio de dados e teto de custo; arquitetura pronta, execução pendente |
 | GPU/Vulkan (RX 580, gfx803) | não medido aqui | máquina alvo com driver; nada é afirmado sem evidência |
 | Direitos das artes da Biblioteca | pendente | 6 itens `RIGHTS_PENDING` em `LIBRARY-VISUAL-REFERENCE-INVENTORY.md` |
+| Envio de referências do usuário para serviço externo | não autorizado | o upload copia apenas para `input/` do projeto; enviar para fora exige decisão humana (serviço, escopo e custo) |
 
-## 9. Commits da fase T13 (branch `arena/649f88bd-3dspritesheet`)
+## 10. Commits da fase T13 (branch `arena/649f88bd-3dspritesheet`)
 
 | Commit | Conteúdo |
 |---|---|
@@ -146,8 +177,10 @@ Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: in
 | `b83bf49` | §12.1 — 8 workflows funcionais, validação declarada executada, estados honestos, retomada fiel |
 | `ef777e4` | documentação de execução (este registro) + cabeçalhos reconciliados com o código |
 | `28a99a5` | ferramentas reais em qualquer hospedeiro, providers configuráveis (local/remoto/desativado), correções de honestidade no Hub e nos adapters, smoke de integração real |
+| `aa91b89` | documentação de execução da integração real (§6) e cabeçalhos reconciliados |
+| `c087602` | entradas do usuário em `input/` (upload, verificação de conteúdo, leitura confinada) e Comparison Lab com registro da escolha como versão do asset |
 
-## 10. Pendências que exigem decisão humana
+## 11. Pendências que exigem decisão humana
 
 Adoção de Spine ou de qualquer provider comercial/de IA · alternativa A de identidade Studio × Forge · licenças incertas (`2DAutoRigger`, `see-through`, MotionBricks) · backend remoto pago e teto de custo · upload de arquivos · instalação/download de ferramentas de terceiros · execução dos scripts de diagnóstico na máquina alvo (Windows + RX 580) · direitos das 6 artes `RIGHTS_PENDING`.
 
