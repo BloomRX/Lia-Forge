@@ -86,7 +86,7 @@ const adapterRegistry = createAdapterRegistry({
   hash: () => 'a'.repeat(64),
 });
 const adapters = adapterRegistry.all();
-const { hub } = await discoverHub({ registry, adapters, machine: { os: 'linux', ramMb: 3939 } });
+const { hub, discoveries } = await discoverHub({ registry, adapters, machine: { os: 'linux', ramMb: 3939 } });
 
 const conceptCandidates = hub.candidatesFor('image2d.generate-concept');
 assert.equal(conceptCandidates.length, 2, 'conceito 2D tem adapter local e remoto');
@@ -200,6 +200,53 @@ const planWithBlender = planWorkflow({ workflowId: '3d-character-spritesheet', h
 assert.equal(planWithBlender.steps.find((step) => step.id === 'render-2d').adapter, 'blender-spritesheet');
 assert.equal(planWithBlender.steps.find((step) => step.id === 'render-2d').blockedReason, null);
 assert.ok(planWithBlender.licenses.some((item) => item.license === 'GPL-2.0-or-later'));
+
+// Ter o Blender instalado não pode quebrar um workflow 2D: `render.atlas` é
+// compartilhada entre o renderer 2D interno e o Blender, e cada um só serve ao
+// passo cuja origem ele realmente processa. Sem esse critério, a escolha caía em
+// ordem alfabética e o atlas 2D ia para o Blender — que bloqueava pedindo modelo
+// animado, script e dimensões que um pipeline 2D nunca produz.
+// Cenário realista: Blender instalado **e** adapters internos prontos. O hub
+// acima substitui todas as descobertas (só o Blender fica pronto), então aqui as
+// descobertas reais são somadas à do Blender — é assim que a máquina do usuário
+// aparece quando ele instala a ferramenta.
+const hubBlenderMaisInternos = hub.withDiscoveries(new Map([
+  ...discoveries,
+  ['blender-spritesheet', { adapterId: 'blender-spritesheet', status: 'available', version: '4.2.0', executable: '/usr/bin/blender', checkedAt: new Date().toISOString() }],
+]));
+assert.equal(hubBlenderMaisInternos.select('rig2d.build').selected.adapterId, 'rig2d-software', 'o renderer interno continua pronto junto com o Blender');
+
+const plan2dWithBlender = planWorkflow({ workflowId: '2d-character-parts', hub: hubBlenderMaisInternos, registry, destination: 'godot-4' });
+const atlas2d = plan2dWithBlender.steps.find((step) => step.id === 'render');
+assert.equal(atlas2d.adapter, 'rig2d-software', 'com Blender disponível, o atlas 2D continua no renderer interno');
+const blenderInAtlas2d = atlas2d.candidates.find((candidate) => candidate.adapterId === 'blender-spritesheet');
+assert.equal(blenderInAtlas2d.applicable, false, 'o Blender aparece no plano como não aplicável a este passo');
+assert.match(blenderInAtlas2d.reason, /material 3D/, 'e o plano diz por que ele não serve (sem material 3D de montante)');
+assert.equal(atlas2d.blockedReason, null, 'o passo não fica bloqueado por ter ferramenta instalada');
+
+const retextureWithBlender = planWorkflow({ workflowId: 'variation-retexture', hub: hubBlenderMaisInternos, registry, destination: 'godot-4' });
+const retextureAtlas = retextureWithBlender.steps.find((step) => step.capability === 'render.atlas');
+assert.equal(retextureAtlas.adapter, 'rig2d-software', 'o atlas de variações/retexture também fica no renderer interno');
+assert.equal(retextureAtlas.candidates.find((candidate) => candidate.adapterId === 'blender-spritesheet').applicable, false,
+  'Blender marcado como não aplicável no atlas 2D de variações');
+
+const objectWithBlender = planWorkflow({ workflowId: '3d-object-render', hub: hubBlenderMaisInternos, registry, destination: 'godot-4', options: { model: 'input/modelo.glb' } });
+assert.equal(objectWithBlender.steps.find((step) => step.id === 'render').adapter, 'blender-spritesheet', 'o render 3D continua com o Blender');
+assert.equal(objectWithBlender.steps.find((step) => step.id === 'atlas').adapter, 'blender-spritesheet',
+  'e o atlas de renders 3D continua com o Blender (pack-atlas serve aos dois, o 3D vem primeiro)');
+assert.equal(objectWithBlender.steps.find((step) => step.id === 'atlas').candidates.every((candidate) => candidate.applicable), true,
+  'no atlas 3D ninguém é descartado');
+
+const humanoidPlanReal = planWorkflow({ workflowId: '3d-character-spritesheet', hub: hubBlenderMaisInternos, registry, destination: 'lia-desktop' });
+assert.equal(humanoidPlanReal.steps.find((step) => step.id === 'animate').adapter, 'blender-spritesheet',
+  'as animações do contrato humanoide seguem no Blender (montante 3D)');
+assert.equal(humanoidPlanReal.steps.find((step) => step.id === 'render-2d').adapter, 'blender-spritesheet',
+  'e o render 2D do contrato humanoide também');
+
+// Sem o contexto do passo (chamada direta ao Hub), o comportamento anterior
+// permanece: nada muda para quem não informa de onde o passo vem.
+assert.equal(hubBlenderMaisInternos.select('render.atlas').selected.adapterId, 'blender-spritesheet',
+  'select sem contexto mantém a ordem anterior (compatibilidade preservada)');
 assert.ok(blockedPlan.protectedActions.includes('download_models_or_weights'));
 
 // plano remoto só com autorização explícita

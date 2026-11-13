@@ -125,7 +125,35 @@ export function createAdapter(dependencies = {}) {
     }
   }
 
+  // Capacidades que o Blender compartilha com o renderizador 2D interno: nelas,
+  // só faz sentido escolhê-lo quando o passo recebe material 3D.
+  const SHARED_WITH_2D = ['render.atlas', 'motion.cycles'];
+  const UPSTREAM_3D = ['model3d.inspect', 'model3d.generate', 'model3d.export', 'model3d.model', 'rig3d.auto', 'rig3d.manual', 'render3d.frame', 'render3d.to2d'];
+
   return defineExecutionAdapter(MANIFEST, {
+    /**
+     * Serve a este passo?
+     *
+     * `render.atlas` e `motion.cycles` existem para os dois mundos (2D interno e
+     * 3D). Sem este critério, ter o Blender instalado fazia o Hub entregá-lo ao
+     * atlas de um workflow 2D — e o passo bloqueava pedindo modelo animado, pasta
+     * de saída, script e dimensões que um pipeline 2D nunca produz. O usuário era
+     * punido por ter instalado a ferramenta. Agora o Blender diz quando não serve
+     * e por quê, e o renderer interno fica com o passo.
+     */
+    canHandle(context = {}) {
+      const capabilityId = context.capabilityId ?? null;
+      if (!SHARED_WITH_2D.includes(capabilityId)) return { ok: true };
+      const upstream = context.upstreamCapabilities ?? [];
+      const has3dUpstream = upstream.some((id) => UPSTREAM_3D.includes(id));
+      const hasModel = Boolean(context.params?.model);
+      if (has3dUpstream || hasModel) return { ok: true };
+      return {
+        ok: false,
+        reason: `O Blender só entra em "${capabilityId}" quando o passo recebe material 3D (modelo, rig ou render de montante). Aqui o que chega é 2D${upstream.length ? ` (montante: ${upstream.join(', ')})` : ''}: quem faz este passo é o renderer 2D interno.`,
+      };
+    },
+
     async discover() {
       const configured = configuration.executable || null;
       const executable = configured || findExternalTool('blender');

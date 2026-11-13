@@ -446,6 +446,10 @@
 .forge-journey-human li{padding:5px 6px;border-radius:6px;background:#221c14;border-left:2px solid #d9a45b}
 .forge-journey-human li strong{display:block;color:#ffd8a8;font-size:9.5px;letter-spacing:.04em}
 .forge-journey-human li em{display:block;margin-top:2px;color:#e8d9c2;font-size:9px;line-height:1.45;font-style:normal}
+/* Candidato que não serve a este passo: visível, com o motivo, e fora da escolha */
+.forge-list li.is-inapplicable{opacity:.78}
+.forge-candidate-reason{display:block;margin-top:2px;color:#d8c7ac;font-size:9px;line-height:1.45;font-style:normal}
+.forge-step-note{display:flex;align-items:flex-start;gap:5px;margin:4px 0 0;padding:5px 7px;border-radius:6px;background:#161a20;color:#bcd2e6;font-size:9.5px;line-height:1.45}
 .forge-rights-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:7px}
 .forge-rights-cell{display:flex;flex-direction:column;gap:3px;padding:8px 9px;border:1px solid var(--line-soft);border-radius:7px;background:#1a141b;opacity:.62}
 .forge-rights-cell.is-active{opacity:1;border-color:#4a3350;background:#221a24}

@@ -64,12 +64,44 @@ export function createProviderHub({ registry, adapters = [], discoveries = new M
     return { state, discovery, compatibility, detail };
   }
 
-  function candidatesFor(capabilityId) {
+  /**
+   * Um adapter declara `canHandle(context)` quando a capacidade é compartilhada
+   * por passos de naturezas diferentes (ex.: `render.atlas` empacota tanto frames
+   * do renderizador 2D interno quanto renders 3D do Blender). O Hub consulta esse
+   * critério com o contexto do passo e marca o candidato como não aplicável, com
+   * o motivo — em vez de escolhê-lo por ordem alfabética e deixar o passo bloquear
+   * por falta de uma entrada que ele nunca teria.
+   *
+   * Sem contexto, ou sem o hook, o candidato continua aplicável como antes: nada
+   * aqui muda o comportamento de quem não declarou critério.
+   */
+  function applicabilityOf(adapter, capabilityId, context) {
+    if (!context || typeof adapter.canHandle !== 'function') return { applicable: true, reason: null };
+    try {
+      const verdict = adapter.canHandle({ capabilityId, ...context });
+      if (verdict === true || verdict === null || verdict === undefined) return { applicable: true, reason: null };
+      if (verdict === false) return { applicable: false, reason: 'O adapter não se aplica a este passo.' };
+      if (typeof verdict === 'object') {
+        return {
+          applicable: verdict.ok !== false && verdict.applicable !== false,
+          reason: verdict.reason ?? verdict.detail ?? null,
+        };
+      }
+      return { applicable: true, reason: null };
+    } catch (error) {
+      // Falha ao avaliar não vira disponibilidade: o candidato sai da escolha e o
+      // motivo aparece no plano (erro de programação visível, não silêncio).
+      return { applicable: false, reason: `Falha ao avaliar se o adapter serve a este passo: ${String(error?.message ?? error).slice(0, 200)}` };
+    }
+  }
+
+  function candidatesFor(capabilityId, context = null) {
     const capability = registry.get(capabilityId);
     const candidates = adapters
       .filter((adapter) => adapter.manifest.capabilities.includes(capabilityId))
       .map((adapter) => {
         const { state, discovery, compatibility, detail } = stateOf(adapter);
+        const { applicable, reason: applicabilityReason } = applicabilityOf(adapter, capabilityId, context);
         return Object.freeze({
           adapterId: adapter.manifest.id,
           adapterVersion: adapter.manifest.version,
@@ -93,10 +125,18 @@ export function createProviderHub({ registry, adapters = [], discoveries = new M
           backends: adapter.manifest.backends,
           requiresAuthorization: adapter.describe?.().needsAuthorization ?? adapter.manifest.class === 'remote-service',
           capabilityStatus: capability?.status ?? null,
-          limitations: adapter.manifest.evidence?.note ? [adapter.manifest.evidence.note] : [],
+          applicable,
+          applicabilityReason,
+          limitations: [
+            ...(adapter.manifest.evidence?.note ? [adapter.manifest.evidence.note] : []),
+            ...(applicable ? [] : [applicabilityReason ?? 'Não se aplica a este passo.']),
+          ],
         });
       })
       .sort((a, b) => {
+        // Quem não serve a este passo vai para o fim: continua visível no plano
+        // (com o motivo), mas nunca é escolhido na frente de quem serve.
+        if (a.applicable !== b.applicable) return a.applicable ? -1 : 1;
         const rank = STATE_RANK[a.state] - STATE_RANK[b.state];
         if (rank !== 0) return rank;
         const classRank = (CLASS_RANK[a.class] ?? 9) - (CLASS_RANK[b.class] ?? 9);
@@ -115,19 +155,21 @@ export function createProviderHub({ registry, adapters = [], discoveries = new M
     machine: Object.freeze({ ...machine }),
     candidatesFor,
     /** Escolhe o melhor candidato utilizável; devolve null e o motivo se não houver. */
-    select(capabilityId, { allowUnknown = false, allowRemote = false } = {}) {
-      const candidates = candidatesFor(capabilityId);
+    select(capabilityId, { allowUnknown = false, allowRemote = false, context = null } = {}) {
+      const candidates = candidatesFor(capabilityId, context);
       const usable = candidates.find((candidate) => {
+        if (!candidate.applicable) return false;
         if (candidate.state === 'ready') return candidate.class === 'remote-service' ? allowRemote : true;
         if (candidate.state === 'unknown' && allowUnknown) return candidate.class === 'remote-service' ? allowRemote : true;
         return false;
       });
       if (usable) return Object.freeze({ selected: usable, reason: null, candidates });
+      const inapplicable = candidates.filter((candidate) => !candidate.applicable);
       const reason = !candidates.length
         ? `Nenhum adapter declara a capacidade "${capabilityId}".`
         : `Nenhum candidato utilizável para "${capabilityId}": ${candidates
-          .map((candidate) => `${candidate.adapterId}=${candidate.state}${candidate.compatibility?.blockers?.length ? ` (${candidate.compatibility.blockers.join('; ')})` : ''}`)
-          .join(', ')}.`;
+          .map((candidate) => `${candidate.adapterId}=${candidate.state}${candidate.applicable ? '' : ' (não se aplica a este passo)'}${candidate.compatibility?.blockers?.length ? ` (${candidate.compatibility.blockers.join('; ')})` : ''}`)
+          .join(', ')}.${inapplicable.length ? ` Não se aplicam a este passo: ${inapplicable.map((candidate) => `${candidate.adapterId} — ${candidate.applicabilityReason ?? 'sem motivo informado'}`).join('; ')}.` : ''}`;
       return Object.freeze({ selected: null, reason, candidates });
     },
     /** Mapa capacidade → estado, para a interface mostrar o que existe hoje. */

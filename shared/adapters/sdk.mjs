@@ -335,8 +335,18 @@ export function defineAdapter(definition, implementation = {}) {
   const execute = implementation.execute;
   const launch = implementation.launch;
   const reconcile = implementation.reconcile;
+  const canHandle = implementation.canHandle;
 
   if (typeof discover !== 'function') throw fail('implementation.discover', 'must be a function (read-only probe)');
+  // `canHandle` é opcional: responde se este adapter serve para **este passo**
+  // (não só para a capacidade). Capacidades são compartilhadas de propósito
+  // (ex.: `render.atlas` serve tanto o atlas 2D quanto o empacotamento de renders
+  // 3D), e sem esse critério o Hub escolheria por ordem alfabética um adapter que
+  // não tem as entradas do passo — o usuário veria um bloqueio sem ter feito nada
+  // de errado. Quando ausente, o adapter continua candidato como antes.
+  if (canHandle !== undefined && typeof canHandle !== 'function') {
+    throw fail('implementation.canHandle', 'must be a function when present');
+  }
   if (adapterClass === 'manual-editing') {
     if (execute !== undefined) {
       throw fail('implementation.execute', 'a manual-editing tool must not execute; it only discovers, launches and records real paths');
@@ -358,6 +368,7 @@ export function defineAdapter(definition, implementation = {}) {
     execute: execute ? (...args) => execute(...args) : null,
     launch: launch ? (...args) => launch(...args) : null,
     reconcile: reconcile ? (...args) => reconcile(...args) : null,
+    canHandle: canHandle ? (...args) => canHandle(...args) : null,
     describe: () => describeAdapter(manifest),
   });
 }

@@ -396,7 +396,35 @@ function parseFrameSize(value) {
 }
 
 export function createRig2dSoftwareAdapter() {
+  const UPSTREAM_2D_PREFIXES = ['rig2d.', 'image2d.'];
+  const comesFrom2d = (context) => (context.upstreamCapabilities ?? []).some((id) => UPSTREAM_2D_PREFIXES.some((prefix) => String(id).startsWith(prefix)));
+
   return defineExecutionAdapter(RIG2D_SOFTWARE_MANIFEST, {
+    /**
+     * Serve a este passo?
+     *
+     * `render.atlas` com `task: 'render'` desenha frames a partir de rig 2D e das
+     * imagens das partes — sem pipeline 2D de montante não há o que desenhar.
+     * `motion.cycles` idem (as ações são de ossos 2D). Já `pack-atlas` apenas
+     * organiza PNGs produzidos por passos anteriores (variações, retexture ou
+     * renders 3D) e serve a qualquer origem.
+     */
+    canHandle(context = {}) {
+      const capabilityId = context.capabilityId ?? null;
+      const task = context.params?.task ?? null;
+      if (capabilityId === 'render.atlas' && task === 'render') {
+        return comesFrom2d(context)
+          ? { ok: true }
+          : { ok: false, reason: 'Este atlas pede frames desenhados a partir de rig 2D e imagens das partes; o passo não vem do pipeline 2D interno.' };
+      }
+      if (capabilityId === 'motion.cycles') {
+        return comesFrom2d(context)
+          ? { ok: true }
+          : { ok: false, reason: 'As ações deste passo são de um rig 3D; o renderer 2D interno anima ossos 2D.' };
+      }
+      return { ok: true };
+    },
+
     discover: async () => internalDiscover('rig2d-software', 'Renderer 2D interno presente no checkout (rig, animação, VFX, atlas).'),
     async execute(context = {}) {
       const emit = requireEmit(context, 'rig2d-software');

@@ -182,9 +182,25 @@ export function planWorkflow({ workflowId, hub, registry, destination = null, op
   const licenses = [];
   const costEntries = [];
 
+  // Capacidade de cada passo e o que chega de montante (transitivamente): é isso
+  // que diz se um atlas vem de frames 2D internos ou de renders 3D, e portanto que
+  // adapter serve a este passo. O Hub recebe esse contexto e o repassa ao
+  // `canHandle` de cada adapter — a escolha deixa de depender de ordem alfabética.
+  const capabilityByStepId = new Map(recipe.steps.map((item) => [item.id, item.capability]));
+  const upstreamCapabilitiesOf = (recipeStep) => {
+    const seen = new Set();
+    const stack = [...(recipeStep.dependsOn ?? [])];
+    while (stack.length) {
+      const id = stack.pop();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const upstream = recipe.steps.find((item) => item.id === id);
+      if (upstream) stack.push(...(upstream.dependsOn ?? []));
+    }
+    return Object.freeze([...seen].map((id) => capabilityByStepId.get(id)).filter(Boolean));
+  };
+
   for (const recipeStep of recipe.steps) {
-    const selection = hub.select(recipeStep.capability, { allowUnknown: false, allowRemote });
-    const candidate = selection.selected;
     const capability = registry.get(recipeStep.capability);
     const params = { ...(recipeStep.params ?? {}), ...(options[recipeStep.id] ?? {}) };
     // A entrada fornecida pelo usuário entra nos params do passo: é por eles que
@@ -199,6 +215,24 @@ export function planWorkflow({ workflowId, hub, registry, destination = null, op
         if (briefText.length >= 12) params.prompt = briefText.slice(0, 8000);
       }
     }
+
+    // A seleção acontece DEPOIS de os params estarem completos (entrada do
+    // usuário, brief como prompt): o contexto do passo é o que o Hub e os
+    // adapters usam para dizer se servem a ele.
+    const selection = hub.select(recipeStep.capability, {
+      allowUnknown: false,
+      allowRemote,
+      context: Object.freeze({
+        workflowId,
+        family: recipe.family ?? null,
+        stepId: recipeStep.id,
+        params: Object.freeze({ ...params }),
+        upstreamCapabilities: upstreamCapabilitiesOf(recipeStep),
+        requiresParam: recipeStep.requiresParam ?? null,
+        destination,
+      }),
+    });
+    const candidate = selection.selected;
 
     const step = {
       id: recipeStep.id,
@@ -229,7 +263,15 @@ export function planWorkflow({ workflowId, hub, registry, destination = null, op
       cost: candidate?.cost ?? { status: 'unknown' },
       backends: candidate ? Object.freeze(candidate.backends.map((backend) => backend.kind)) : Object.freeze([]),
       blockedReason: null,
-      candidates: Object.freeze((selection.candidates ?? []).map((item) => ({ adapterId: item.adapterId, state: item.state, detail: item.discoveryDetail }))),
+      // Candidatos com o motivo de quem não serve a este passo: a interface
+      // mostra a escolha e o porquê das alternativas descartadas.
+      candidates: Object.freeze((selection.candidates ?? []).map((item) => ({
+        adapterId: item.adapterId,
+        state: item.state,
+        detail: item.discoveryDetail,
+        applicable: item.applicable !== false,
+        reason: item.applicabilityReason ?? null,
+      }))),
     };
 
     // Entrada que vem de fora do run (ex.: rig revisado de um run anterior):

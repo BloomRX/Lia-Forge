@@ -200,6 +200,50 @@ assert.throws(() => defineExecutionAdapter({ id: 'ok', version: '1', title: 'x',
 assert.throws(() => defineExecutionAdapter({ id: 'ok', version: '1', title: 'x', capabilities: ['a'], backends: [{ kind: 'local-process' }], cost: { status: 'known' } }, { discover: async () => ({}), execute: async () => ({}) }), /cost/);
 assert.throws(() => defineExecutionAdapter({ id: 'ok', version: '1', title: 'x', capabilities: ['a'], backends: [{ kind: 'local-process' }] }, { execute: async () => ({}) }), /discover/);
 
+// --- canHandle: hook opcional de adequação ao passo -------------------------
+assert.throws(
+  () => defineExecutionAdapter(
+    { id: 'ok', version: '1', title: 'x', capabilities: ['a'], backends: [{ kind: 'local-process' }] },
+    { discover: async () => ({}), execute: async () => ({}), canHandle: 'não é função' },
+  ),
+  /canHandle/,
+  'canHandle que não é função é recusado no manifesto',
+);
+
+const blenderAdapter = registry.adapter('blender-spritesheet');
+assert.equal(typeof blenderAdapter.canHandle, 'function', 'o adapter Blender declara quando serve ao passo');
+const blenderOn2dAtlas = blenderAdapter.canHandle({
+  capabilityId: 'render.atlas',
+  upstreamCapabilities: ['rig2d.build', 'rig2d.animate'],
+  params: { task: 'render', frameSize: '48x48' },
+});
+assert.equal(blenderOn2dAtlas.ok, false, 'Blender não serve ao atlas que vem do rig 2D');
+assert.match(blenderOn2dAtlas.reason, /material 3D/, 'e diz o motivo (só entra quando recebe material 3D)');
+assert.equal(blenderAdapter.canHandle({ capabilityId: 'render.atlas', upstreamCapabilities: ['render3d.frame'], params: { task: 'pack-atlas' } }).ok, true,
+  'Blender serve ao atlas de renders 3D');
+assert.equal(blenderAdapter.canHandle({ capabilityId: 'motion.cycles', upstreamCapabilities: ['rig3d.auto'] }).ok, true,
+  'Blender serve aos ciclos de um rig 3D');
+assert.equal(blenderAdapter.canHandle({ capabilityId: 'render3d.to2d', upstreamCapabilities: [] }).ok, true,
+  'capacidade exclusiva do Blender nunca é filtrada');
+assert.equal(blenderAdapter.canHandle({ capabilityId: 'render.atlas', upstreamCapabilities: [], params: { model: 'input/modelo.glb' } }).ok, true,
+  'modelo 3D informado pelo usuário também qualifica o passo');
+
+const rig2dAdapter = registry.adapter('rig2d-software');
+assert.equal(typeof rig2dAdapter.canHandle, 'function', 'o renderer 2D declara quando serve ao passo');
+assert.equal(rig2dAdapter.canHandle({ capabilityId: 'render.atlas', params: { task: 'render' }, upstreamCapabilities: ['render3d.frame'] }).ok, false,
+  'o renderer 2D não desenha frames sem rig 2D de montante');
+assert.equal(rig2dAdapter.canHandle({ capabilityId: 'render.atlas', params: { task: 'render' }, upstreamCapabilities: ['rig2d.build', 'rig2d.animate'] }).ok, true,
+  'com rig 2D de montante, ele desenha');
+assert.equal(rig2dAdapter.canHandle({ capabilityId: 'render.atlas', params: { task: 'pack-atlas' }, upstreamCapabilities: ['render3d.frame'] }).ok, true,
+  'pack-atlas organiza PNGs de qualquer origem');
+assert.equal(rig2dAdapter.canHandle({ capabilityId: 'motion.cycles', upstreamCapabilities: ['rig3d.auto'] }).ok, false,
+  'ações de rig 3D não são do renderer 2D');
+assert.equal(rig2dAdapter.canHandle({ capabilityId: 'rig2d.build', upstreamCapabilities: [] }).ok, true,
+  'capacidade própria do renderer 2D nunca é filtrada');
+
+assert.equal(registry.adapter('local-image-ops').canHandle, null, 'adapter sem critério declarado segue candidato como antes');
+assert.equal(registry.adapter('export-package').canHandle, null, 'idem para o empacotador de destino');
+
 function manifestClass(adapter) {
   return adapter.manifest.class;
 }

@@ -580,6 +580,28 @@ try {
   assert.ok(staleJourneyMarkup.includes('decisões suas'), 'e apresenta a recuperação como decisão do usuário');
   assert.ok(!staleJourneyMarkup.includes('Execução em andamento: o progresso é gravado'), 'não apresenta o run interrompido como execução viva');
 
+  // O plano mostra quem não serve ao passo e por quê (Blender instalado não pode
+  // aparecer como opção para um atlas que vem do rig 2D interno).
+  const planCandidates = renderToStaticMarkup(createElement(PlanStepRow, {
+    step: {
+      id: 'render',
+      title: 'Renderizar frames e atlas',
+      capability: 'render.atlas',
+      adapter: 'rig2d-software',
+      candidates: [
+        { adapterId: 'rig2d-software', state: 'ready', detail: 'renderer interno', applicable: true, reason: null },
+        { adapterId: 'blender-spritesheet', state: 'ready', detail: 'Blender configurado', applicable: false, reason: 'O Blender só entra aqui quando o passo recebe material 3D.' },
+      ],
+      validators: ['png-content'],
+      resources: {},
+      cost: { status: 'not-applicable' },
+    },
+  }));
+  assert.ok(planCandidates.includes('blender-spritesheet: O Blender só entra aqui quando o passo recebe material 3D.'),
+    'a ferramenta instalada que não serve ao passo é dita na hora, com o motivo (sem precisar abrir os candidatos)');
+  assert.ok(planCandidates.includes('<code>rig2d-software</code>'), 'e o passo continua com o adapter que serve a ele');
+  assert.ok(!planCandidates.includes('sem adapter'), 'o passo não aparece como sem adapter só porque outra ferramenta foi descartada');
+
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 

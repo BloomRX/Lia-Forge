@@ -571,6 +571,19 @@ export function PlanStepRow({ step }) {
         {step.optional ? <span className="forge-badge is-unknown">opcional</span> : null}
       </header>
       {step.blockedReason ? <p className="forge-step-reason"><CircleAlert size={13} strokeWidth={1.9} />{step.blockedReason}</p> : null}
+      {/* Ferramenta instalada que não serve a este passo: dito na hora, sem exigir
+          que o usuário abra os candidatos para entender por que ela não foi usada. */}
+      {(step.candidates ?? []).some((candidate) => candidate.applicable === false) ? (
+        <p className="forge-step-note">
+          <Info size={13} strokeWidth={1.9} />
+          <span>
+            {step.candidates
+              .filter((candidate) => candidate.applicable === false)
+              .map((candidate) => `${candidate.adapterId}: ${candidate.reason ?? 'não serve a este passo'}`)
+              .join(' · ')}
+          </span>
+        </p>
+      ) : null}
       <Detail summary="candidatos, requisitos, custo, licença e validadores">
         <KeyValue label="Capacidade" value={step.capability} mono />
         <KeyValue label="Status da capacidade" value={step.capabilityStatus} />
@@ -585,9 +598,11 @@ export function PlanStepRow({ step }) {
         {step.candidates?.length ? (
           <ul className="forge-list">
             {step.candidates.map((candidate) => (
-              <li key={candidate.adapterId}>
+              <li key={candidate.adapterId} className={candidate.applicable === false ? 'is-inapplicable' : undefined}>
                 <code>{candidate.adapterId}</code> <StateBadge state={candidate.state} />
+                {candidate.applicable === false ? <span className="forge-badge is-unknown">não serve a este passo</span> : null}
                 {candidate.detail ? ` — ${candidate.detail}` : ''}
+                {candidate.applicable === false && candidate.reason ? <em className="forge-candidate-reason">{candidate.reason}</em> : null}
                 {candidate.license ? ` · licença: ${candidate.license}` : ''}
               </li>
             ))}
