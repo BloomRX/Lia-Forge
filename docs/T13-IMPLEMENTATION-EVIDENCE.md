@@ -94,6 +94,7 @@ Correções de honestidade que essa integração revelou:
 - `blender-spritesheet` aceitava qualquer caminho configurado como ferramenta: agora verifica existência + `X_OK` na descoberta e na execução, e falha de spawn (`ENOENT`/`EACCES`) vira **bloqueio nomeado**, nunca falha do produto;
 - o Hub tratava requisito não medido como veto: agora requisito **medido e insuficiente** → `blocked` com o número na mensagem (ex.: "RAM: precisa de 8192 MB e há 3940 MB"), e requisito **não medido** (VRAM sem probe autorizado) → aviso, não veto;
 - passos de difusão declaram `requiresParam: 'prompt'` e o brief escrito pelo usuário satisfaz essa entrada: o plano pede o texto antes de executar, em vez de falhar no meio;
+- a descoberta dizia "Blender encontrado em `<caminho>`" mesmo quando o caminho era um arquivo indicado pelo usuário e **nenhuma versão tinha sido medida**. O pré-voo confere existência e permissão de execução — ele não executa o arquivo, porque rodar `--version` de um caminho digitado pelo usuário seria executar código arbitrário no pré-voo. A mensagem agora diz o que foi medido e o que não foi: `executableSource` (`user-configuration` ou `path`) e `versionConfirmed: false` saem da descoberta, são repassados por `preflight` e pelo Hub, e o painel **Ferramentas & requisitos** mostra os três (executável, origem dele e "versão detectada: não confirmada — o pré-voo mede existência e permissão de execução, mas não executa o arquivo");
 - `destination-profile` passou a conferir o pacote contra o **perfil publicado** do destino (destino existente no catálogo, fps/eixos/unidades/pivô/formatos idênticos, formatos aceitos por arquivo, bloqueios de compatibilidade). Continua sem afirmar importação real: `verifiedOnDestination` vem do perfil.
 
 ### O que o smoke de integração executa de verdade
@@ -109,7 +110,10 @@ Correções de honestidade que essa integração revelou:
 | Gate de revisão | passo para em `review-missing` após executar; aprovação ancora SHA-256 e retoma |
 | Requisito medido | 3.940 MB de RAM < 8.192 MB exigidos → passo `blocked` e **zero** requisição de geração |
 | Remoto sem autorização | nada enviado, nada gerado, pendência visível na configuração |
+| Origem do executável | provider e pré-voo devolvem `executableSource: 'user-configuration'` e `versionConfirmed: false`, com a mensagem "A identidade como Blender não foi confirmada: a descoberta não executa o arquivo (nenhum `--version` foi rodado)" |
 | Recusas | endpoint não-loopback no modo local, campo de segredo, caminho de executável inválido, provider desativado |
+
+Medido também **por HTTP no dev-server** (projeto de preview com um substituto de teste configurado como executável): `GET /overview` devolve, para `blender-spritesheet`, `status: available`, `executableSource: user-configuration`, `versionConfirmed: false` e o detalhe `Caminho configurado por você (/home/user/lia-preview-tools/blender-render.mjs) existe e é executável. A identidade como Blender não foi confirmada: a descoberta não executa o arquivo (nenhum --version foi rodado).` — ou seja, o substituto rotulado aparece como o que é (um caminho executável configurado), nunca como "Blender instalado".
 
 Nenhuma linha desse teste afirma "Blender renderizou" ou "ComfyUI difundiu": afirma que o produto chama, valida e registra corretamente uma ferramenta externa — a execução na ferramenta real continua pendente de instalação pelo usuário.
 
@@ -272,7 +276,7 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 - `tests/tool-stubs.mjs` (**novo**): os substitutos de ferramenta externa (renderizador, lento e falho) reunidos num módulo só, usados pelo smoke de ciclo de vida e pelo de integração — sem duplicar código e sempre rotulados como substitutos.
 - `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em três cenários reais e renderizado, além do item de run interrompido (§10 e §8); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
 - `tests/studio-service-smoke.mjs` (estendido): seção 11 com medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada a `input/` e Comparison Lab com caminho recusado (§7); passo opcional que produz prévia, passo opcional com erro que vira skip e brief como entrada de texto do passo de conceito.
-- `tests/host-integration-smoke.mjs` (**novo** nesta fase): integração real com processo externo e ComfyUI em loopback, providers, recusas e gates (§6).
+- `tests/host-integration-smoke.mjs` (**novo** nesta fase): integração real com processo externo e ComfyUI em loopback, providers, recusas, gates e a descoberta que diz a origem do executável sem afirmar versão não medida (§6).
 - `tests/workflow-coverage-smoke.mjs` (**novo** nesta fase): 11 casos sobre os 8 workflows, com a matriz de evidência impressa (§3).
 - `tests/orchestrator-engine-smoke.mjs` (estendido): entradas pendentes, `pendingInputs` e bloqueio nomeado por passo.
 - `tests/preflight-destinations-smoke.mjs` (estendido): conformidade do pacote com o perfil publicado do destino.
@@ -315,6 +319,8 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 | `03846eb` | run interrompido: `listRuns()` diz `active`/`stale` e a lista lateral oferece corrigir o estado ou retomar |
 | `87457fd` | documentação do run interrompido no ciclo de vida (§8) |
 | `ce0eca0` | derivação do roteiro em `shared/ui/journey.mjs`, resumo compartilhado e `tests/journey-smoke.mjs` (32 smokes) |
+| `7578539` | documentação da jornada medida parada a parada (§10) |
+| `522740a` | descoberta honesta do Blender: origem do executável, `versionConfirmed: false` e o pré-voo que não executa o arquivo |
 
 ## 14. Pendências que exigem decisão humana
 
