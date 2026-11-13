@@ -225,9 +225,27 @@ A experiência pedida é "criar projeto → exportar" em 12 passos, mas a interf
 | 11 | Exportar para o destino | existe pacote exportado, com "verificado no destino: não" dito no próprio passo | — |
 | 12 | Guardar no projeto | há versão registrada no asset ou asset com versões/proveniência | — |
 
+A derivação mora em `shared/ui/journey.mjs` — lógica pura, sem React e sem módulo do Node — e a interface importa de lá: navegador, testes em Node e qualquer consumidor futuro (CLI, processo principal) calculam o roteiro no **mesmo** lugar, sem segunda versão que possa divergir. Junto sai `journeyProgress(steps)`, o resumo que o painel mostra (`total`, `done`, `percent`, `next` e `humanDecisions`), para que a contagem exibida e a conferida nos testes sejam o mesmo cálculo. Dois detalhes que vieram dessa mudança: sem pasta aberta existe **um único** passo atual (abrir o projeto), em vez de dois apontando ao mesmo tempo; e o passo de comparar concluído diz que o Comparison Lab mede e a escolha é do usuário.
+
 Importar na engine **não é passo do produto** e não aparece como concluído: quando o pacote existe e `verifiedOnDestination` é `false`, o roteiro diz que o pacote confere com o perfil publicado do destino e que importar e conferir lá é com o usuário. Da mesma forma, passos que exigem instalação ou autorização aparecem com o ícone de decisão humana e o texto do que só o usuário pode fazer — o produto não instala, não compra e não autoriza nada por conta própria.
 
 ### O que foi executado de verdade
+
+Dois testes cobrem o roteiro. `tests/journey-smoke.mjs` (**novo**, 67 checagens) **percorre a jornada inteira** com o serviço real sobre um projeto temporário, derivando o roteiro a cada parada com a mesma função da interface:
+
+| Parada | Progresso medido |
+|---|---|
+| Nada aberto | `0 de 12`; próximo passo = 1 (abrir a pasta); um único passo atual |
+| Pasta criada (`ensureProjectStructure` + `projectInfo()`) | `1 de 12`; próximo = enviar a referência |
+| Referência enviada (`saveInput`, medida ao entrar: 48×48, `contentChecked`) | `2 de 12` |
+| Plano com brief (`2d-character-parts` → `godot-4`) | `6 de 12`; próximo = executar |
+| Execução que para no gate humano (`blocked`, sem nenhum passo `failed`) | `8 de 12`; próximo = revisar (detalhe cita o SHA-256) |
+| Decisões humanas aprovadas → `succeeded` | `9 de 12`; próximo = exportar |
+| Comparison Lab medindo 2 artefatos | `10 de 12` |
+| Pacote exportado (`verifiedOnDestination: false`) | `11 de 12`; próximo = guardar |
+| Versão registrada no asset | **`12 de 12`**, nenhum passo atual pendente, nenhuma decisão humana sobrando |
+
+Trilha medida: `0 → 1 → 2 → 6 → 8 → 9 → 10 → 11 → 12`, com a checagem de que o progresso nunca avançou sem a evidência correspondente. O cenário alternativo (objetivo `3d-character-spritesheet`, sem provider nesta máquina) é registrado **fora da trilha**, como decisão humana — não como progresso. A honestidade foi verificada tirando uma evidência por vez do estado completo: sem pacote, o passo 11 sai da contagem (e só ele); sem comparação, o passo 10 volta a `optional`; sem run, `execute`/`follow`/`review` saem; sem versão guardada, o passo 12 sai; sem pasta, o passo 1 volta a ser o atual; sem brief, o passo 4 sai; estado vazio = `0 de 12`. No fim, o atlas do run é medido no disco: **384×144**, grade 8×3, 24 frames, com conteúdo.
 
 `tests/studio-ui-render-smoke.mjs` deriva o roteiro três vezes, com dados reais vindos da API (projeto, entradas, plano com passos bloqueados, run `succeeded`, pacote exportado, versão de asset):
 
@@ -242,16 +260,17 @@ Importar na engine **não é passo do produto** e não aparece como concluído: 
 
 | Comando | Resultado |
 |---|---|
-| `npm test` | **31 smokes verdes** (Node 22, sem rede; o smoke de integração usa processo e HTTP loopback reais, sem ferramenta externa instalada) |
+| `npm test` | **32 smokes verdes** (Node 22, sem rede; o smoke de integração usa processo e HTTP loopback reais, sem ferramenta externa instalada) |
 | `npm run test:python` | **30 testes OK** |
 | `npx vite build` | build de produção sem erro |
 
 O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 
+- `tests/journey-smoke.mjs` (**novo**): a jornada de 12 passos percorrida de ponta a ponta com o serviço real, com o roteiro derivado a cada parada e a honestidade verificada removendo uma evidência por vez (§10).
 - `tests/project-structure-smoke.mjs` (**novo**): leitura que não escreve, criação limitada a `input/` e `.lia-forge/runs/`, `.spriteforge/assets.json`, `.lia.json` e um arquivo do usuário preservados byte a byte, `projectInfo()` coerente com o disco e raízes inválidas (arquivo, symlink, caminho vazio) recusadas — com verificação de que nada foi criado fora do caminho informado (§9).
 - `tests/run-lifecycle-smoke.mjs` (**novo**): progresso gravado antes do fim do run, cancelamento com o processo externo encerrado de verdade, cancelar duas vezes sem reescrever nada, retomada por checkpoint sem reexecutar passo concluído, falha intermediária com código de saída e stderr preservados, retomada depois da falha, run órfão corrigido sem fingir execução e recusas nomeadas (§8).
 - `tests/tool-stubs.mjs` (**novo**): os substitutos de ferramenta externa (renderizador, lento e falho) reunidos num módulo só, usados pelo smoke de ciclo de vida e pelo de integração — sem duplicar código e sempre rotulados como substitutos.
-- `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em três cenários reais e renderizado (§10); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
+- `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em três cenários reais e renderizado, além do item de run interrompido (§10 e §8); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
 - `tests/studio-service-smoke.mjs` (estendido): seção 11 com medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada a `input/` e Comparison Lab com caminho recusado (§7); passo opcional que produz prévia, passo opcional com erro que vira skip e brief como entrada de texto do passo de conceito.
 - `tests/host-integration-smoke.mjs` (**novo** nesta fase): integração real com processo externo e ComfyUI em loopback, providers, recusas e gates (§6).
 - `tests/workflow-coverage-smoke.mjs` (**novo** nesta fase): 11 casos sobre os 8 workflows, com a matriz de evidência impressa (§3).
@@ -292,6 +311,10 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 | `c739c46` | projeto como passo 1: `project-structure.mjs`, `projectInfo()`, `GET /project`, canais IPC de abrir/criar/revelar, painel Projeto e smoke de preservação |
 | `3cf7aa5` | documentação de execução do projeto como passo 1 (§9) |
 | `59dbe81` | roteiro de produção na interface: 12 passos derivados do estado real, decisões humanas marcadas como tais e smoke nos três cenários |
+| `85074e6` | documentação do roteiro de 12 passos (§10) e seção de testes reorganizada por smoke |
+| `03846eb` | run interrompido: `listRuns()` diz `active`/`stale` e a lista lateral oferece corrigir o estado ou retomar |
+| `87457fd` | documentação do run interrompido no ciclo de vida (§8) |
+| `ce0eca0` | derivação do roteiro em `shared/ui/journey.mjs`, resumo compartilhado e `tests/journey-smoke.mjs` (32 smokes) |
 
 ## 14. Pendências que exigem decisão humana
 
