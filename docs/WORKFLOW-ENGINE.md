@@ -1,6 +1,6 @@
 # Workflow Engine baseado em grafo — contratos e execução
 
-> **Estado:** arquitetura-alvo `PLANNED`. O runner atual é serial e parcial; a descrição abaixo não afirma que exista um scheduler DAG em produção. Para evidências por módulo, veja [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md).
+> **Estado:** contrato-alvo **parcialmente implementado** (T13, 2026-11-13 UTC). `shared/engine/dag.mjs` + `shared/engine/execution-manager.mjs` formam um scheduler DAG real — ordem topológica por níveis, lote com limite de recurso, retry com backoff, timeout, cancelamento cooperativo, checkpoints, retomada, custo, proveniência, gates (autorização por fingerprint, revisão ancorada em SHA-256, entrada alterada, redação de segredos, escrita atômica) e logs — e o plano declara os validadores que o engine cobra por passo. Evidência executada: `tests/orchestrator-engine-smoke.mjs`, `tests/workflow-coverage-smoke.mjs`, `tests/studio-service-smoke.mjs`. O runner legado `electron/workflow-runner.cjs` continua serial e específico do fluxo Blender. Seguem como **alvo**: filas de jobs persistentes, paralelismo por recurso validado em máquina real, reconciliação de chamadas de API após crash e migração de runs antigos. Para evidências por módulo, veja [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md) e [`T13-IMPLEMENTATION-EVIDENCE.md`](T13-IMPLEMENTATION-EVIDENCE.md).
 
 ## Responsabilidade
 
@@ -111,7 +111,7 @@ Scope changes, caminho diferente, novo endpoint, novos inputs, mudança de provi
 
 ## Compatibilidade com o código atual
 
-`electron/workflow-runner.cjs` já valida etapas serializadas em lista, contratos input/output, autorização, revisão humana, hashes e formato; `workflow-run-store.cjs` escreve snapshots em JSON dentro de `.spriteforge/runs/`. `workflow-contracts.cjs` descreve um plano humanoide, mas deixa adapters de views/model/rig/animação bloqueados. A execução desktop persistida/retomável efetivamente exposta é específica de um workflow Blender de um estágio. Não há scheduler geral por DAG, filas de jobs, execução paralela por recursos ou reconciliação de API pós-crash. Essa base é ponto de estudo, não prova de engine completo.
+`electron/workflow-runner.cjs` já valida etapas serializadas em lista, contratos input/output, autorização, revisão humana, hashes e formato; `workflow-run-store.cjs` escreve snapshots em JSON dentro de `.spriteforge/runs/`. `workflow-contracts.cjs` descreve um plano humanoide, mas deixa adapters de views/model/rig/animação bloqueados. A execução desktop persistida/retomável efetivamente exposta é específica de um workflow Blender de um estágio. Desde a T13 existe scheduler geral por DAG em `shared/engine/` (nível de plano + execução, com gates, checkpoints, retomada e validação declarada por passo); continuam ausentes filas de jobs, execução paralela por recursos e reconciliação de API pós-crash. A base legada descrita acima é ponto de estudo, não prova de engine completo.
 
 ## Critérios verificáveis de aceite futuro
 

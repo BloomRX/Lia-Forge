@@ -1,6 +1,6 @@
 # Intelligent Orchestrator — planejamento explicável
 
-> **Estado:** arquitetura-alvo `PLANNED`. O runner atual recebe planos/contratos; ele não é um planejador de intenção. Consulte [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md) e [`WORKFLOW-ENGINE.md`](WORKFLOW-ENGINE.md).
+> **Estado:** **parcialmente implementado** (T13, 2026-11-13 UTC). `shared/orchestrator/planner.mjs` planeja sem executar: 8 receitas de workflow, seleção de adapter por capacidade via Hub, passos bloqueados com motivo nomeado, ações pendentes marcadas como decisão humana (`canBeAutomated: false`), entradas que só o usuário fornece (`pendingInputs`), requisitos de RAM/VRAM/disco separados, custo só quando o adapter declara valor, licenças por adapter e gates de revisão listados. Evidência: `tests/orchestrator-engine-smoke.mjs` e `tests/workflow-coverage-smoke.mjs`. Seguem como **alvo**: busca por skills, comparação de rotas alternativas com custo real medido e planejamento multipipeline. Consulte [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md), [`WORKFLOW-ENGINE.md`](WORKFLOW-ENGINE.md) e [`T13-IMPLEMENTATION-EVIDENCE.md`](T13-IMPLEMENTATION-EVIDENCE.md).
 
 ## Missão
 
@@ -63,7 +63,7 @@ Um LLM pode ajudar a extrair campos/recomendar planos, mas o modo de base deve c
 
 ## Estado atual e lacunas
 
-`electron/workflow-contracts.cjs` gera contrato humanoide estático e condições de autorização por provider; `workflow-runner.cjs` executa o plano recebido serialmente. O provider ausente bloqueia cada etapa de geração e não simula arquivos. Não há index geral de capabilities, busca por skills, comparação de rotas, detecção universal de hardware/custos ou planner multipipeline. `scripts/spriteforge-mcp.mjs` é integração opcional de handoff/registro, não Intelligent Orchestrator.
+`electron/workflow-contracts.cjs` gera contrato humanoide estático e condições de autorização por provider; `workflow-runner.cjs` executa o plano recebido serialmente. O provider ausente bloqueia cada etapa de geração e não simula arquivos. Desde a T13 há index geral de capabilities (`shared/capabilities/registry.mjs`, 49 capacidades em 7 famílias) e detecção de máquina/backends por adapter (`shared/adapters/sdk.mjs`, campo `backends` com `validated` explícito); continuam ausentes busca por skills, comparação de rotas, detecção universal de custos e planner multipipeline. `scripts/spriteforge-mcp.mjs` é integração opcional de handoff/registro, não Intelligent Orchestrator.
 
 ## Critérios de aceite futuros
 

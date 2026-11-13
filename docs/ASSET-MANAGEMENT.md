@@ -1,6 +1,6 @@
 # Gestão de assets, versões e proveniência
 
-> **Estado:** modelo-alvo `PLANNED`. A gestão existente (manifesto JSON do workspace e snapshots de execução) é parcial e não é um version graph; confira [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md).
+> **Estado:** **parcialmente implementado** (T13, 2026-11-13 UTC). `shared/assets/manager.mjs` traz catálogo com schema versionado (`ASSET_MANAGER_SCHEMA_VERSION = 1`), versões por asset, proveniência (adapter, licença, direitos da saída, SHA-256 do run), seis estados de direitos (`owned`, `licensed`, `license-pending`, `unknown`, `restricted`, `blocked`), classificação por dica de licença sem inventar restrição e relatório de direitos; runs concluídos podem ser anexados como versão de um asset. Evidência executada: `tests/asset-manager-smoke.mjs` e `tests/studio-service-smoke.mjs`. Seguem como **alvo**: version graph com ramificação/fusão e deduplicação por conteúdo. O manifesto JSON do workspace e os snapshots de execução continuam sendo a base legada; confira [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md) e [`T13-IMPLEMENTATION-EVIDENCE.md`](T13-IMPLEMENTATION-EVIDENCE.md).
 
 ## Objetivo
 

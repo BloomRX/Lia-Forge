@@ -1,6 +1,6 @@
 # Visual QA, evidências e benchmark
 
-> **Estado:** infraestrutura geral de Visual QA e Benchmark `PLANNED`. Checks estruturais pontuais já existem; nenhum score/benchmark foi medido nesta missão. Ver [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md).
+> **Estado:** validação de conteúdo **implementada** (T13, 2026-11-13 UTC); benchmark comparativo continua `PLANNED`. `shared/qa/png-codec.mjs` mede pixels de verdade (cobertura, cores únicas, luma média, bounding box, células vazias por frame) e `shared/qa/validators.mjs` expõe 14 validadores + `validateStepOutputs`, que executa os validadores declarados no plano sobre os artefatos gravados — quando a entrada de um validador não existe, o resultado é `skipped` com motivo, nunca um ok silencioso. O engine cobra isso antes da revisão humana (`shared/engine/execution-manager.mjs`) e o ledger de revisão fica em `.lia-forge/runs/<id>/reviews.json`, ancorado no SHA-256 do artefato. Nenhum score/benchmark foi medido; seguem ausentes viewer 3D, contact-sheet QA universal e medição de qualidade de animação/mesh. Ver [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md) e [`T13-IMPLEMENTATION-EVIDENCE.md`](T13-IMPLEMENTATION-EVIDENCE.md).
 
 ## Objetivo e separação de evidências
 
@@ -64,7 +64,7 @@ Não comparar “tempo médio” sem máquina, provider response, cache, quantid
 
 ## Implementação atual
 
-`electron/png-validation.cjs`, `electron/spritesheet-manifest.cjs` e `electron/workflow-runner.cjs` executam parte dos checks de arquivo/PNG/manifesto/contrato e calculam hashes. `docs/usage-workflows.md` pede inspeção visual humana. Não há viewer 3D, contact-sheet QA universal, medição de qualidade de animação/mesh, review ledger geral ou benchmark comparativo implementado. A validação do PNG pode confirmar canal alpha declarativo sem provar que existem pixels realmente transparentes; o manifest não prova que o conteúdo visual corresponde ao pedido.
+`electron/png-validation.cjs`, `electron/spritesheet-manifest.cjs` e `electron/workflow-runner.cjs` executam parte dos checks de arquivo/PNG/manifesto/contrato e calculam hashes. `docs/usage-workflows.md` pede inspeção visual humana. Não há viewer 3D, contact-sheet QA universal, medição de qualidade de animação/mesh nem benchmark comparativo implementado; o review ledger existe por run (`reviews.json` + gates de revisão), não como livro-razão global entre projetos. Desde a T13 a validação do PNG **decodifica e mede pixels** (cobertura, cores únicas, células vazias), então um atlas 100% transparente é recusado na produção; o manifest continua não provando que o conteúdo visual corresponde ao pedido artístico — isso exige revisão humana.
 
 ## Critérios de aceite futuros
 
