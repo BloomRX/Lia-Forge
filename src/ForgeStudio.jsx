@@ -12,7 +12,7 @@
  * aqui instala, baixa, compra ou envia dados.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Box,
@@ -41,6 +41,9 @@ import {
   SlidersHorizontal,
   Sparkles,
   Terminal,
+  Upload,
+  FolderOpen,
+  GitCompareArrows,
   Workflow as WorkflowIcon,
 } from 'lucide-react';
 import { liaForgeApi } from './lia-forge-api.js';
@@ -656,6 +659,206 @@ export function RunStepRow({ step, onReview = () => {}, reviewBusy = false, revi
   );
 }
 
+/**
+ * Miniatura de qualquer arquivo do projeto: entradas do usuário (`input/`) e
+ * artefatos de run (`.lia-forge/runs/`). A fonte é resolvida por transporte —
+ * URL HTTP no navegador, data URL vinda por IPC no desktop.
+ */
+export function ArtifactThumb({ path: relativePath, kind = 'image', alt = null }) {
+  const [source, setSource] = useState(null);
+  useEffect(() => {
+    let active = true;
+    setSource(null);
+    if (kind !== 'image' || !relativePath) return () => { active = false; };
+    const load = relativePath.startsWith('input/') ? liaForgeApi.inputSource(relativePath) : liaForgeApi.artifactSource(relativePath);
+    load
+      .then((value) => { if (active) setSource(value); })
+      .catch(() => { if (active) setSource(null); });
+    return () => { active = false; };
+  }, [relativePath, kind]);
+  if (kind !== 'image' || !source) {
+    return <span className="forge-thumb is-empty"><Box size={16} strokeWidth={1.7} /></span>;
+  }
+  return <img className="forge-thumb" src={source} alt={alt ?? relativePath} loading="lazy" />;
+}
+
+const INPUT_ACCEPT = {
+  image: '.png,.jpg,.jpeg,.webp',
+  model: '.glb,.gltf,.fbx,.obj,.stl,.blend',
+  any: '.png,.jpg,.jpeg,.webp,.glb,.gltf,.fbx,.obj,.stl,.blend,.md,.txt,.json',
+};
+
+/**
+ * Escolha de entrada sem digitar caminho: lista o que existe em `input/`,
+ * aceita envio de arquivo e (no desktop) o seletor do sistema. O caminho manual
+ * continua disponível para quem prefere informar um arquivo que já está lá.
+ */
+export function InputPicker({ label, hint = null, kind = 'image', value, entries, busy, onSelect, onUpload, onPickNative, transport }) {
+  const fileInput = useRef(null);
+  const visible = (entries ?? []).filter((entry) => kind === 'any' || entry.kind === kind);
+  return (
+    <div className="forge-picker is-wide">
+      <header>
+        <span>{label}</span>
+        <div className="forge-picker-actions">
+          <input ref={fileInput} type="file" hidden accept={INPUT_ACCEPT[kind] ?? INPUT_ACCEPT.any} onChange={onUpload} />
+          <button type="button" className="button button-quiet" onClick={() => fileInput.current?.click()} disabled={busy !== null}>
+            {busy === 'upload' ? <span className="spin" /> : <Upload size={13} strokeWidth={1.9} />} Enviar arquivo
+          </button>
+          {transport === 'ipc' ? (
+            <button type="button" className="button button-quiet" onClick={onPickNative} disabled={busy !== null}>
+              <FolderOpen size={13} strokeWidth={1.9} /> Escolher no computador
+            </button>
+          ) : null}
+        </div>
+      </header>
+      {hint ? <p className="forge-note">{hint}</p> : null}
+      {visible.length ? (
+        <div className="forge-picker-grid">
+          {visible.slice(0, 12).map((entry) => (
+            <button
+              type="button"
+              key={entry.path}
+              className={`forge-pick${entry.path === value ? ' is-selected' : ''}`}
+              onClick={() => onSelect(entry.path)}
+              title={entry.path}
+            >
+              <ArtifactThumb path={entry.path} kind={entry.kind} alt={entry.name} />
+              <strong>{entry.name}</strong>
+              <em>
+                {entry.kind === 'image' && entry.width ? `${entry.width}×${entry.height} px`
+                  : entry.kind === 'model' && entry.triangleCount ? `${entry.triangleCount} triângulos`
+                    : `${(entry.bytes / 1024).toFixed(1)} KB`}
+              </em>
+              {entry.problem ? <span className="forge-pick-problem">{entry.problem}</span> : null}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="forge-note">
+          Nada em <code>input/</code> ainda: envie um arquivo aqui ou copie-o para a pasta <code>input/</code> do projeto.
+        </p>
+      )}
+      <Detail summary="ou informe o caminho manualmente">
+        <label>
+          <span>Caminho dentro do projeto</span>
+          <input value={value ?? ''} onChange={(event) => onSelect(event.target.value)} placeholder="input/sprite.png" spellCheck={false} />
+        </label>
+      </Detail>
+    </div>
+  );
+}
+
+/**
+ * Comparison Lab: variações lado a lado com as métricas medidas de cada arquivo.
+ * O produto mostra os números e não escolhe por você — a decisão fica gravada
+ * como versão do asset.
+ */
+export function ComparisonLab({ candidates, entries, runs, busy, comparison, onToggle, onRemove, onCompare, onAddRun, onRegister, registered }) {
+  const [runId, setRunId] = useState('');
+  const selected = candidates.map((item) => item.path);
+  const imageEntries = (entries ?? []).filter((entry) => entry.kind === 'image');
+  return (
+    <section className="panel forge-panel">
+      <header className="forge-panel-head">
+        <GitCompareArrows size={15} strokeWidth={1.8} />
+        <h2>5 · Comparison Lab</h2>
+        <span className="forge-panel-tag">{selected.length} selecionado(s)</span>
+      </header>
+      <p className="forge-note">
+        Compare variações e artefatos lado a lado com as métricas medidas de cada arquivo (dimensões, cores, cobertura, SHA-256).
+        O Lia Forge não escolhe por você: a preferência vira versão registrada no asset.
+      </p>
+
+      <div className="forge-compare-picker">
+        <div>
+          <span>Entradas do projeto</span>
+          <div className="forge-chip-row">
+            {imageEntries.map((entry) => (
+              <button
+                type="button"
+                key={entry.path}
+                className={`forge-chip${selected.includes(entry.path) ? ' is-on' : ''}`}
+                onClick={() => onToggle({ path: entry.path, origin: 'input' })}
+              >
+                {entry.name}
+              </button>
+            ))}
+            {!imageEntries.length ? <em className="forge-note">nenhuma imagem em input/</em> : null}
+          </div>
+        </div>
+        <div>
+          <span>Artefatos de um run</span>
+          <div className="forge-chip-row">
+            <select value={runId} onChange={(event) => setRunId(event.target.value)}>
+              <option value="">— escolha um run —</option>
+              {(runs ?? []).map((item) => (
+                <option key={item.runId} value={item.runId}>{item.runId} · {item.planTitle ?? item.planId ?? 'run'}</option>
+              ))}
+            </select>
+            <button type="button" className="button button-quiet" disabled={!runId || busy !== null} onClick={() => onAddRun(runId)}>
+              {busy === 'compare-load' ? <span className="spin" /> : <Layers3 size={13} strokeWidth={1.9} />} Adicionar imagens do run
+            </button>
+          </div>
+        </div>
+        {candidates.length ? (
+          <div className="forge-chip-row is-selected">
+            {candidates.map((item) => (
+              <button type="button" key={item.path} className="forge-chip is-on" onClick={() => onRemove(item.path)} title="remover da comparação">
+                {item.path.split('/').pop()} ✕
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
+      <div className="forge-panel-actions">
+        <button type="button" className="button button-primary" onClick={() => onCompare(selected)} disabled={!selected.length || busy !== null}>
+          {busy === 'compare' ? <span className="spin" /> : <GitCompareArrows size={14} />} Comparar {selected.length ? `(${selected.length})` : ''}
+        </button>
+        {registered ? <span className="forge-note">Versão gravada em <code>{registered.assetId}</code> · {registered.path}</span> : null}
+      </div>
+
+      {comparison ? (
+        <div className="forge-compare-grid">
+          {comparison.entries.map((entry) => (
+            <article key={entry.path} className={`forge-compare-card${entry.ok ? '' : ' is-error'}`}>
+              <ArtifactThumb path={entry.path} kind={entry.ok && ['png', 'jpg', 'jpeg', 'webp'].includes(entry.format) ? 'image' : 'other'} alt={entry.path} />
+              <strong title={entry.path}>{entry.name ?? entry.path.split('/').pop()}</strong>
+              {entry.ok ? (
+                <>
+                  <div className="forge-plan-meta">
+                    <KeyValue label="Formato" value={entry.format} />
+                    <KeyValue label="Dimensões" value={entry.width ? `${entry.width}×${entry.height}` : null} />
+                    <KeyValue label="Cores únicas" value={entry.uniqueColors ?? null} />
+                    <KeyValue label="Cobertura" value={entry.coverage === null || entry.coverage === undefined ? null : `${(entry.coverage * 100).toFixed(1)}%`} />
+                    <KeyValue label="Triângulos" value={entry.triangleCount ?? null} />
+                    <KeyValue label="Tamanho" value={`${(entry.bytes / 1024).toFixed(1)} KB`} />
+                    <KeyValue label="Conteúdo verificado" value={entry.contentChecked ? 'sim' : 'não'} />
+                  </div>
+                  <p className="forge-note is-mono">sha256 {String(entry.sha256 ?? '').slice(0, 16)}…</p>
+                  {entry.blank ? <p className="forge-pick-problem">Imagem totalmente transparente: não serve como arte final.</p> : null}
+                  <button
+                    type="button"
+                    className="button button-quiet"
+                    disabled={busy !== null}
+                    // A proveniência do run (quando o artefato veio de um) segue junto da versão.
+                    onClick={() => onRegister({ ...entry, runId: candidates.find((item) => item.path === entry.path)?.runId ?? null })}
+                  >
+                    <Package size={13} strokeWidth={1.9} /> Registrar como versão do asset
+                  </button>
+                </>
+              ) : (
+                <p className="forge-pick-problem">{entry.problem}</p>
+              )}
+            </article>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export default function ForgeStudio({ onNotify = () => {} }) {
   const [overview, setOverview] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -677,6 +880,10 @@ export default function ForgeStudio({ onNotify = () => {} }) {
   const [exportResult, setExportResult] = useState(null);
   const [runs, setRuns] = useState([]);
   const [providers, setProviders] = useState(null);
+  const [inputs, setInputs] = useState([]);
+  const [compareCandidates, setCompareCandidates] = useState([]);
+  const [comparison, setComparison] = useState(null);
+  const [registeredVersion, setRegisteredVersion] = useState(null);
 
   const notify = useCallback((message, tone = 'info') => {
     if (typeof onNotify === 'function') onNotify(message, tone);
@@ -697,6 +904,12 @@ export default function ForgeStudio({ onNotify = () => {} }) {
         setProviders(await liaForgeApi.providers());
       } catch {
         setProviders(data.providers ?? null);
+      }
+      try {
+        const listed = await liaForgeApi.listInputs();
+        setInputs(listed?.entries ?? []);
+      } catch {
+        setInputs([]);
       }
       if (!workflowId) {
         const firstExecutable = data.workflows.find((workflow) => workflow.executableNow) ?? data.workflows[0];
@@ -755,6 +968,108 @@ export default function ForgeStudio({ onNotify = () => {} }) {
     if (modelParam && modelPath.trim()) params[modelParam] = modelPath.trim();
     return params;
   }, [needsSourceImage, sourceImage, isVfxWorkflow, vfx, needsPriorRun, fromRun, modelParam, modelPath]);
+
+  const refreshInputs = useCallback(async () => {
+    try {
+      const listed = await liaForgeApi.listInputs();
+      setInputs(listed?.entries ?? []);
+      return listed?.entries ?? [];
+    } catch {
+      return [];
+    }
+  }, []);
+
+  /** Upload pelo navegador: o arquivo é copiado para input/, o original fica onde está. */
+  const handleUploadInput = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    runAction('upload', async () => {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const saved = await liaForgeApi.saveInput({ filename: file.name, bytes });
+      await refreshInputs();
+      if (saved.kind === 'image') setSourceImage(saved.path);
+      else if (saved.kind === 'model' && modelParam) setModelPath(saved.path);
+      notify(`"${saved.name}" copiado para input/ e verificado (${(saved.bytes / 1024).toFixed(1)} KB).`, 'info');
+      return saved;
+    });
+  };
+
+  /** No desktop, o seletor do sistema faz o mesmo papel do upload. */
+  const handlePickNativeInput = () => runAction('upload', async () => {
+    const saved = await liaForgeApi.pickInput();
+    if (!saved) {
+      notify('Nenhum arquivo foi escolhido.', 'info');
+      return null;
+    }
+    await refreshInputs();
+    if (saved.kind === 'image') setSourceImage(saved.path);
+    else if (saved.kind === 'model' && modelParam) setModelPath(saved.path);
+    notify(`"${saved.name}" copiado para input/ e verificado (${(saved.bytes / 1024).toFixed(1)} KB).`, 'info');
+    return saved;
+  });
+
+  const handleToggleCompare = (candidate) => {
+    setComparison(null);
+    setCompareCandidates((current) => (current.some((item) => item.path === candidate.path)
+      ? current.filter((item) => item.path !== candidate.path)
+      : current.length >= 4
+        ? current
+        : [...current, candidate]));
+  };
+
+  const handleAddRunToCompare = (runId) => runAction('compare-load', async () => {
+    const detail = await liaForgeApi.readRun(runId);
+    const paths = (detail?.steps ?? [])
+      .flatMap((step) => step.outputs ?? [])
+      .filter((output) => /\.(png|jpe?g|webp)$/i.test(output));
+    if (!paths.length) {
+      notify('Esse run não tem imagens para comparar.', 'info');
+      return null;
+    }
+    setCompareCandidates((current) => {
+      const known = new Set(current.map((item) => item.path));
+      return [...current, ...paths.filter((item) => !known.has(item)).map((item) => ({ path: item, origin: 'run', runId }))].slice(0, 4);
+    });
+    notify(`${paths.length} imagem(ns) do run ${runId} adicionada(s) à comparação.`, 'info');
+    return paths;
+  });
+
+  const handleCompare = (paths) => runAction('compare', async () => {
+    const result = await liaForgeApi.compareArtifacts(paths);
+    setComparison(result);
+    setRegisteredVersion(null);
+    notify(`${result.entries.length} artefato(s) medido(s) lado a lado.`, 'info');
+    return result;
+  });
+
+  const handleRegisterVersion = (entry) => runAction('register', async () => {
+    const id = (assetName.trim() || 'comparacao').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').slice(0, 80);
+    await liaForgeApi.upsertAsset({ id, type: 'character', name: assetName.trim() || id });
+    const version = await liaForgeApi.addAssetVersion(id, {
+      runId: entry.runId ?? null,
+      note: 'Escolhido no Comparison Lab',
+      artifacts: [{
+        path: entry.path,
+        role: 'comparison-pick',
+        format: entry.format ?? null,
+        bytes: entry.bytes ?? null,
+        sha256: entry.sha256 ?? null,
+        validated: entry.contentChecked === true,
+        contentMetrics: entry.uniqueColors === undefined ? null : {
+          uniqueColors: entry.uniqueColors,
+          coverage: entry.coverage,
+          width: entry.width,
+          height: entry.height,
+        },
+      }],
+    });
+    setRegisteredVersion({ assetId: id, path: entry.path, version: version?.version ?? null });
+    // O painel de direitos e a lista de assets mudaram: relê o panorama.
+    setOverview(await liaForgeApi.overview());
+    notify(`Versão ${version?.version ?? 'nova'} gravada no asset "${id}".`, 'info');
+    return version;
+  });
 
   const handleConfigureProvider = (payload) => runAction('provider', async () => {
     const result = await liaForgeApi.configureProvider(payload);
@@ -918,10 +1233,18 @@ export default function ForgeStudio({ onNotify = () => {} }) {
                 </select>
               </label>
               {needsSourceImage ? (
-                <label>
-                  <span>Imagem de entrada (dentro do projeto)</span>
-                  <input value={sourceImage} onChange={(event) => setSourceImage(event.target.value)} placeholder="input/sprite.png" />
-                </label>
+                <InputPicker
+                  label="Imagem de entrada"
+                  hint="Escolha uma imagem do projeto ou envie a sua. O arquivo é copiado para input/ e verificado antes de entrar no pipeline."
+                  kind="image"
+                  value={sourceImage}
+                  entries={inputs}
+                  busy={busy}
+                  transport={liaForgeApi.transport}
+                  onSelect={setSourceImage}
+                  onUpload={handleUploadInput}
+                  onPickNative={handlePickNativeInput}
+                />
               ) : null}
               {needsPriorRun ? (
                 <label>
@@ -937,10 +1260,18 @@ export default function ForgeStudio({ onNotify = () => {} }) {
                 </label>
               ) : null}
               {modelParam ? (
-                <label>
-                  <span>Modelo 3D (caminho dentro do projeto)</span>
-                  <input value={modelPath} onChange={(event) => setModelPath(event.target.value)} placeholder={`input/modelo.glb (${modelParam})`} />
-                </label>
+                <InputPicker
+                  label={`Modelo 3D (entrada "${modelParam}")`}
+                  hint="Modelos aceitos: .glb, .gltf, .fbx, .obj, .stl e .blend. Um .glb é inspecionado aqui (meshes, triângulos, animações) antes do render."
+                  kind="model"
+                  value={modelPath}
+                  entries={inputs}
+                  busy={busy}
+                  transport={liaForgeApi.transport}
+                  onSelect={setModelPath}
+                  onUpload={handleUploadInput}
+                  onPickNative={handlePickNativeInput}
+                />
               ) : null}
               {isVfxWorkflow ? (
                 <>
@@ -1195,6 +1526,19 @@ export default function ForgeStudio({ onNotify = () => {} }) {
               ) : null}
             </section>
           ) : null}
+          <ComparisonLab
+            candidates={compareCandidates}
+            entries={inputs}
+            runs={runs}
+            busy={busy}
+            comparison={comparison}
+            onToggle={handleToggleCompare}
+            onRemove={(path) => { setCompareCandidates((current) => current.filter((item) => item.path !== path)); setComparison(null); }}
+            onCompare={handleCompare}
+            onAddRun={handleAddRunToCompare}
+            onRegister={handleRegisterVersion}
+            registered={registeredVersion}
+          />
         </div>
 
         <aside className="forge-side">

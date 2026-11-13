@@ -294,10 +294,101 @@ try {
   assert.ok(providerMarkup.includes('Não conectado') && providerMarkup.includes('Não detectado'), 'o estado real (ausente) é o que aparece, nunca "disponível"');
   assert.ok(providerMarkup.includes('não instala, não baixa, não compra'), 'a garantia de não instalar/baixar/comprar está visível');
 
+  // ------------------------- 7. entradas do usuário e Comparison Lab (HTTP)
+  const listedInputs = await liaForgeApi.listInputs();
+  assert.equal(listedInputs.directory, 'input', 'as entradas vivem em input/');
+  const spriteEntry = listedInputs.entries.find((entry) => entry.path === 'input/sprite.png');
+  assert.ok(spriteEntry, 'a imagem criada no projeto temporário aparece na lista');
+  assert.equal(spriteEntry.width, 48, 'a entrada é medida de verdade (largura)');
+  assert.equal(spriteEntry.height, 48, 'a entrada é medida de verdade (altura)');
+  assert.equal(spriteEntry.contentChecked, true, 'o PNG foi decodificado, não apenas listado');
+  assert.equal(spriteEntry.sha256.length, 64, 'a entrada recebe SHA-256');
+
+  const uploaded = await liaForgeApi.saveInput({ filename: '../../etc/Sprite Herói.png', bytes: encodePngRgba(sprite.rgba, 48, 48) });
+  assert.equal(uploaded.path, 'input/Sprite-Heroi.png', `nome sanitizado (sem traversal, sem acento) e confinado a input/ (${uploaded.path})`);
+  assert.equal(uploaded.contentChecked, true, 'o upload é verificado antes de gravar');
+  const again = await liaForgeApi.saveInput({ filename: 'sprite-heroi.png', bytes: encodePngRgba(sprite.rgba, 48, 48) });
+  assert.equal(again.path, 'input/sprite-heroi-2.png', 'colisão (mesmo ignorando caixa) nunca sobrescreve o arquivo existente');
+
+  const badExtension = await nativeFetch(`${origin}/api/lia-forge/studio/inputs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename: 'payload.exe', base64: Buffer.from('MZ').toString('base64') }),
+  });
+  assert.equal(badExtension.status, 400, 'formato não aceito é recusado com 400');
+  const badContent = await nativeFetch(`${origin}/api/lia-forge/studio/inputs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename: 'falso.png', base64: Buffer.from('isto não é um png').toString('base64') }),
+  });
+  assert.equal(badContent.status, 400, 'PNG inválido é recusado com 400');
+
+  const servedInput = await nativeFetch(`${origin}/api/lia-forge/studio/input-file?path=${encodeURIComponent('input/sprite.png')}`);
+  assert.equal(servedInput.status, 200, 'a entrada é servida para a prévia');
+  assert.equal(servedInput.headers.get('content-type'), 'image/png', 'content-type de imagem');
+  assert.equal(analyzePngContent(Buffer.from(await servedInput.arrayBuffer())).blank, false, 'a imagem servida tem conteúdo');
+  const inputTraversal = await nativeFetch(`${origin}/api/lia-forge/studio/input-file?path=${encodeURIComponent('../../../etc/passwd')}`);
+  assert.equal(inputTraversal.status, 403, 'traversal fora de input/ é recusado');
+
+  const comparison = await liaForgeApi.compareArtifacts(['input/sprite.png', 'input/sprite-heroi-2.png', '../fora-do-projeto.png']);
+  assert.equal(comparison.entries.length, 3, 'a comparação devolve uma entrada por caminho');
+  assert.equal(comparison.entries[0].ok, true, 'artefato do projeto é medido');
+  assert.equal(comparison.entries[0].uniqueColors > 1, true, 'cores únicas medidas no Comparison Lab');
+  assert.equal(comparison.entries[2].ok, false, 'caminho fora do projeto é recusado na comparação');
+  assert.match(comparison.entries[2].problem, /recusado/, 'o motivo da recusa é dito');
+
+  const chosen = comparison.entries[0];
+  await liaForgeApi.upsertAsset({ id: 'hero-comparison', type: 'character', name: 'Herói (escolha no lab)' });
+  const versioned = await liaForgeApi.addAssetVersion('hero-comparison', {
+    note: 'Escolhido no Comparison Lab',
+    artifacts: [{ path: chosen.path, role: 'comparison-pick', format: chosen.format, bytes: chosen.bytes, sha256: chosen.sha256, validated: true, contentMetrics: { uniqueColors: chosen.uniqueColors, coverage: chosen.coverage } }],
+  });
+  assert.match(String(versioned.version), /^v\d+$/, `a escolha vira versão registrada no asset (${versioned.version})`);
+  assert.equal(versioned.artifacts[0].sha256, chosen.sha256, 'a versão guarda o SHA-256 do artefato escolhido');
+  assert.equal(versioned.artifacts[0].contentMetrics.uniqueColors, chosen.uniqueColors, 'a versão guarda as métricas medidas na comparação');
+  const stored = (await liaForgeApi.assets()).assets.find((asset) => asset.id === 'hero-comparison');
+  assert.equal(stored.versions.length, 1, 'a versão fica gravada no inventário do projeto');
+  assert.equal(stored.versions[0].artifacts[0].path, chosen.path, 'a versão aponta para o artefato escolhido');
+
+  const { InputPicker, ComparisonLab } = await vite.ssrLoadModule('/src/ForgeStudio.jsx');
+  const pickerMarkup = renderToStaticMarkup(createElement(InputPicker, {
+    label: 'Imagem de entrada',
+    kind: 'image',
+    value: 'input/sprite.png',
+    entries: listedInputs.entries,
+    busy: null,
+    transport: 'http',
+    onSelect: () => {},
+    onUpload: () => {},
+    onPickNative: () => {},
+  }));
+  assert.ok(pickerMarkup.includes('Imagem de entrada'), 'o seletor de entrada aparece com o rótulo');
+  assert.ok(pickerMarkup.includes('Enviar arquivo'), 'o envio de arquivo está visível para o iniciante');
+  assert.ok(pickerMarkup.includes('sprite.png') && pickerMarkup.includes('is-selected'), 'a entrada existente aparece selecionável');
+  assert.ok(!pickerMarkup.includes('Escolher no computador'), 'no navegador não é oferecido o seletor nativo (só no desktop)');
+
+  const labMarkup = renderToStaticMarkup(createElement(ComparisonLab, {
+    candidates: [{ path: 'input/sprite.png', origin: 'input' }],
+    entries: listedInputs.entries,
+    runs: [],
+    busy: null,
+    comparison,
+    onToggle: () => {},
+    onRemove: () => {},
+    onCompare: () => {},
+    onAddRun: () => {},
+    onRegister: () => {},
+    registered: null,
+  }));
+  assert.ok(labMarkup.includes('Comparison Lab'), 'o Comparison Lab aparece na página');
+  assert.ok(labMarkup.includes('Cores únicas') && labMarkup.includes('sha256'), 'as métricas medidas aparecem na comparação');
+  assert.ok(labMarkup.includes('Registrar como versão do asset'), 'a escolha pode ser gravada como versão');
+  assert.ok(labMarkup.includes('recusado'), 'caminho recusado é mostrado como erro, não como artefato');
+
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 
-  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações e providers na UI; transporte ${liaForgeApi.transport}).`);
+  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações, providers, upload de referências e Comparison Lab na UI; transporte ${liaForgeApi.transport}).`);
 } finally {
   globalThis.fetch = nativeFetch;
   await vite.close();

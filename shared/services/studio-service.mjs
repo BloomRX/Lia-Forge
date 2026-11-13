@@ -27,6 +27,8 @@ import { ExecutionManager } from '../engine/execution-manager.mjs';
 import { assertSafeWriteTarget, redactSecrets, sha256Hex } from '../engine/gates.mjs';
 import { createAssetManager, classifyRights } from '../assets/manager.mjs';
 import { decodePng, encodePngRgba, analyzePngContent } from '../qa/png-codec.mjs';
+import { validatePngStructure } from '../qa/png.mjs';
+import { inspectGlb } from '../model3d/glb.mjs';
 import { validateStepOutputs } from '../qa/validators.mjs';
 import { createHostDefaults } from '../integrations/host-defaults.mjs';
 import { createProviderStore, isLoopbackEndpoint } from '../integrations/provider-store.mjs';
@@ -36,6 +38,39 @@ import { buildExportBundle, checkDestinationCompatibility, listDestinations } fr
 
 export const STUDIO_SERVICE_SCHEMA_VERSION = 1;
 const RUNS_DIRECTORY = '.lia-forge/runs';
+/** Pasta das entradas fornecidas pelo usuário (imagens de referência, modelos). */
+const INPUT_DIRECTORY = 'input';
+const MAX_INPUT_BYTES = 32 * 1024 * 1024;
+const MAX_INPUT_ENTRIES = 400;
+const MAX_INPUT_DEPTH = 3;
+const INPUT_IMAGE_EXTENSIONS = Object.freeze(['png', 'jpg', 'jpeg', 'webp']);
+const INPUT_MODEL_EXTENSIONS = Object.freeze(['glb', 'gltf', 'fbx', 'obj', 'stl', 'blend']);
+const INPUT_OTHER_EXTENSIONS = Object.freeze(['md', 'json', 'txt']);
+const INPUT_EXTENSIONS = Object.freeze([...INPUT_IMAGE_EXTENSIONS, ...INPUT_MODEL_EXTENSIONS, ...INPUT_OTHER_EXTENSIONS]);
+
+/**
+ * Nome de arquivo vindo do usuário vira nome de arquivo dentro de `input/`:
+ * sem caminho, sem `..`, sem caracteres que dependam de shell ou de sistema de
+ * arquivos específico. Colisão nunca sobrescreve o original — ganha sufixo.
+ */
+function sanitizeInputName(value) {
+  const base = path.basename(String(value ?? '').replace(/\\/g, '/')).trim();
+  if (!base || base === '.' || base === '..') return null;
+  const cleaned = base
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^[-.]+/, '')
+    .replace(/\.{2,}/g, '.')
+    .slice(0, 120);
+  if (!cleaned || cleaned.startsWith('.')) return null;
+  return cleaned;
+}
+
+function extensionOf(name) {
+  const match = /\.([A-Za-z0-9]+)$/.exec(String(name ?? ''));
+  return match ? match[1].toLowerCase() : '';
+}
 const MAX_PREVIEW_BYTES = 6 * 1024 * 1024;
 
 async function pathExists(target) {
@@ -147,7 +182,9 @@ export function createStudioService(options = {}) {
     const client = comfy.mode === 'local-loopback' ? await workflowClient() : null;
     let comfyStatus = null;
     if (client) {
-      try { comfyStatus = await client.getComfyUiStatus({ includeModels: false }); }
+      // includeModels: a lista de checkpoints instalados vem do próprio servidor —
+      // é o que permite escolher um modelo real na interface, sem baixar nada.
+      try { comfyStatus = await client.getComfyUiStatus({ includeModels: true }); }
       catch (error) { comfyStatus = { connected: false, error: String(error.message ?? error).slice(0, 200) }; }
     }
     const configured = blender.mode === 'disabled' ? null : (blender.executable ?? null);
@@ -181,6 +218,10 @@ export function createStudioService(options = {}) {
         devices: comfyStatus?.devices ?? [],
         queue: comfyStatus?.queue ?? null,
         models: comfyStatus?.models ?? null,
+        checkpoints: Array.isArray(comfyStatus?.models?.checkpoints) ? comfyStatus.models.checkpoints : [],
+        modelCounts: comfyStatus?.models
+          ? Object.fromEntries(Object.entries(comfyStatus.models).map(([folder, list]) => [folder, Array.isArray(list) ? list.length : null]))
+          : null,
         detail: comfy.mode === 'local-loopback'
           ? (comfyStatus?.connected
             ? `ComfyUI local respondeu em ${comfyStatus.endpoint ?? comfy.endpoint ?? 'http://127.0.0.1:8188'}.`
@@ -354,6 +395,152 @@ export function createStudioService(options = {}) {
 
   async function assets() {
     return createAssetManager({ store: await readStore(), save: writeStore });
+  }
+
+  // ---------------------------------------------------- entradas do usuário
+  const inputRoot = path.join(projectRoot, INPUT_DIRECTORY);
+
+  /**
+   * Resolve um caminho dentro de uma raiz do projeto sem seguir symlink para
+   * fora. A interface envia caminhos relativos ao projeto (`input/sprite.png`);
+   * os demais são relativos à pasta de confinamento. As duas formas apontam para
+   * o mesmo arquivo e nenhuma delas pode sair de `root`.
+   */
+  async function resolveInside(root, candidate, projectRoot = path.dirname(root)) {
+    const value = String(candidate ?? '').trim().replace(/^[\\/]+/, '');
+    if (!value || path.isAbsolute(value)) return null;
+    const prefixed = value === 'input' || value.startsWith('input/') || value.startsWith('input\\');
+    const base = prefixed && path.resolve(root) !== path.resolve(projectRoot) ? projectRoot : root;
+    const resolved = path.resolve(base, value);
+    const gate = await assertSafeWriteTarget({
+      root,
+      target: resolved,
+      resolve: async (item) => path.resolve(item),
+      lstat: async (item) => fs.lstat(item).catch(() => null),
+      realpath: async (item) => fs.realpath(item).catch(() => null),
+    });
+    return gate.ok ? resolved : null;
+  }
+
+  /**
+   * Mede o que dá para medir aqui, sem ferramenta externa: PNG e GLB são
+   * decodificados de verdade; JPEG/WebP são conferidos pela assinatura. O que
+   * não pôde ser verificado fica marcado como tal — nunca como "ok".
+   */
+  function describeInputBytes(name, bytes) {
+    const extension = extensionOf(name);
+    const base = {
+      name,
+      format: extension || null,
+      bytes: bytes.length,
+      sha256: hash(bytes),
+      kind: INPUT_IMAGE_EXTENSIONS.includes(extension) ? 'image'
+        : INPUT_MODEL_EXTENSIONS.includes(extension) ? 'model'
+          : INPUT_OTHER_EXTENSIONS.includes(extension) ? 'document' : 'other',
+      contentChecked: false,
+      width: null,
+      height: null,
+      problem: null,
+    };
+    if (extension === 'png') {
+      try {
+        validatePngStructure(bytes);
+        const decoded = decodePng(bytes);
+        const analysis = analyzePngContent(bytes);
+        return Object.freeze({
+          ...base, contentChecked: true, width: decoded.width, height: decoded.height,
+          uniqueColors: analysis.uniqueColors, coverage: analysis.coverage, blank: analysis.blank,
+          boundingBox: analysis.boundingBox ?? null,
+        });
+      } catch (error) {
+        return Object.freeze({ ...base, problem: `PNG inválido: ${String(error.message ?? error).slice(0, 180)}` });
+      }
+    }
+    if (extension === 'glb') {
+      try {
+        const info = inspectGlb(bytes);
+        return Object.freeze({
+          ...base, contentChecked: true,
+          meshCount: info.meshCount, triangleCount: info.triangleCount,
+          materials: info.materials?.length ?? 0, animationCount: info.animationCount ?? 0,
+          animationNames: info.animationNames ?? [], skinned: info.skinned === true,
+        });
+      } catch (error) {
+        return Object.freeze({ ...base, problem: `GLB inválido: ${String(error.message ?? error).slice(0, 180)}` });
+      }
+    }
+    if (extension === 'jpg' || extension === 'jpeg') {
+      const ok = bytes.length > 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+      return Object.freeze({ ...base, contentChecked: ok, problem: ok ? null : 'A assinatura do arquivo não é JPEG.' });
+    }
+    if (extension === 'webp') {
+      const ok = bytes.length > 12
+        && Buffer.from(bytes.slice(0, 4)).toString('latin1') === 'RIFF'
+        && Buffer.from(bytes.slice(8, 12)).toString('latin1') === 'WEBP';
+      return Object.freeze({ ...base, contentChecked: ok, problem: ok ? null : 'A assinatura do arquivo não é WebP.' });
+    }
+    return Object.freeze(base);
+  }
+
+  async function walkInputs() {
+    const entries = [];
+    const stack = [{ directory: inputRoot, depth: 0 }];
+    while (stack.length && entries.length < MAX_INPUT_ENTRIES) {
+      const { directory, depth } = stack.pop();
+      let items = [];
+      try {
+        items = await fs.readdir(directory, { withFileTypes: true });
+      } catch {
+        continue; // pasta inexistente ainda não é erro: o projeto pode não ter entradas
+      }
+      for (const item of items) {
+        if (entries.length >= MAX_INPUT_ENTRIES) break;
+        const absolute = path.join(directory, item.name);
+        if (item.isDirectory()) {
+          if (depth + 1 < MAX_INPUT_DEPTH) stack.push({ directory: absolute, depth: depth + 1 });
+          continue;
+        }
+        // Só arquivo regular: symlink, dispositivo ou FIFO não é entrada utilizável.
+        if (!item.isFile()) continue;
+        const extension = extensionOf(item.name);
+        if (!INPUT_EXTENSIONS.includes(extension)) continue;
+        const stats = await fs.stat(absolute).catch(() => null);
+        if (!stats) continue;
+        const relative = path.relative(projectRoot, absolute).split(path.sep).join('/');
+        let measured = null;
+        if (stats.size <= MAX_INPUT_BYTES) {
+          try {
+            measured = describeInputBytes(item.name, await fs.readFile(absolute));
+          } catch {
+            measured = null;
+          }
+        }
+        entries.push(Object.freeze({
+          path: relative,
+          name: item.name,
+          kind: measured?.kind ?? (INPUT_IMAGE_EXTENSIONS.includes(extension) ? 'image' : INPUT_MODEL_EXTENSIONS.includes(extension) ? 'model' : 'other'),
+          bytes: stats.size,
+          modifiedAt: stats.mtime.toISOString(),
+          width: measured?.width ?? null,
+          height: measured?.height ?? null,
+          format: extension || null,
+          contentChecked: measured?.contentChecked ?? false,
+          problem: measured?.problem ?? (stats.size > MAX_INPUT_BYTES ? `Arquivo maior que ${MAX_INPUT_BYTES} bytes: não foi verificado aqui.` : null),
+          sha256: measured?.sha256 ?? null,
+          // Métricas já medidas na leitura: servem para escolher referência e
+          // para o Comparison Lab sem decodificar o mesmo arquivo duas vezes.
+          uniqueColors: measured?.uniqueColors ?? null,
+          coverage: measured?.coverage ?? null,
+          blank: measured?.blank ?? null,
+          triangleCount: measured?.triangleCount ?? null,
+          meshCount: measured?.meshCount ?? null,
+          animationCount: measured?.animationCount ?? null,
+          skinned: measured?.skinned ?? null,
+        }));
+      }
+    }
+    entries.sort((a, b) => a.path.localeCompare(b.path));
+    return entries;
   }
 
   // ------------------------------------------------- contexto de cada passo
@@ -888,6 +1075,109 @@ export function createStudioService(options = {}) {
         await manager.addVersion(assetId, { runId, artifacts, note: `Artefatos do run ${runId}` });
       }
       return manager.get(assetId);
+    },
+
+    // ------------------------------------------------- entradas (referências)
+    /**
+     * Lista o que o usuário já tem em `<projeto>/input/`: é o que a interface
+     * oferece para escolher, em vez de pedir que alguém digite um caminho.
+     */
+    async listInputs() {
+      return Object.freeze({ directory: INPUT_DIRECTORY, entries: Object.freeze(await walkInputs()) });
+    },
+
+    /**
+     * Grava uma entrada fornecida pelo usuário (imagem de referência, modelo).
+     * Regras: nome sanitizado, extensão permitida, conteúdo verificado quando o
+     * formato é conhecido deste código, tamanho limitado, escrita atômica dentro
+     * de `<projeto>/input/` e colisão nunca sobrescreve o arquivo existente.
+     *
+     * @param {{filename:string, bytes:Uint8Array|Buffer, note?:string}} input
+     */
+    async saveInput({ filename, bytes, note = null } = {}) {
+      const name = sanitizeInputName(filename);
+      if (!name) throw new Error('saveInput: nome de arquivo inválido (use apenas letras, números, ponto, hífen e sublinhado).');
+      const extension = extensionOf(name);
+      if (!INPUT_EXTENSIONS.includes(extension)) {
+        throw new Error(`saveInput: formato ".${extension || '?'}" não é aceito como entrada. Aceitos: ${INPUT_EXTENSIONS.join(', ')}.`);
+      }
+      const payload = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes ?? []);
+      if (!payload.length) throw new Error('saveInput: nenhum byte recebido.');
+      if (payload.length > MAX_INPUT_BYTES) throw new Error(`saveInput: arquivo maior que ${Math.round(MAX_INPUT_BYTES / (1024 * 1024))} MB.`);
+
+      const described = describeInputBytes(name, payload);
+      if (described.problem) throw new Error(`saveInput: ${described.problem}`);
+      if (!described.contentChecked && INPUT_IMAGE_EXTENSIONS.includes(extension)) {
+        throw new Error('saveInput: o conteúdo da imagem não pôde ser verificado neste formato.');
+      }
+
+      await fs.mkdir(inputRoot, { recursive: true });
+      // Colisão ganha sufixo: o que o usuário já tinha nunca é sobrescrito. A
+      // comparação ignora caixa porque o projeto pode viver em um sistema de
+      // arquivos que também ignora (Windows/macOS) — lá seria o mesmo arquivo.
+      const taken = new Set((await fs.readdir(inputRoot).catch(() => [])).map((item) => item.toLowerCase()));
+      const stem = name.slice(0, name.length - extension.length - 1);
+      // A extensão gravada é a que o usuário enviou (só a comparação ignora caixa).
+      const rawExtension = name.slice(stem.length + 1);
+      let finalName = name;
+      for (let suffix = 2; taken.has(finalName.toLowerCase()); suffix += 1) {
+        finalName = `${stem}-${suffix}.${rawExtension}`;
+        if (suffix > 500) throw new Error('saveInput: não foi possível encontrar um nome livre para a entrada.');
+      }
+      const target = await resolveInside(inputRoot, finalName);
+      if (!target) throw new Error('saveInput: caminho recusado pelo gate de escrita segura.');
+
+      const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+      await fs.writeFile(temporary, payload, { flag: 'wx' });
+      try {
+        await fs.rename(temporary, target);
+      } catch (error) {
+        await fs.rm(temporary, { force: true });
+        throw error;
+      }
+      return Object.freeze({
+        ...described,
+        // o nome gravado pode ter sufixo anti-colisão: vale o que está no disco
+        name: finalName,
+        path: path.relative(projectRoot, target).split(path.sep).join('/'),
+        note: note === null ? null : redactSecrets(String(note).slice(0, 400)),
+      });
+    },
+
+    /** Bytes de uma entrada, confinados a `<projeto>/input/`. */
+    async readInput(relativePath) {
+      const absolute = await resolveInside(inputRoot, relativePath, projectRoot);
+      if (!absolute) throw new Error('readInput: caminho fora de input/ foi recusado.');
+      const stats = await fs.lstat(absolute).catch(() => null);
+      if (!stats?.isFile()) throw new Error('readInput: entrada não encontrada.');
+      if (stats.size > MAX_PREVIEW_BYTES) throw new Error(`readInput: arquivo maior que o limite de prévia (${MAX_PREVIEW_BYTES} bytes).`);
+      return fs.readFile(absolute);
+    },
+
+    /**
+     * Comparison Lab: mede lado a lado os artefatos escolhidos (de runs ou de
+     * entradas) sem julgar qual é melhor — a decisão é humana e fica registrada.
+     */
+    async compareArtifacts({ paths: candidates = [] } = {}) {
+      if (!Array.isArray(candidates) || !candidates.length) throw new Error('compareArtifacts: informe ao menos um caminho.');
+      if (candidates.length > 8) throw new Error('compareArtifacts: compare até 8 artefatos por vez.');
+      const entries = [];
+      for (const candidate of candidates) {
+        const relative = String(candidate ?? '');
+        const absolute = path.isAbsolute(relative) ? null : await resolveInside(projectRoot, relative, projectRoot);
+        if (!absolute) {
+          entries.push(Object.freeze({ path: relative, ok: false, problem: 'Caminho fora do projeto foi recusado.' }));
+          continue;
+        }
+        try {
+          const bytes = await fs.readFile(absolute);
+          const described = describeInputBytes(path.basename(absolute), bytes);
+          entries.push(Object.freeze({ path: path.relative(projectRoot, absolute).split(path.sep).join('/'), ok: true, ...described }));
+        } catch (error) {
+          entries.push(Object.freeze({ path: relative, ok: false, problem: String(error.message ?? error).slice(0, 180) }));
+        }
+      }
+      return Object.freeze({ comparedAt: new Date().toISOString(), entries: Object.freeze(entries) });
     },
 
     classifyRights,

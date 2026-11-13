@@ -216,6 +216,9 @@ function comfyUiApi() {
 const LIA_FORGE_STUDIO_PREFIX = '/api/lia-forge/studio';
 const MAX_ARTIFACT_BYTES = 6 * 1024 * 1024;
 const MAX_BODY_BYTES = 1024 * 1024;
+// Upload de referência do usuário: o limite é maior, mas continua finito e só
+// vale para a rota de entradas (o resto da API mantém 1 MB).
+const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
 const ARTIFACT_CONTENT_TYPES = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -240,15 +243,15 @@ function isSameOriginRequest(request) {
   }
 }
 
-function readJsonBody(request) {
+function readJsonBody(request, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     request.on('data', (chunk) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > maxBytes) {
         request.destroy();
-        reject(new Error('Corpo da requisição excede 1 MB.'));
+        reject(new Error(`Corpo da requisição excede ${Math.round(maxBytes / (1024 * 1024))} MB.`));
         return;
       }
       chunks.push(chunk);
@@ -279,6 +282,7 @@ function readJsonBody(request) {
 function liaForgeStudioApi() {
   const projectRoot = path.resolve(process.env.SPRITEFORGE_PROJECT_ROOT || process.cwd());
   const runsRoot = path.join(projectRoot, '.lia-forge', 'runs');
+  const inputsRoot = path.join(projectRoot, 'input');
   let servicePromise = null;
 
   function studio() {
@@ -352,6 +356,48 @@ function liaForgeStudioApi() {
             const raw = url.searchParams.get('capabilities');
             const capabilityIds = raw ? raw.split(',').map((item) => item.trim()).filter(Boolean) : null;
             return json(200, await service.preflight({ capabilityIds }));
+          }
+
+          // ------------------------------- entradas (referências do usuário)
+          if (route === '/inputs') {
+            if (method === 'GET') return json(200, await service.listInputs());
+            if (method === 'POST') {
+              const body = await readJsonBody(request, MAX_UPLOAD_BYTES);
+              if (!body.filename) return json(400, { error: 'filename é obrigatório.' });
+              if (typeof body.base64 !== 'string' || !body.base64.length) return json(400, { error: 'base64 é obrigatório.' });
+              const bytes = Buffer.from(body.base64, 'base64');
+              return json(200, await service.saveInput({ filename: String(body.filename), bytes, note: body.note ? String(body.note) : null }));
+            }
+            return json(405, { error: 'Method not allowed' });
+          }
+
+          if (route === '/input-file') {
+            if (method !== 'GET') return json(405, { error: 'Method not allowed' });
+            const relative = url.searchParams.get('path') || '';
+            let bytes;
+            try {
+              // O serviço é o único lugar que resolve e confina entradas.
+              bytes = await service.readInput(relative);
+            } catch (error) {
+              const message = String(error?.message ?? '');
+              if (message.includes('fora de input/')) return json(403, { error: 'Só arquivos dentro de input/ podem ser servidos.' });
+              if (message.includes('grande demais')) return json(413, { error: message });
+              return json(404, { error: 'Entrada não encontrada.' });
+            }
+            const type = ARTIFACT_CONTENT_TYPES[path.extname(relative).toLowerCase()] ?? 'application/octet-stream';
+            response.statusCode = 200;
+            response.setHeader('Content-Type', type);
+            response.setHeader('Content-Length', String(bytes.length));
+            response.setHeader('Cache-Control', 'no-store');
+            response.end(Buffer.from(bytes));
+            return undefined;
+          }
+
+          if (route === '/compare') {
+            if (method !== 'POST') return json(405, { error: 'Method not allowed' });
+            const body = await readJsonBody(request);
+            if (!Array.isArray(body.paths) || !body.paths.length) return json(400, { error: 'paths é obrigatório (lista de caminhos relativos ao projeto).' });
+            return json(200, await service.compareArtifacts({ paths: body.paths.map((item) => String(item)) }));
           }
 
           // Providers (§9): escolha real entre execução local, remota autorizada
@@ -451,12 +497,20 @@ function liaForgeStudioApi() {
             return json(200, await service.rightsReport());
           }
 
-          const assetMatch = route.match(/^\/assets\/([A-Za-z0-9._-]+)\/(rights|attach-run)$/);
+          const assetMatch = route.match(/^\/assets\/([A-Za-z0-9._-]+)\/(rights|attach-run|versions)$/);
           if (assetMatch) {
             if (method !== 'POST') return json(405, { error: 'Method not allowed' });
             const [, assetId, action] = assetMatch;
             const body = await readJsonBody(request);
             if (action === 'rights') return json(200, await service.declareAssetRights(assetId, body));
+            if (action === 'versions') {
+              if (!Array.isArray(body.artifacts) || !body.artifacts.length) return json(400, { error: 'artifacts é obrigatório (lista de artefatos da versão).' });
+              return json(200, await service.addAssetVersion(assetId, {
+                runId: body.runId ? String(body.runId) : null,
+                note: body.note ? String(body.note) : null,
+                artifacts: body.artifacts,
+              }));
+            }
             if (!body.runId) return json(400, { error: 'runId é obrigatório.' });
             return json(200, await service.attachRunToAsset({ assetId, runId: String(body.runId) }));
           }
@@ -465,6 +519,8 @@ function liaForgeStudioApi() {
         } catch (error) {
           // Configuração inválida vinda do usuário é 400, não falha do servidor.
           if (error?.code === 'PROVIDER_CONFIG_INVALID') return json(400, { error: error.message });
+          // Entrada inválida do usuário (nome, formato, tamanho, conteúdo) é 400.
+          if (/^saveInput:|^compareArtifacts:|^readInput:/.test(String(error?.message ?? ''))) return json(400, { error: error.message });
           return json(error?.statusCode === 404 ? 404 : 500, { error: error?.message || 'Falha na API do Studio.' });
         }
       });

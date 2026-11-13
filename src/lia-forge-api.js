@@ -39,6 +39,17 @@ async function request(route, { method = 'GET', body = null } = {}) {
   return payload;
 }
 
+/** Uint8Array → base64 sem estourar a pilha com arquivos grandes. */
+function toBase64(bytes) {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes ?? []);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let offset = 0; offset < view.length; offset += chunk) {
+    binary += String.fromCharCode(...view.subarray(offset, offset + chunk));
+  }
+  return btoa(binary);
+}
+
 function query(params) {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params ?? {})) {
@@ -75,6 +86,56 @@ export const liaForgeApi = {
     const ipc = bridge();
     if (ipc) return ipc.preflight(capabilities);
     return request(`/preflight${query({ capabilities: capabilities?.length ? capabilities.join(',') : null })}`);
+  },
+
+  /** Entradas disponíveis em `<projeto>/input/` (referências e modelos). */
+  async listInputs() {
+    const ipc = bridge();
+    if (ipc) return ipc.listInputs();
+    return request('/inputs');
+  },
+
+  /**
+   * Copia um arquivo do usuário para `input/` (o original nunca é movido).
+   * `bytes` é um Uint8Array/Buffer; o transporte HTTP exige base64.
+   */
+  async saveInput({ filename, bytes, note = null }) {
+    const base64 = toBase64(bytes);
+    const ipc = bridge();
+    if (ipc) return ipc.saveInput({ filename, base64, note });
+    return request('/inputs', { method: 'POST', body: { filename, base64, note } });
+  },
+
+  /**
+   * Abre o seletor de arquivos do sistema (só no desktop). No navegador devolve
+   * null: a interface usa `<input type="file">` e chama `saveInput`.
+   */
+  async pickInput() {
+    const ipc = bridge();
+    return ipc ? ipc.pickInput() : null;
+  },
+
+  /** Fonte de imagem para uma entrada: URL HTTP ou data URL (desktop). */
+  async inputSource(relativePath) {
+    const ipc = bridge();
+    if (ipc) {
+      try {
+        const file = await ipc.readInput(relativePath);
+        if (!file?.contentType?.startsWith('image/')) return null;
+        return `data:${file.contentType};base64,${file.base64}`;
+      } catch {
+        return null;
+      }
+    }
+    if (!/\.(png|jpe?g|webp)$/i.test(relativePath)) return null;
+    return `${PREFIX}/input-file${query({ path: relativePath })}`;
+  },
+
+  /** Comparison Lab: métricas reais lado a lado (até 8 artefatos). */
+  async compareArtifacts(paths) {
+    const ipc = bridge();
+    if (ipc) return ipc.compareArtifacts(paths);
+    return request('/compare', { method: 'POST', body: { paths } });
   },
 
   /**
@@ -162,6 +223,13 @@ export const liaForgeApi = {
     const ipc = bridge();
     if (ipc) return ipc.upsertAsset(record);
     return request('/assets', { method: 'POST', body: record });
+  },
+
+  /** Registra uma versão do asset (artefatos escolhidos no Comparison Lab, por exemplo). */
+  async addAssetVersion(assetId, version) {
+    const ipc = bridge();
+    if (ipc) return ipc.addAssetVersion({ assetId, ...version });
+    return request(`/assets/${encodeURIComponent(assetId)}/versions`, { method: 'POST', body: version });
   },
 
   async declareAssetRights(assetId, declaration) {

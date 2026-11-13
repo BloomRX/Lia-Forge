@@ -1137,6 +1137,15 @@ function registerIpcHandlers() {
       runId: requireText(payload?.runId, 'runId', 120),
     });
   });
+  ipcMain.handle('lia-forge:studio:assets:versions', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    if (!Array.isArray(payload?.artifacts) || !payload.artifacts.length) throw new Error('artifacts é obrigatório (lista de artefatos da versão).');
+    return (await getStudioService()).addAssetVersion(requireText(payload?.assetId, 'assetId', 160), {
+      runId: payload?.runId ? requireText(payload.runId, 'runId', 120) : null,
+      note: payload?.note ? requireText(payload.note, 'note', 400) : null,
+      artifacts: payload.artifacts,
+    });
+  });
   ipcMain.handle('lia-forge:studio:assets:list', async (event) => {
     assertTrustedIpcSender(event);
     const service = await getStudioService();
@@ -1170,6 +1179,66 @@ function registerIpcHandlers() {
           : extension === '.json' ? 'application/json'
             : 'application/octet-stream';
     return { path: relative, contentType, base64: bytes.toString('base64'), bytes: bytes.length };
+  });
+  // Entradas do usuário (referências e modelos): listar, gravar, escolher no
+  // sistema de arquivos e ler — sempre confinado a <projeto>/input/, sem
+  // sobrescrever o que já existe e sem aceitar formato não verificado.
+  ipcMain.handle('lia-forge:studio:inputs:list', async (event) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).listInputs();
+  });
+  ipcMain.handle('lia-forge:studio:inputs:save', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    const base64 = requireText(payload?.base64, 'base64', 64 * 1024 * 1024);
+    return (await getStudioService()).saveInput({
+      filename: requireText(payload?.filename, 'filename', 200),
+      bytes: Buffer.from(base64, 'base64'),
+      note: payload?.note ? requireText(payload.note, 'note', 400) : null,
+    });
+  });
+  ipcMain.handle('lia-forge:studio:inputs:pick', async (event) => {
+    assertTrustedIpcSender(event);
+    const picker = BrowserWindow.fromWebContents(event.sender);
+    const choice = await dialog.showOpenDialog(picker, {
+      title: 'Escolha a referência ou o modelo',
+      buttonLabel: 'Copiar para o projeto',
+      message: 'O arquivo é copiado para a pasta input/ do projeto; o original não é movido nem alterado.',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Imagens e modelos', extensions: ['png', 'jpg', 'jpeg', 'webp', 'glb', 'gltf', 'fbx', 'obj', 'stl', 'blend'] },
+        { name: 'Documentos', extensions: ['md', 'txt', 'json'] },
+      ],
+    });
+    if (choice.canceled || !choice.filePaths.length) return null;
+    const source = choice.filePaths[0];
+    const stats = await fs.stat(source).catch(() => null);
+    if (!stats || !stats.isFile()) throw new Error('O caminho escolhido não é um arquivo.');
+    if (stats.size > 32 * 1024 * 1024) throw new Error('Arquivo maior que 32 MB; registre-o manualmente na pasta input/ do projeto.');
+    return (await getStudioService()).saveInput({
+      filename: path.basename(source),
+      bytes: await fs.readFile(source),
+      note: `Copiado de ${source}`,
+    });
+  });
+  ipcMain.handle('lia-forge:studio:inputs:read', async (event, relativePath) => {
+    assertTrustedIpcSender(event);
+    const relative = requireText(relativePath, 'path', 600);
+    const bytes = await (await getStudioService()).readInput(relative);
+    const extension = path.extname(relative).toLowerCase();
+    const contentType = extension === '.png' ? 'image/png'
+      : extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg'
+        : extension === '.webp' ? 'image/webp'
+          : extension === '.json' ? 'application/json'
+            : extension === '.md' || extension === '.txt' ? 'text/plain; charset=utf-8'
+              : 'application/octet-stream';
+    return { path: relative, contentType, base64: bytes.toString('base64'), bytes: bytes.length };
+  });
+  ipcMain.handle('lia-forge:studio:compare', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    const paths = Array.isArray(payload?.paths)
+      ? payload.paths.filter((item) => typeof item === 'string').slice(0, 8).map((item) => requireText(item, 'path', 600))
+      : [];
+    return (await getStudioService()).compareArtifacts({ paths });
   });
   ipcMain.handle('lia-forge:tools:status', (event) => {
     assertTrustedIpcSender(event);

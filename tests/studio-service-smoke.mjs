@@ -349,7 +349,51 @@ try {
   check(fullPreflight.summary.toolsMissing + fullPreflight.summary.toolsBlocked > 0,
     'ferramentas ausentes/bloqueadas são contadas, não escondidas');
 
-  console.log(`Studio service smoke test passed (${overview.workflows.length} workflows, ${executable.length} executáveis, contrato 384×144 preservado, revisão + retomada ok).`);
+  // --------------------------------- 11. entradas do usuário e Comparison Lab
+  const inputListing = await service.listInputs();
+  check(inputListing.directory === 'input', `as entradas vivem em input/ (${inputListing.directory})`);
+  const spriteEntry = inputListing.entries.find((entry) => entry.path === 'input/sprite.png');
+  check(Boolean(spriteEntry), 'a imagem gravada no projeto temporário aparece na lista');
+  check(spriteEntry.width === 48 && spriteEntry.height === 48, `a entrada é medida de verdade (${spriteEntry.width}×${spriteEntry.height})`);
+  check(spriteEntry.uniqueColors > 1, `o conteúdo é decodificado, não apenas listado (${spriteEntry.uniqueColors} cores)`);
+  check(spriteEntry.contentChecked === true, 'contentChecked=true quando foi possível verificar');
+  check(spriteEntry.sha256.length === 64, 'SHA-256 calculado sobre os bytes da entrada');
+
+  const saved = await service.saveInput({ filename: '../../etc/Referência do Herói.png', bytes: spritePng, note: 'teste' });
+  check(saved.path === 'input/Referencia-do-Heroi.png', `traversal neutralizado e acentos removidos (${saved.path})`);
+  check(saved.note === 'teste', 'a nota do usuário é preservada');
+  const onDisk = await fs.readFile(path.join(projectRoot, 'input', 'Referencia-do-Heroi.png'));
+  check(onDisk.equals(Buffer.from(spritePng)), 'os bytes gravados são os bytes enviados (nada foi recomprimido)');
+  const collided = await service.saveInput({ filename: 'referencia-do-heroi.png', bytes: spritePng });
+  check(collided.path === 'input/referencia-do-heroi-2.png', `colisão que ignora caixa nunca sobrescreve (${collided.path})`);
+
+  await assert.rejects(() => service.saveInput({ filename: 'payload.exe', bytes: spritePng }),
+    /formato ".exe" não é aceito/, 'executável é recusado');
+  await assert.rejects(() => service.saveInput({ filename: 'falso.png', bytes: Buffer.from('isto não é um png') }),
+    /PNG inválido/, 'PNG falso é recusado antes de gravar');
+  await assert.rejects(() => service.saveInput({ filename: 'sprite.png', bytes: Buffer.alloc(33 * 1024 * 1024, 7) }),
+    /32 MB/, 'arquivo acima do teto é recusado');
+  check((await fs.readdir(path.join(projectRoot, 'input'))).filter((name) => name.endsWith('.png')).length === 3,
+    'nada de arquivo recusado foi parar no projeto');
+
+  const readBack = await service.readInput('input/Referencia-do-Heroi.png');
+  check(readBack.equals(Buffer.from(spritePng)), 'readInput devolve os bytes da entrada');
+  await assert.rejects(() => service.readInput('../../etc/passwd'), /fora de input\//, 'leitura fora de input/ é recusada');
+  await assert.rejects(() => service.readInput('input/inexistente.png'), /não encontrada/, 'entrada inexistente é dita como tal');
+
+  const comparison = await service.compareArtifacts({
+    paths: ['input/sprite.png', 'input/Referencia-do-Heroi.png', '../../etc/passwd'],
+  });
+  check(comparison.entries.length === 3, 'uma entrada de comparação por caminho pedido');
+  check(comparison.entries[0].ok === true && comparison.entries[0].coverage > 0,
+    `métricas medidas no Comparison Lab (cobertura ${(comparison.entries[0].coverage * 100).toFixed(1)}%)`);
+  check(comparison.entries[0].sha256 === comparison.entries[1].sha256, 'arquivos idênticos têm o mesmo SHA-256 na comparação');
+  check(comparison.entries[2].ok === false && /recusado/.test(comparison.entries[2].problem),
+    'caminho fora do projeto é recusado na comparação, com o motivo dito');
+  await assert.rejects(() => service.compareArtifacts({ paths: Array.from({ length: 9 }, (_, index) => `input/sprite-${index}.png`) }),
+    /8/, 'a comparação tem teto de 8 artefatos');
+
+  console.log(`Studio service smoke test passed (${overview.workflows.length} workflows, ${executable.length} executáveis, contrato 384×144 preservado, revisão + retomada + entradas e comparação ok).`);
 } finally {
   await fs.rm(projectRoot, { recursive: true, force: true });
 }
