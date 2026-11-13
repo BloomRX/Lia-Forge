@@ -242,11 +242,13 @@ A experiência pedida é "criar projeto → exportar" em 12 passos, mas a interf
 | 5 | Conferir requisitos e ferramentas | o plano não tem passos bloqueados | `plan.blockedSteps` existe: instalar, autorizar ou escolher provider é humano |
 | 6 | Ler o plano antes de executar | `plan` está na tela | — |
 | 7 | Executar | existe run | — |
-| 8 | Acompanhar (ou cancelar) | o run está encerrado (`summary.finished`) | — |
+| 8 | Acompanhar (ou cancelar) | o run está encerrado (`summary.finished`) | run gravado como em andamento **sem execução neste processo** (`runStale`): corrigir o estado ou retomar é humano |
 | 9 | Revisar os artefatos | run encerrado sem revisão pendente | run `blocked`: a aprovação é humana e fica amarrada ao SHA-256 |
 | 10 | Comparar variações | há comparação medida no Comparison Lab (passo opcional) | — |
 | 11 | Exportar para o destino | existe pacote exportado, com "verificado no destino: não" dito no próprio passo | — |
 | 12 | Guardar no projeto | há versão registrada no asset ou asset com versões/proveniência | — |
+
+As decisões humanas aparecem com **título e motivo** no próprio aviso, sem precisar abrir a lista dos 12 passos — é o que impede o usuário de achar que o produto vai instalar, autorizar ou recuperar algo sozinho. O passo 8 usa o mesmo campo `stale` que a lista lateral de runs usa (`listRuns()`), derivado na interface uma única vez: não há dois cálculos para o mesmo fato.
 
 A derivação mora em `shared/ui/journey.mjs` — lógica pura, sem React e sem módulo do Node — e a interface importa de lá: navegador, testes em Node e qualquer consumidor futuro (CLI, processo principal) calculam o roteiro no **mesmo** lugar, sem segunda versão que possa divergir. Junto sai `journeyProgress(steps)`, o resumo que o painel mostra (`total`, `done`, `percent`, `next` e `humanDecisions`), para que a contagem exibida e a conferida nos testes sejam o mesmo cálculo. Dois detalhes que vieram dessa mudança: sem pasta aberta existe **um único** passo atual (abrir o projeto), em vez de dois apontando ao mesmo tempo; e o passo de comparar concluído diz que o Comparison Lab mede e a escolha é do usuário.
 
@@ -254,7 +256,7 @@ Importar na engine **não é passo do produto** e não aparece como concluído: 
 
 ### O que foi executado de verdade
 
-Dois testes cobrem o roteiro. `tests/journey-smoke.mjs` (**novo**, 67 checagens) **percorre a jornada inteira** com o serviço real sobre um projeto temporário, derivando o roteiro a cada parada com a mesma função da interface:
+Dois testes cobrem o roteiro. `tests/journey-smoke.mjs` (**novo**, 74 checagens) **percorre a jornada inteira** com o serviço real sobre um projeto temporário, derivando o roteiro a cada parada com a mesma função da interface:
 
 | Parada | Progresso medido |
 |---|---|
@@ -268,7 +270,7 @@ Dois testes cobrem o roteiro. `tests/journey-smoke.mjs` (**novo**, 67 checagens)
 | Pacote exportado (`verifiedOnDestination: false`) | `11 de 12`; próximo = guardar |
 | Versão registrada no asset | **`12 de 12`**, nenhum passo atual pendente, nenhuma decisão humana sobrando |
 
-Trilha medida: `0 → 1 → 2 → 6 → 8 → 9 → 10 → 11 → 12`, com a checagem de que o progresso nunca avançou sem a evidência correspondente. O cenário alternativo (objetivo `3d-character-spritesheet`, sem provider nesta máquina) é registrado **fora da trilha**, como decisão humana — não como progresso. A honestidade foi verificada tirando uma evidência por vez do estado completo: sem pacote, o passo 11 sai da contagem (e só ele); sem comparação, o passo 10 volta a `optional`; sem run, `execute`/`follow`/`review` saem; sem versão guardada, o passo 12 sai; sem pasta, o passo 1 volta a ser o atual; sem brief, o passo 4 sai; estado vazio = `0 de 12`. No fim, o atlas do run é medido no disco: **384×144**, grade 8×3, 24 frames, com conteúdo.
+Trilha medida: `0 → 1 → 2 → 6 → 8 → 9 → 10 → 11 → 12`, com a checagem de que o progresso nunca avançou sem a evidência correspondente. Os dois cenários alternativos (objetivo `3d-character-spritesheet` sem provider nesta máquina e run interrompido com `runStale`) são registrados **fora da trilha**, como decisão humana — não como progresso. No caso do run interrompido, o mesmo passo volta a ser o passo atual quando há execução viva (`liveRun`) e run encerrado não vira interrompido só porque o sinal chegou. A honestidade foi verificada tirando uma evidência por vez do estado completo: sem pacote, o passo 11 sai da contagem (e só ele); sem comparação, o passo 10 volta a `optional`; sem run, `execute`/`follow`/`review` saem; sem versão guardada, o passo 12 sai; sem pasta, o passo 1 volta a ser o atual; sem brief, o passo 4 sai; estado vazio = `0 de 12`. No fim, o atlas do run é medido no disco: **384×144**, grade 8×3, 24 frames, com conteúdo.
 
 `tests/studio-ui-render-smoke.mjs` deriva o roteiro três vezes, com dados reais vindos da API (projeto, entradas, plano com passos bloqueados, run `succeeded`, pacote exportado, versão de asset):
 
@@ -278,6 +280,7 @@ Trilha medida: `0 → 1 → 2 → 6 → 8 → 9 → 10 → 11 → 12`, com a che
 | Plano com passo sem provider | `plan` e `brief` concluídos; **requisitos = decisão humana** com o texto "Instalar ou autorizar é decisão sua"; passo atual = "7 · Executar" |
 | Jornada completa (run `succeeded` + export + versão gravada) | 11 passos concluídos, nenhum passo atual pendente, exportação dizendo "verificado no destino: não" |
 | Render | o painel aparece com "Roteiro de produção", "2 de 12 passos", "Passo 3 — Escolher o objetivo" e a lista completa a um clique |
+| Render com run interrompido | o roteiro diz "não há execução neste processo", apresenta a recuperação como decisão do usuário e **não** mostra o texto de execução viva |
 
 ## 11. Testes que provam o acima
 
@@ -343,6 +346,8 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 | `522740a` | descoberta honesta do Blender: origem do executável, `versionConfirmed: false` e o pré-voo que não executa o arquivo |
 | `0b4e867` | documentação da descoberta honesta do executável (§6) |
 | `f9a01c6` | smoke de coerência IPC/HTTP (33 smokes) e fim da corrida no teste de cancelamento |
+| `1b2d012` | documentação da coerência dos transportes (§5) |
+| `c889400` | run interrompido no roteiro de produção (`runStale` → passo 8 como decisão humana) e motivos das decisões visíveis |
 
 ## 14. Pendências que exigem decisão humana
 
