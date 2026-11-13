@@ -375,6 +375,13 @@
 .forge-tool-id{margin:5px 0 0;color:#8d7c8f;font-size:9px}
 .forge-tool-id code{color:#d9a8c8}
 .forge-tool-detail{margin:5px 0 0;color:#a4929f;font-size:9.4px;line-height:1.5}
+/* Providers & backends: escolha local/remoto/desativado + autorização explícita */
+.forge-panel-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.forge-panel-actions .button{flex:0 0 auto}
+.forge-authorize{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;padding:9px 10px;border:1px solid #4a3350;border-radius:8px;background:linear-gradient(180deg,#221726,#1a141b)}
+.forge-authorize .forge-note{grid-column:1/-1;margin:0}
+.forge-check{display:flex;align-items:flex-start;gap:7px;grid-column:1/-1;color:#f2d7e6;font-size:10px;line-height:1.45}
+.forge-check input[type=checkbox]{width:14px;height:14px;margin-top:1px;accent-color:#ff4fd8;flex:0 0 auto}
 .forge-rights-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:7px}
 .forge-rights-cell{display:flex;flex-direction:column;gap:3px;padding:8px 9px;border:1px solid var(--line-soft);border-radius:7px;background:#1a141b;opacity:.62}
 .forge-rights-cell.is-active{opacity:1;border-color:#4a3350;background:#221a24}

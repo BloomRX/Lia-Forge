@@ -40,11 +40,28 @@ export function createProviderHub({ registry, adapters = [], discoveries = new M
     const compatibility = evaluateCompatibility({ manifest: adapter.manifest, machine });
     const discoveryState = discovery?.status ?? 'unknown';
     let state;
-    if (discoveryState === 'available' && compatibility.compatible) state = 'ready';
+    // A ferramenta respondeu, mas esta máquina não atende a um requisito
+    // MEDIDO (ex.: RAM total abaixo do declarado): não é "ausente" (ela existe)
+    // nem "pronta" (não cabe aqui).
+    if (discoveryState === 'available' && compatibility.blocked) state = 'blocked';
+    // Respondeu e nada foi medido contra: pronta para executar. Requisitos que
+    // não puderam ser medidos (VRAM sem probe de GPU autorizado, por exemplo)
+    // viram aviso — nunca veto, e nunca afirmação de hardware validado.
+    else if (discoveryState === 'available') state = 'ready';
     else if (discoveryState === 'blocked' || compatibility.blocked) state = compatibility.blocked ? 'missing' : 'blocked';
     else if (discoveryState === 'missing') state = 'missing';
     else state = 'unknown';
-    return { state, discovery, compatibility };
+    // O motivo precisa chegar inteiro à interface: dizer "ComfyUI responde" e
+    // marcar como indisponível, sem explicar o bloqueio, induz o usuário a erro.
+    const rawDetail = discovery?.detail ?? 'Não verificado nesta execução.';
+    const blockers = compatibility.blockers ?? [];
+    const unknowns = state === 'ready' ? (compatibility.unknowns ?? []) : [];
+    const detail = [
+      rawDetail,
+      blockers.length ? `${discoveryState === 'available' ? 'Bloqueio nesta máquina:' : 'Além disso:'} ${blockers.join('; ')}.` : null,
+      unknowns.length ? `Aviso (não medido nesta máquina): ${unknowns.join('; ')}.` : null,
+    ].filter(Boolean).join(' ');
+    return { state, discovery, compatibility, detail };
   }
 
   function candidatesFor(capabilityId) {
@@ -52,7 +69,7 @@ export function createProviderHub({ registry, adapters = [], discoveries = new M
     const candidates = adapters
       .filter((adapter) => adapter.manifest.capabilities.includes(capabilityId))
       .map((adapter) => {
-        const { state, discovery, compatibility } = stateOf(adapter);
+        const { state, discovery, compatibility, detail } = stateOf(adapter);
         return Object.freeze({
           adapterId: adapter.manifest.id,
           adapterVersion: adapter.manifest.version,
@@ -60,7 +77,7 @@ export function createProviderHub({ registry, adapters = [], discoveries = new M
           title: adapter.manifest.title,
           providers: adapter.manifest.providers,
           state,
-          discoveryDetail: discovery?.detail ?? 'Não verificado nesta execução.',
+          discoveryDetail: detail,
           detectedVersion: discovery?.version ?? null,
           executable: discovery?.executable ?? null,
           endpoint: discovery?.endpoint ?? null,
@@ -106,7 +123,9 @@ export function createProviderHub({ registry, adapters = [], discoveries = new M
       if (usable) return Object.freeze({ selected: usable, reason: null, candidates });
       const reason = !candidates.length
         ? `Nenhum adapter declara a capacidade "${capabilityId}".`
-        : `Nenhum candidato utilizável para "${capabilityId}": ${candidates.map((candidate) => `${candidate.adapterId}=${candidate.state}`).join(', ')}.`;
+        : `Nenhum candidato utilizável para "${capabilityId}": ${candidates
+          .map((candidate) => `${candidate.adapterId}=${candidate.state}${candidate.compatibility?.blockers?.length ? ` (${candidate.compatibility.blockers.join('; ')})` : ''}`)
+          .join(', ')}.`;
       return Object.freeze({ selected: null, reason, candidates });
     },
     /** Mapa capacidade → estado, para a interface mostrar o que existe hoje. */

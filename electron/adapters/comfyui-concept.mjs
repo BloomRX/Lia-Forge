@@ -20,6 +20,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { defineExecutionAdapter, adapterError, redactSecrets } from '../../shared/adapters/sdk.mjs';
+import { isLoopbackEndpoint } from '../../scripts/comfyui-client.mjs';
 import { validatePngStructure } from '../../shared/qa/png.mjs';
 import { validatePngContent } from '../../shared/qa/png-codec.mjs';
 
@@ -85,7 +86,19 @@ export function createAdapter(dependencies = {}) {
     assertPathInsideProject,
     validateStageOutputs,
     validateContent = true,
+    configuration = {},
   } = dependencies;
+
+  /**
+   * O adapter local só fala com a própria máquina. Um endpoint remoto aqui seria
+   * envio de dados sem autorização: para isso existe `comfyui-remote`.
+   */
+  function assertLocal(endpoint) {
+    if (!isLoopbackEndpoint(endpoint)) {
+      throw adapterError('ADAPTER_SEND_UNAUTHORIZED', `O adapter local do ComfyUI recusa o endpoint ${endpoint}: ele não é da própria máquina. Configure o provider remoto (com autorização explícita de envio e custo) ou volte para loopback.`, { adapterId: ADAPTER_ID, endpoint });
+    }
+    return endpoint;
+  }
 
   if (typeof getWorkflowClient !== 'function') {
     throw adapterError('ADAPTER_MISCONFIGURED', `O adapter ${ADAPTER_ID} precisa de getWorkflowClient injetado pelo processo principal.`);
@@ -106,16 +119,23 @@ export function createAdapter(dependencies = {}) {
       } catch (error) {
         return { adapterId: ADAPTER_ID, status: 'missing', detail: redactSecrets(error.message ?? 'Cliente ComfyUI indisponível.'), checkedAt, version: null };
       }
-      const endpoint = client.getComfyUiEndpoint();
+      const endpoint = assertLocal(client.getComfyUiEndpoint(configuration.endpoint ?? null));
       try {
-        const status = await client.getComfyUiStatus();
+        const status = await client.getComfyUiStatus({ endpoint });
+        // O cliente reporta `connected`; adapters antigos reportavam `available`.
+        // Aceitam-se os dois para não marcar como ausente um servidor que responde.
+        const reachable = status?.available ?? status?.connected ?? false;
         return {
           adapterId: ADAPTER_ID,
-          status: status?.available ? 'available' : 'missing',
-          detail: redactSecrets(status?.available ? `ComfyUI responde em ${endpoint}` : 'ComfyUI não respondeu no endpoint loopback.'),
+          status: reachable ? 'available' : 'missing',
+          detail: redactSecrets(reachable
+            ? `ComfyUI responde em ${endpoint}${status?.version ? ` (versão ${status.version})` : ''}.`
+            : `ComfyUI não respondeu no endpoint loopback ${endpoint}. Ele não é instalado nem iniciado pela Lia Forge.`),
           endpoint,
           version: status?.version ?? null,
-          checkpoints: status?.checkpoints ?? null,
+          devices: status?.devices ?? [],
+          queue: status?.queue ?? null,
+          checkpoints: status?.checkpoints ?? status?.models?.checkpoints ?? null,
           checkedAt,
         };
       } catch (error) {
@@ -126,8 +146,16 @@ export function createAdapter(dependencies = {}) {
     async execute(context = {}) {
       const { asset, outputDirectory, projectRoot: runProjectRoot, prompt, checkpoint, workflowId, signal, reportProgress } = context;
       const client = await getWorkflowClient();
-      const endpoint = client.getComfyUiEndpoint();
-      const result = await client.runComfyUiConcept({ workflowId, prompt, checkpoint, outputDirectory, signal, onProgress: reportProgress });
+      const endpoint = assertLocal(client.getComfyUiEndpoint(configuration.endpoint ?? null));
+      const result = await client.runComfyUiConcept({
+        workflowId: workflowId ?? configuration.workflowId ?? null,
+        prompt,
+        checkpoint: checkpoint ?? configuration.checkpoint ?? null,
+        outputDirectory,
+        signal,
+        onProgress: reportProgress,
+        endpoint,
+      });
 
       const outputs = [];
       const contents = [];

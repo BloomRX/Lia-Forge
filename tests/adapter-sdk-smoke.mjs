@@ -20,6 +20,8 @@ import {
   evaluateCompatibility,
   redactSecrets,
 } from '../shared/adapters/sdk.mjs';
+import os from 'node:os';
+import path from 'node:path';
 import { createAdapterRegistry } from '../electron/adapters/index.mjs';
 import { MANIFEST as BLENDER_MANIFEST } from '../electron/adapters/blender-spritesheet.mjs';
 import { MANIFEST as COMFY_MANIFEST } from '../electron/adapters/comfyui-concept.mjs';
@@ -90,9 +92,22 @@ await assert.rejects(
   () => blender.execute({ asset: { name: 'Aiko', type: 'character' }, projectRoot: '/tmp/x' }),
   (error) => error.code === 'WORKFLOW_BLOCKED' && /Blender não foi detectado/.test(error.message),
 );
-// contrato incompleto também bloqueia (gate preservado)
+// caminho configurado que não existe não vira ferramenta disponível
+const caminhoInvalido = createAdapterRegistry({
+  ...stubDependencies(),
+  configuration: { 'blender-spritesheet': { executable: path.join(os.tmpdir(), `lia-blender-inexistente-${process.pid}`) } },
+}).adapter('blender-spritesheet');
+const discoveryInvalida = await caminhoInvalido.discover();
+assert.equal(discoveryInvalida.status, 'missing', 'caminho configurado inválido não pode ser descoberto como disponível');
+assert.match(discoveryInvalida.detail, /não existe ou não é executável/);
 await assert.rejects(
-  () => createAdapterRegistry({ ...stubDependencies(), findExternalTool: () => '/usr/bin/blender' })
+  () => caminhoInvalido.execute({ asset: { name: 'Aiko', type: 'character' }, projectRoot: '/tmp/x' }),
+  (error) => error.code === 'WORKFLOW_BLOCKED' && /não existe ou não é executável/.test(error.message),
+);
+// contrato incompleto também bloqueia (gate preservado); o executável aqui é
+// real (o próprio Node) para isolar o motivo: falta de contrato, não de binário
+await assert.rejects(
+  () => createAdapterRegistry({ ...stubDependencies(), configuration: { 'blender-spritesheet': { executable: process.execPath } } })
     .adapter('blender-spritesheet')
     .execute({ asset: { name: 'Aiko', type: 'character' }, projectRoot: '/tmp/x' }),
   (error) => error.code === 'WORKFLOW_BLOCKED' && /contrato Blender/.test(error.message),

@@ -47,8 +47,16 @@ export function createAdapterRegistry(dependencies = {}) {
   const built = new Map();
 
   const factories = new Map([
-    ['blender-spritesheet', () => createBlenderSpritesheetAdapter({ ...dependencies, validateContent: configuration['blender-spritesheet']?.validateContent !== false })],
-    ['comfyui-concept', () => createComfyUiConceptAdapter({ ...dependencies })],
+    ['blender-spritesheet', () => createBlenderSpritesheetAdapter({
+      ...dependencies,
+      // o adapter lê `configuration.executable`/`script`: entrega-se o bloco dele
+      configuration: configuration['blender-spritesheet'] ?? {},
+      validateContent: configuration['blender-spritesheet']?.validateContent !== false,
+    })],
+    ['comfyui-concept', () => createComfyUiConceptAdapter({
+      ...dependencies,
+      configuration: configuration['comfyui-concept'] ?? {},
+    })],
     ['comfyui-remote', () => createComfyUiRemoteAdapter({
       transport: remoteTransport ?? (async () => {
         throw adapterError('ADAPTER_UNAVAILABLE', 'Nenhum transporte remoto foi configurado. Backend remoto exige decisão humana (endpoint, termos e teto de custo).', { adapterId: 'comfyui-remote' });

@@ -1028,6 +1028,40 @@ function registerIpcHandlers() {
       : null;
     return (await getStudioService()).preflight({ capabilityIds });
   });
+  ipcMain.handle('lia-forge:studio:providers', async (event) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).providers();
+  });
+  ipcMain.handle('lia-forge:studio:providers:configure', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    // Só campos conhecidos chegam ao serviço; texto é limitado e segredos são
+    // recusados lá (nenhum valor de credencial é gravado no projeto).
+    const text = (value, label, max) => (value === undefined || value === null ? undefined : requireText(value, label, max));
+    const input = {
+      id: requireText(payload?.id, 'id', 40),
+      mode: text(payload?.mode, 'mode', 40),
+      endpoint: payload?.endpoint === null ? null : text(payload?.endpoint, 'endpoint', 300),
+      checkpoint: payload?.checkpoint === null ? null : text(payload?.checkpoint, 'checkpoint', 200),
+      workflowId: payload?.workflowId === null ? null : text(payload?.workflowId, 'workflowId', 120),
+      credentialRef: payload?.credentialRef === null ? null : text(payload?.credentialRef, 'credentialRef', 200),
+      executable: payload?.executable === null ? null : text(payload?.executable, 'executable', 400),
+      frameSize: text(payload?.frameSize, 'frameSize', 12),
+      maxCostUnits: payload?.maxCostUnits === undefined || payload?.maxCostUnits === null
+        ? payload?.maxCostUnits === null ? null : undefined
+        : Number(payload.maxCostUnits),
+      authorization: payload?.authorization && typeof payload.authorization === 'object'
+        ? {
+          granted: payload.authorization.granted === true,
+          grantedBy: text(payload.authorization.grantedBy, 'authorization.grantedBy', 120),
+          scope: text(payload.authorization.scope, 'authorization.scope', 200),
+        }
+        : undefined,
+      decidedBy: text(payload?.decidedBy, 'decidedBy', 120),
+    };
+    return (await getStudioService()).configureProvider(
+      Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)),
+    );
+  });
   ipcMain.handle('lia-forge:studio:plan', async (event, payload) => {
     assertTrustedIpcSender(event);
     return (await getStudioService()).plan({

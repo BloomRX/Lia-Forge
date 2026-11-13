@@ -13,6 +13,7 @@
 import { validatePngStructure, parsePng } from './png.mjs';
 import { analyzePngContent, validatePngContent } from './png-codec.mjs';
 import { validateSpritesheetContent } from './spritesheet.mjs';
+import { listDestinations, resolveDestination, METADATA_FORMATS } from '../destinations/profiles.mjs';
 
 const MODEL_EXTENSIONS = Object.freeze(['blend', 'glb', 'gltf', 'fbx', 'obj', 'stl', 'ply', 'spz']);
 
@@ -263,7 +264,18 @@ export function validateFormatAllowlist(artifact) {
   return { ok: true, validator: 'format-allowlist', metrics: { format } };
 }
 
-/** Pacote de exportação: manifesto do destino coerente com o perfil. */
+/**
+ * Pacote de exportação: conformidade real com o perfil publicado do destino.
+ *
+ * O que este validador afirma (e o que não afirma):
+ *   - afirma: o destino existe no catálogo, o perfil do pacote é idêntico ao
+ *     publicado (unidades, eixos, fps, pivô, formatos), todo arquivo tem
+ *     formato aceito pelo destino e SHA-256, e não há bloqueio de
+ *     compatibilidade declarado;
+ *   - NÃO afirma: que a engine importou o pacote. Isso exige o destino
+ *     instalado, e por isso `verifiedOnDestination` continua vindo do perfil
+ *     (false quando ninguém importou de verdade) e é reportado como métrica.
+ */
 export function validateDestinationProfile(artifact) {
   const bundle = artifact.bundle ?? artifact.value;
   if (!bundle || typeof bundle !== 'object') return problem('destination-profile: pacote ausente');
@@ -277,8 +289,62 @@ export function validateDestinationProfile(artifact) {
     if (typeof file?.bytes !== 'number' || file.bytes < 0) problems.push(`destination-profile: arquivo ${index} sem tamanho`);
   }
   if (bundle.importNotes !== undefined && typeof bundle.importNotes !== 'string') problems.push('destination-profile: importNotes precisa ser texto');
+
+  const known = bundle.destination ? listDestinations().some((item) => item.id === bundle.destination) : false;
+  if (bundle.destination && !known) problems.push(`destination-profile: o destino "${bundle.destination}" não existe no catálogo publicado`);
+
+  let profile = null;
+  try {
+    profile = known ? resolveDestination(bundle.destination) : null;
+  } catch {
+    profile = null;
+  }
+  if (profile) {
+    // O perfil do pacote tem que ser o perfil publicado: um pacote montado à
+    // mão com fps/eixos diferentes passaria por uma conferência só estrutural.
+    for (const field of ['units', 'axes', 'scaleConvention', 'fps', 'pivot']) {
+      const packaged = bundle.profile?.[field];
+      const published = profile[field];
+      if (packaged !== undefined && packaged !== published) {
+        problems.push(`destination-profile: ${field} do pacote (${JSON.stringify(packaged)}) não é o publicado para ${profile.label} (${JSON.stringify(published)})`);
+      }
+    }
+    for (const field of ['spriteFormats', 'modelFormats']) {
+      const packaged = Array.isArray(bundle.profile?.[field]) ? bundle.profile[field].join(',') : undefined;
+      const published = Array.isArray(profile[field]) ? profile[field].join(',') : undefined;
+      if (packaged !== undefined && packaged !== published) {
+        problems.push(`destination-profile: ${field} do pacote (${packaged || 'vazio'}) não é o publicado para ${profile.label} (${published || 'vazio'})`);
+      }
+    }
+    const allowed = [...profile.spriteFormats, ...profile.modelFormats, ...METADATA_FORMATS];
+    for (const file of bundle.files ?? []) {
+      const extension = String(file?.path ?? '').includes('.') ? String(file.path).split('.').pop().toLowerCase() : '';
+      const format = String(file?.format ?? '').toLowerCase() || extension;
+      if (!format) problems.push(`destination-profile: ${file?.path ?? 'arquivo'} sem formato declarado`);
+      else if (!allowed.includes(format)) {
+        problems.push(`destination-profile: "${file.path}" tem formato "${format}", que ${profile.label} não importa (${allowed.join(', ')})`);
+      }
+    }
+  }
+  const blockers = Array.isArray(bundle.compatibility?.blockers) ? bundle.compatibility.blockers : [];
+  if (blockers.length) {
+    problems.push(`destination-profile: ${profile?.label ?? bundle.destination} recusa ${blockers.length} artefato(s): ${blockers.join('; ')}`);
+  }
+
   if (problems.length) return { ok: false, problems: Object.freeze(problems) };
-  return { ok: true, validator: 'destination-profile', metrics: { destination: bundle.destination, profile: bundle.profile, files: bundle.files.length } };
+  return {
+    ok: true,
+    validator: 'destination-profile',
+    metrics: Object.freeze({
+      destination: bundle.destination,
+      label: profile?.label ?? null,
+      files: bundle.files.length,
+      fps: bundle.profile?.fps ?? profile?.fps ?? null,
+      axes: bundle.profile?.axes ?? profile?.axes ?? null,
+      // Nunca afirmar importação real: o valor vem do perfil publicado.
+      verifiedOnDestination: bundle.verifiedOnDestination === true,
+    }),
+  };
 }
 
 export function validateNonEmptyText(artifact) {

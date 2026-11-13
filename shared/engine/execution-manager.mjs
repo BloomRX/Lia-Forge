@@ -59,12 +59,18 @@ export class ExecutionManager {
    * @param {() => Date} [options.now]
    * @param {(bytes:Uint8Array)=>string} [options.hash]
    * @param {{maxConcurrent?:number, ramMb?:number, vramMb?:number}} [options.limits]
-   * @param {(args:{validators:string[], result:object, outputs:string[], readArtifact?:Function, label?:string})=>Promise<{ok:boolean, validations:object[], problems:string[]}>} [options.validateStep]
+   * @param {(args:{validators:string[], params:object, result:object, outputs:string[], readArtifact?:Function, label?:string})=>Promise<{ok:boolean, validations:object[], problems:string[]}>} [options.validateStep]
    *        QA injetada: executa os validadores que o plano declara por passo.
+   * @param {(args:{step:object, context:object, inputsById:object, runOutputs:object})=>Promise<object>|object} [options.prepareContext]
+   *        Hospedeiro completa o contexto de um passo antes de executar: é onde
+   *        entram caminhos de script, pasta de saída do passo, asset, prompt e
+   *        checkpoint exigidos pelos adapters externos. O engine não conhece
+   *        nenhuma ferramenta — só repassa o que o hospedeiro preparar.
    */
-  constructor({ resolveAdapter, persist = async () => {}, onEvent = () => {}, now = () => new Date(), hash = sha256Hex, limits = {}, validateStep = null } = {}) {
+  constructor({ resolveAdapter, persist = async () => {}, onEvent = () => {}, now = () => new Date(), hash = sha256Hex, limits = {}, validateStep = null, prepareContext = null } = {}) {
     if (typeof resolveAdapter !== 'function') throw new TypeError('ExecutionManager: resolveAdapter é obrigatório');
     if (validateStep !== null && typeof validateStep !== 'function') throw new TypeError('ExecutionManager: validateStep precisa ser função ou null');
+    if (prepareContext !== null && typeof prepareContext !== 'function') throw new TypeError('ExecutionManager: prepareContext precisa ser função ou null');
     this.resolveAdapter = resolveAdapter;
     this.persist = persist;
     this.onEvent = onEvent;
@@ -72,6 +78,7 @@ export class ExecutionManager {
     this.hash = hash;
     this.limits = { maxConcurrent: 1, ...limits };
     this.validateStep = validateStep;
+    this.prepareContext = prepareContext;
   }
 
   emit(run, event) {
@@ -304,8 +311,11 @@ export class ExecutionManager {
           // Artefatos de um run anterior entram primeiro: permitem "animar um
           // rig já revisado" sem repetir a separação de partes.
           const runOutputs = { ...(context.priorOutputs ?? {}), ...ownOutputs };
+          const stepContext = typeof this.prepareContext === 'function'
+            ? await this.prepareContext({ step, context, inputsById, runOutputs, stepRecord })
+            : context;
           const result = await adapter.execute({
-            ...context,
+            ...stepContext,
             stepId: step.id,
             adapter: step.adapter,
             params: step.params ?? {},

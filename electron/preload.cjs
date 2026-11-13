@@ -32,6 +32,8 @@ contextBridge.exposeInMainWorld('liaForge', Object.freeze({
     overview: () => ipcRenderer.invoke('lia-forge:studio:overview'),
     workflows: () => ipcRenderer.invoke('lia-forge:studio:workflows'),
     preflight: (capabilityIds = null) => ipcRenderer.invoke('lia-forge:studio:preflight', { capabilityIds }),
+    providers: () => ipcRenderer.invoke('lia-forge:studio:providers'),
+    configureProvider: (payload) => ipcRenderer.invoke('lia-forge:studio:providers:configure', payload),
     plan: (payload) => ipcRenderer.invoke('lia-forge:studio:plan', payload),
     run: (payload) => ipcRenderer.invoke('lia-forge:studio:run', payload),
     runs: () => ipcRenderer.invoke('lia-forge:studio:runs:list'),

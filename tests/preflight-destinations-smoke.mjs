@@ -69,8 +69,11 @@ const proposed = report.capabilities.find((item) => item.id === 'image2d.decompo
 assert.equal(proposed.status, 'missing');
 assert.ok(proposed.blockers.some((item) => /decisão humana/.test(item)));
 
-// com Blender presente, a capacidade muda de estado (e o resto não)
-const withBlender = await runPreflight({ registry, adapters: createAdapterRegistry(dependencies('/usr/bin/blender')).all(), machine: { os: 'linux', ramMb: 16384 } });
+// Com um executável presente, a capacidade muda de estado (e o resto não).
+// O caminho apontado é um binário que existe de verdade neste ambiente (o
+// próprio Node): a descoberta verifica executabilidade no disco, então um
+// caminho fictício seria — corretamente — reportado como ausente.
+const withBlender = await runPreflight({ registry, adapters: createAdapterRegistry(dependencies(process.execPath)).all(), machine: { os: 'linux', ramMb: 16384 } });
 assert.equal(withBlender.capabilities.find((item) => item.id === 'render3d.to2d').status, 'ready');
 assert.equal(withBlender.summary.toolsAvailable > report.summary.toolsAvailable, true);
 
@@ -115,7 +118,33 @@ assert.equal(bundle.files.length, 1);
 assert.equal(bundle.files[0].sha256.length, 64);
 assert.equal(bundle.files[0].bytes, atlasPng.length);
 assert.equal(bundle.verifiedOnDestination, false, 'nada foi importado em engine de terceiros');
-assert.equal(runValidator('destination-profile', { bundle }).ok, true);
+const profileCheck = runValidator('destination-profile', { bundle });
+assert.equal(profileCheck.ok, true, 'pacote real construído pelo exportador é aprovado');
+assert.equal(profileCheck.metrics.verifiedOnDestination, false, 'o validador não afirma importação real na engine');
+assert.equal(profileCheck.metrics.fps, 60, 'o fps conferido é o publicado para o destino');
+
+// Conformidade com o perfil publicado, não só estrutura do manifesto.
+const formatoRecusado = runValidator('destination-profile', {
+  bundle: { ...bundle, files: [{ ...bundle.files[0], path: 'sprite.psd', format: 'psd' }] },
+});
+assert.equal(formatoRecusado.ok, false, 'formato que o destino não importa é recusado');
+assert.match(formatoRecusado.problems.join(' '), /não importa/);
+
+const perfilAdulterado = runValidator('destination-profile', {
+  bundle: { ...bundle, profile: { ...bundle.profile, fps: 240, axes: 'z-up' } },
+});
+assert.equal(perfilAdulterado.ok, false, 'pacote com perfil diferente do publicado é recusado');
+assert.match(perfilAdulterado.problems.join(' '), /fps do pacote/);
+
+const destinoInexistente = runValidator('destination-profile', { bundle: { ...bundle, destination: 'engine-que-nao-existe' } });
+assert.equal(destinoInexistente.ok, false, 'destino fora do catálogo é recusado');
+assert.match(destinoInexistente.problems.join(' '), /não existe no catálogo/);
+
+const comBloqueio = runValidator('destination-profile', {
+  bundle: { ...bundle, compatibility: { blockers: ['sprite.tga: formato não aceito'], conversions: [], accepted: [] } },
+});
+assert.equal(comBloqueio.ok, false, 'bloqueio de compatibilidade declarado impede a aprovação');
+
 assert.throws(() => buildExportBundle({ destinationId: 'godot-4', artifacts: [], hash: () => 'x' }), /nenhum artefato/);
 
 // adaptação para destino não altera pixels

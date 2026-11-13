@@ -16,7 +16,23 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { defineExecutionAdapter, adapterError, redactSecrets } from '../../shared/adapters/sdk.mjs';
+import { constants as fsConstants } from 'node:fs';
 import { validateSpritesheetContent } from '../../shared/qa/spritesheet.mjs';
+
+/**
+ * Um caminho configurado pelo usuário só conta como ferramenta se existir no
+ * disco e for executável. Sem isso, "configurei o Blender" pareceria pronto e o
+ * run morreria com um erro cru de spawn.
+ */
+async function isExecutable(candidate) {
+  if (typeof candidate !== 'string' || !candidate.trim()) return false;
+  try {
+    await fs.access(candidate, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export const ADAPTER_ID = 'blender-spritesheet';
 
@@ -111,12 +127,24 @@ export function createAdapter(dependencies = {}) {
 
   return defineExecutionAdapter(MANIFEST, {
     async discover() {
-      const executable = configuration.executable || findExternalTool('blender');
+      const configured = configuration.executable || null;
+      const executable = configured || findExternalTool('blender');
       if (!executable) {
         return {
           adapterId: ADAPTER_ID,
           status: 'missing',
           detail: 'Blender não foi detectado nesta máquina. Ele não é instalado automaticamente: instale por conta própria ou escolha outro adapter.',
+          checkedAt: new Date().toISOString(),
+          version: null,
+        };
+      }
+      if (!(await isExecutable(executable))) {
+        return {
+          adapterId: ADAPTER_ID,
+          status: 'missing',
+          detail: configured
+            ? `O caminho configurado para o Blender (${configured}) não existe ou não é executável. Corrija em Configurações → Providers; nada foi instalado.`
+            : 'O Blender encontrado não é executável neste ambiente.',
           checkedAt: new Date().toISOString(),
           version: null,
         };
@@ -152,6 +180,13 @@ export function createAdapter(dependencies = {}) {
           { adapterId: ADAPTER_ID, action: 'install_software', requiresUserDecision: true },
         );
       }
+      if (!(await isExecutable(executable))) {
+        throw adapterError(
+          'WORKFLOW_BLOCKED',
+          `O Blender configurado (${executable}) não existe ou não é executável. Confira o caminho em Configurações → Providers; a Lia Forge não instala nada por conta própria.`,
+          { adapterId: ADAPTER_ID, action: 'install_software', requiresUserDecision: true, executable },
+        );
+      }
 
       const artifactInput = inputsById?.['animated-model'] || inputsById?.model;
       const resolvedInputPath = inputPath || (artifactInput?.path ? path.resolve(runProjectRoot, artifactInput.path) : null);
@@ -164,11 +199,25 @@ export function createAdapter(dependencies = {}) {
       }
 
       const args = buildBlenderSpritesheetArgs({ scriptPath, inputPath: resolvedInputPath, outputDirectory, asset, frameSize });
-      const { child } = taskRegistry.start(`Lia Forge · spritesheet · ${asset.name}`, executable, args, {
-        cwd: outputDirectory,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      await runProcess(child, { signal, onProgress: reportProgress });
+      let child;
+      try {
+        ({ child } = taskRegistry.start(`Lia Forge · spritesheet · ${asset.name}`, executable, args, {
+          cwd: outputDirectory,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }));
+        await runProcess(child, { signal, onProgress: reportProgress });
+      } catch (error) {
+        // Não conseguir lançar o processo é falta de ferramenta, não defeito do
+        // produto: vira bloqueio nomeado com a ação que destrava.
+        if (['ENOENT', 'EACCES', 'EPERM'].includes(error?.code) || /ENOENT|EACCES|not found|permissão/i.test(String(error?.message ?? ''))) {
+          throw adapterError(
+            'WORKFLOW_BLOCKED',
+            `Não foi possível executar o Blender (${executable}): ${error?.message ?? error?.code ?? 'motivo desconhecido'}. Confira a instalação e o caminho em Configurações → Providers.`,
+            { adapterId: ADAPTER_ID, action: 'install_software', requiresUserDecision: true, executable },
+          );
+        }
+        throw error;
+      }
 
       const pngPath = path.join(outputDirectory, 'spritesheet.png');
       const metadataPath = path.join(outputDirectory, 'spritesheet.json');

@@ -28,8 +28,29 @@ const WORKFLOW_DEFINITIONS = [
   },
 ];
 
-export function getComfyUiEndpoint() {
-  const configured = process.env.COMFYUI_URL || 'http://127.0.0.1:8188';
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', '[::1]', 'localhost', '0.0.0.0']);
+
+/**
+ * Um endpoint é local quando aponta para a própria máquina. É o que separa o
+ * adapter local (nenhum dado sai da máquina) do adapter remoto (envio de dados
+ * + custo, sempre com autorização explícita).
+ */
+export function isLoopbackEndpoint(endpoint) {
+  try {
+    const url = new URL(endpoint);
+    return LOOPBACK_HOSTS.has(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve o endpoint do ComfyUI: valor explícito (provider escolhido pelo
+ * usuário) > `COMFYUI_URL` > padrão loopback. Credenciais, query e fragmento
+ * continuam recusados.
+ */
+export function getComfyUiEndpoint(explicit = null) {
+  const configured = explicit || process.env.COMFYUI_URL || 'http://127.0.0.1:8188';
   let url;
   try {
     url = new URL(configured);
@@ -109,10 +130,10 @@ function friendlyConnectionError(error) {
   return error?.message || 'ComfyUI indisponível.';
 }
 
-export async function getComfyUiStatus({ includeModels = true } = {}) {
+export async function getComfyUiStatus({ includeModels = true, endpoint: explicitEndpoint = null } = {}) {
   let endpoint;
   try {
-    endpoint = getComfyUiEndpoint();
+    endpoint = getComfyUiEndpoint(explicitEndpoint);
     const [statsResult, queueResult, ...modelResults] = await Promise.allSettled([
       getJson(endpoint, '/system_stats'),
       getJson(endpoint, '/queue'),
@@ -240,11 +261,11 @@ function imagesFromHistory(entry) {
     .filter((image) => image && typeof image.filename === 'string' && image.filename.trim());
 }
 
-export async function runComfyUiConcept({ workflowId, prompt, checkpoint, outputDirectory, signal, onProgress = async () => {}, timeoutMs = 20 * 60 * 1000 } = {}) {
+export async function runComfyUiConcept({ workflowId, prompt, checkpoint, outputDirectory, signal, onProgress = async () => {}, timeoutMs = 20 * 60 * 1000, endpoint: explicitEndpoint = null } = {}) {
   if (typeof checkpoint !== 'string' || !checkpoint.trim()) throw Object.assign(new Error('Escolha um checkpoint já instalado no ComfyUI antes de gerar.'), { code: 'WORKFLOW_BLOCKED' });
   if (typeof prompt !== 'string' || prompt.trim().length < 12 || prompt.length > 8000) throw new Error('O prompt precisa ter entre 12 e 8000 caracteres.');
   if (typeof outputDirectory !== 'string' || !path.isAbsolute(outputDirectory)) throw new Error('A pasta de saída precisa ser um caminho absoluto local.');
-  const endpoint = getComfyUiEndpoint();
+  const endpoint = getComfyUiEndpoint(explicitEndpoint);
   const workflow = await readComfyUiWorkflow(workflowId);
   const installedCheckpoints = await getJson(endpoint, '/models/checkpoints', { signal });
   if (!Array.isArray(installedCheckpoints) || !installedCheckpoints.includes(checkpoint)) {

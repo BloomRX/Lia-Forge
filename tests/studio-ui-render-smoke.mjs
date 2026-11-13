@@ -256,10 +256,48 @@ try {
   assert.ok(modelMarkup.includes('precisa de'), 'o plano avisa a entrada que falta');
   assert.ok(modelMarkup.includes('model'), 'o nome do parâmetro aparece para o usuário avançado');
 
+  // --------------------------------------------- 6. providers pela API (F8/§9)
+  const providers = await liaForgeApi.providers();
+  assert.equal(providers.comfyui.mode, 'local-loopback', 'o padrão é executar na própria máquina');
+  assert.equal(providers.comfyui.connected, false, 'sem servidor local, nada é reportado como conectado');
+  assert.equal(providers.blender.available, false, 'sem executável, o Blender não aparece como disponível');
+  assert.match(providers.blender.detail, /não é instalado automaticamente/, 'a interface diz que nada é instalado automaticamente');
+  assert.match(providers.note, /Nenhuma ferramenta foi instalada/, 'a nota de provider repete a garantia');
+
+  const secretRefusal = await nativeFetch(`${origin}/api/lia-forge/studio/providers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: 'comfyui', token: 'segredo-nunca-gravado' }),
+  });
+  assert.equal(secretRefusal.status, 400, 'segredo enviado pela UI é recusado com 400');
+  assert.match(await secretRefusal.text(), /segredo/i, 'a recusa explica por quê');
+
+  const remoteRefusal = await nativeFetch(`${origin}/api/lia-forge/studio/providers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: 'comfyui', mode: 'local-loopback', endpoint: 'http://10.9.8.7:8188' }),
+  });
+  assert.equal(remoteRefusal.status, 400, 'modo local com endpoint de outra máquina é recusado');
+
+  const configured = await liaForgeApi.configureProvider({ id: 'blender', mode: 'path', executable: path.join(os.tmpdir(), 'blender-que-nao-existe') });
+  assert.equal(configured.providers.blender.available, false, 'caminho inexistente não vira ferramenta disponível');
+  assert.match(configured.providers.blender.detail, /não existe ou não é executável/, 'o motivo do caminho inválido aparece na UI');
+  const storedProviders = JSON.parse(await fs.readFile(path.join(projectRoot, '.lia-forge', 'providers.json'), 'utf8'));
+  assert.equal(storedProviders.providers.blender.mode, 'path', 'a escolha fica gravada no projeto');
+  assert.ok(!JSON.stringify(storedProviders).includes('segredo-nunca-gravado'), 'nenhum segredo foi gravado em .lia-forge/providers.json');
+  await liaForgeApi.configureProvider({ id: 'blender', mode: 'auto', executable: null });
+
+  const { ProvidersPanel } = await vite.ssrLoadModule('/src/ForgeStudio.jsx');
+  const providerMarkup = renderToStaticMarkup(createElement(ProvidersPanel, { providers, busy: null, onConfigure: () => {} }));
+  assert.ok(providerMarkup.includes('Providers &amp; backends'), 'o painel de providers aparece na interface');
+  assert.ok(providerMarkup.includes('Local (nesta máquina)') && providerMarkup.includes('Remoto (worker próprio'), 'as três opções de backend são oferecidas');
+  assert.ok(providerMarkup.includes('Não conectado') && providerMarkup.includes('Não detectado'), 'o estado real (ausente) é o que aparece, nunca "disponível"');
+  assert.ok(providerMarkup.includes('não instala, não baixa, não compra'), 'a garantia de não instalar/baixar/comprar está visível');
+
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 
-  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes e validações na UI; transporte ${liaForgeApi.transport}).`);
+  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações e providers na UI; transporte ${liaForgeApi.transport}).`);
 } finally {
   globalThis.fetch = nativeFetch;
   await vite.close();

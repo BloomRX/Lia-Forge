@@ -36,12 +36,34 @@ import {
   Package,
   Play,
   RefreshCw,
+  Server,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Terminal,
   Workflow as WorkflowIcon,
 } from 'lucide-react';
 import { liaForgeApi } from './lia-forge-api.js';
+
+// Escolha real de backend (§9). Nada aqui instala, baixa, compra ou envia:
+// são só as preferências gravadas em `.lia-forge/providers.json`.
+const COMFY_MODES = [
+  { id: 'local-loopback', label: 'Local (nesta máquina)', hint: 'Fala apenas com 127.0.0.1/localhost: nenhum dado sai do seu computador.' },
+  { id: 'remote', label: 'Remoto (worker próprio, GPU alugada ou hosted)', hint: 'Envia o prompt para fora da máquina e pode gerar custo: só funciona com a sua autorização gravada.' },
+  { id: 'disabled', label: 'Desativado', hint: 'Nenhum servidor é contatado; os passos de difusão ficam bloqueados com esse motivo.' },
+];
+
+const BLENDER_MODES = [
+  { id: 'auto', label: 'Detectar automaticamente', hint: 'Procura no PATH e nos locais de instalação conhecidos do seu sistema.' },
+  { id: 'path', label: 'Informar o caminho do executável', hint: 'Use quando o Blender estiver instalado em um lugar fora do PATH.' },
+  { id: 'disabled', label: 'Desativado', hint: 'Os passos 3D ficam bloqueados com esse motivo.' },
+];
+
+const COMFY_WORKFLOWS = [
+  { id: '', label: 'Padrão do adapter (concept sheet)' },
+  { id: 'character-concept', label: 'Concept sheet · personagem' },
+  { id: 'item-concept', label: 'Concept sheet · item' },
+];
 
 const STATE_LABELS = {
   ready: 'Pronto',
@@ -178,6 +200,186 @@ function MachinePanel({ machine, note }) {
         {machine.gpuNote}
       </p>
       {note ? <p className="forge-note">{note}</p> : null}
+    </section>
+  );
+}
+
+/**
+ * Providers & backends (§9): onde o usuário escolhe COMO cada ferramenta
+ * externa será usada e vê o estado medido agora — nunca uma promessa.
+ */
+export function ProvidersPanel({ providers, busy, onConfigure }) {
+  const comfy = providers?.comfyui ?? null;
+  const blender = providers?.blender ?? null;
+  const [mode, setMode] = useState(comfy?.mode ?? 'local-loopback');
+  const [endpoint, setEndpoint] = useState(comfy?.endpoint ?? '');
+  const [checkpoint, setCheckpoint] = useState(comfy?.checkpoint ?? '');
+  const [templateId, setTemplateId] = useState(comfy?.workflowId ?? '');
+  const [granted, setGranted] = useState(comfy?.authorization?.granted === true);
+  const [grantedBy, setGrantedBy] = useState(comfy?.authorization?.grantedBy ?? '');
+  const [maxCost, setMaxCost] = useState(comfy?.maxCostUnits ?? '');
+  const [blenderMode, setBlenderMode] = useState(blender?.mode ?? 'auto');
+  const [executable, setExecutable] = useState(blender?.configuredExecutable ?? blender?.executable ?? '');
+  const [frameSize, setFrameSize] = useState(blender?.frameSize ?? '48x48');
+
+  // A configuração gravada é a fonte de verdade: sincroniza os campos quando
+  // ela muda (outro painel, outra janela, ou uma recusa do serviço).
+  useEffect(() => {
+    if (!comfy || !blender) return;
+    setMode(comfy.mode);
+    setEndpoint(comfy.endpoint ?? '');
+    setCheckpoint(comfy.checkpoint ?? '');
+    setTemplateId(comfy.workflowId ?? '');
+    setGranted(comfy.authorization?.granted === true);
+    setGrantedBy(comfy.authorization?.grantedBy ?? '');
+    setMaxCost(comfy.maxCostUnits ?? '');
+    setBlenderMode(blender.mode);
+    setExecutable(blender.configuredExecutable ?? blender.executable ?? '');
+    setFrameSize(blender.frameSize ?? '48x48');
+  }, [providers?.updatedAt, comfy, blender]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const modeHint = COMFY_MODES.find((item) => item.id === mode)?.hint ?? '';
+  const blenderHint = BLENDER_MODES.find((item) => item.id === blenderMode)?.hint ?? '';
+
+  const saveComfy = (event) => {
+    event.preventDefault();
+    const payload = {
+      id: 'comfyui',
+      mode,
+      endpoint: endpoint.trim() || null,
+      checkpoint: checkpoint.trim() || null,
+      workflowId: templateId || null,
+      maxCostUnits: maxCost === '' || maxCost === null ? null : Number(maxCost),
+    };
+    if (mode === 'remote') {
+      payload.authorization = { granted, grantedBy: grantedBy.trim() || null, scope: 'send_data+cost' };
+    }
+    onConfigure(payload);
+  };
+
+  const saveBlender = (event) => {
+    event.preventDefault();
+    onConfigure({
+      id: 'blender',
+      mode: blenderMode,
+      executable: blenderMode === 'path' ? (executable.trim() || null) : null,
+      frameSize: frameSize.trim() || '48x48',
+    });
+  };
+
+  return (
+    <section className="panel forge-panel">
+      <header className="forge-panel-head">
+        <Server size={15} strokeWidth={1.8} />
+        <h2>Providers &amp; backends</h2>
+        <span className="forge-panel-tag">{providers?.updatedAt ? 'configuração gravada' : 'padrão de fábrica'}</span>
+      </header>
+
+      <div className="forge-tool-list">
+        <article className="forge-tool">
+          <header>
+            <strong>ComfyUI (difusão 2D)</strong>
+            <StateBadge
+              state={comfy?.connected ? 'ready' : mode === 'disabled' ? 'unknown' : 'missing'}
+              label={comfy?.connected ? 'Conectado' : mode === 'remote' ? (comfy?.authorization?.granted ? 'Remoto autorizado' : 'Remoto sem autorização') : 'Não conectado'}
+            />
+          </header>
+          {comfy?.detail ? <p className="forge-tool-detail">{comfy.detail}</p> : null}
+          <form className="forge-form" onSubmit={saveComfy}>
+            <label className="is-wide">
+              <span>Onde executar</span>
+              <select value={mode} onChange={(event) => setMode(event.target.value)}>
+                {COMFY_MODES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+              <em className="forge-note">{modeHint}</em>
+            </label>
+            <label className="is-wide">
+              <span>Endpoint</span>
+              <input
+                value={endpoint}
+                onChange={(event) => setEndpoint(event.target.value)}
+                placeholder={mode === 'remote' ? 'https://seu-worker.exemplo (HTTPS, sem credenciais)' : 'http://127.0.0.1:8188'}
+                spellCheck={false}
+              />
+            </label>
+            <label>
+              <span>Checkpoint já instalado</span>
+              <input value={checkpoint} onChange={(event) => setCheckpoint(event.target.value)} placeholder="Ex.: sd_xl_base_1.0.safetensors" spellCheck={false} />
+            </label>
+            <label>
+              <span>Template do workflow</span>
+              <select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>
+                {COMFY_WORKFLOWS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+            </label>
+            {mode === 'remote' ? (
+              <div className="forge-authorize is-wide">
+                <label className="forge-check">
+                  <input type="checkbox" checked={granted} onChange={(event) => setGranted(event.target.checked)} />
+                  <span>Autorizo enviar meu prompt a este endpoint e o custo associado</span>
+                </label>
+                <label>
+                  <span>Quem autorizou</span>
+                  <input value={grantedBy} onChange={(event) => setGrantedBy(event.target.value)} placeholder="Seu nome" />
+                </label>
+                <label>
+                  <span>Teto de custo (opcional)</span>
+                  <input value={maxCost} onChange={(event) => setMaxCost(event.target.value)} inputMode="decimal" placeholder="Ex.: 5" />
+                </label>
+                <p className="forge-note">
+                  Sem esta autorização nada é enviado e nenhum custo é gerado: o passo fica bloqueado com o motivo gravado no run.
+                  Credenciais nunca são gravadas aqui — use a referência do seu próprio cofre.
+                </p>
+              </div>
+            ) : null}
+            <div className="forge-panel-actions is-wide">
+              <button type="submit" className="button button-primary" disabled={busy !== null}>
+                {busy === 'provider' ? <span className="spin" /> : <SlidersHorizontal size={14} />} Gravar provider ComfyUI
+              </button>
+              <KeyValue label="Versão detectada" value={comfy?.version ?? null} />
+              <KeyValue label="Fila" value={comfy?.queue ? `${comfy.queue.running} em execução · ${comfy.queue.pending} aguardando` : null} />
+            </div>
+          </form>
+        </article>
+
+        <article className="forge-tool">
+          <header>
+            <strong>Blender (render 3D → 2D)</strong>
+            <StateBadge state={blender?.available ? 'ready' : blenderMode === 'disabled' ? 'unknown' : 'missing'} label={blender?.available ? 'Disponível' : blenderMode === 'disabled' ? 'Desativado por você' : 'Não detectado'} />
+          </header>
+          {blender?.detail ? <p className="forge-tool-detail">{blender.detail}</p> : null}
+          <form className="forge-form" onSubmit={saveBlender}>
+            <label className="is-wide">
+              <span>Como encontrar</span>
+              <select value={blenderMode} onChange={(event) => setBlenderMode(event.target.value)}>
+                {BLENDER_MODES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+              <em className="forge-note">{blenderHint}</em>
+            </label>
+            {blenderMode === 'path' ? (
+              <label className="is-wide">
+                <span>Caminho do executável</span>
+                <input value={executable} onChange={(event) => setExecutable(event.target.value)} placeholder="/usr/bin/blender · C:\Program Files\Blender Foundation\Blender\blender.exe" spellCheck={false} />
+              </label>
+            ) : null}
+            <label>
+              <span>Frame (LARGURAxALTURA)</span>
+              <input value={frameSize} onChange={(event) => setFrameSize(event.target.value)} placeholder="48x48" spellCheck={false} />
+            </label>
+            <div className="forge-panel-actions is-wide">
+              <button type="submit" className="button button-primary" disabled={busy !== null}>
+                {busy === 'provider' ? <span className="spin" /> : <SlidersHorizontal size={14} />} Gravar provider Blender
+              </button>
+              <KeyValue label="Executável em uso" value={blender?.executable ?? null} mono />
+              <KeyValue label="Script de render" value={blender?.scriptPath ?? null} mono />
+            </div>
+          </form>
+        </article>
+      </div>
+      <p className="forge-note">
+        A Lia Forge não instala, não baixa, não compra e não inicia nada por conta própria. A configuração fica em
+        {' '}<code>.lia-forge/providers.json</code> e nunca contém segredo.
+      </p>
     </section>
   );
 }
@@ -474,6 +676,7 @@ export default function ForgeStudio({ onNotify = () => {} }) {
   const [assetName, setAssetName] = useState('');
   const [exportResult, setExportResult] = useState(null);
   const [runs, setRuns] = useState([]);
+  const [providers, setProviders] = useState(null);
 
   const notify = useCallback((message, tone = 'info') => {
     if (typeof onNotify === 'function') onNotify(message, tone);
@@ -489,6 +692,11 @@ export default function ForgeStudio({ onNotify = () => {} }) {
         setRuns(await liaForgeApi.runs());
       } catch {
         setRuns([]);
+      }
+      try {
+        setProviders(await liaForgeApi.providers());
+      } catch {
+        setProviders(data.providers ?? null);
       }
       if (!workflowId) {
         const firstExecutable = data.workflows.find((workflow) => workflow.executableNow) ?? data.workflows[0];
@@ -547,6 +755,15 @@ export default function ForgeStudio({ onNotify = () => {} }) {
     if (modelParam && modelPath.trim()) params[modelParam] = modelPath.trim();
     return params;
   }, [needsSourceImage, sourceImage, isVfxWorkflow, vfx, needsPriorRun, fromRun, modelParam, modelPath]);
+
+  const handleConfigureProvider = (payload) => runAction('provider', async () => {
+    const result = await liaForgeApi.configureProvider(payload);
+    setProviders(result?.providers ?? null);
+    // O estado das ferramentas depende da configuração: relê o panorama inteiro
+    // para que nenhum painel continue mostrando o mundo antigo.
+    setOverview(await liaForgeApi.overview());
+    notify('Configuração do provider gravada no projeto. Nada foi instalado, baixado ou comprado.', 'info');
+  });
 
   const handlePlan = () => runAction('plan', async () => {
     const result = await liaForgeApi.plan({ workflowId, destination, options: buildOptions(), brief: brief.trim() || null });
@@ -982,6 +1199,7 @@ export default function ForgeStudio({ onNotify = () => {} }) {
 
         <aside className="forge-side">
           <MachinePanel machine={overview.machine} note={overview.note} />
+          <ProvidersPanel providers={providers ?? overview.providers} busy={busy} onConfigure={handleConfigureProvider} />
           <ToolsPanel adapters={overview.adapters} preflight={overview.preflight} />
           <RightsPanel rights={overview.rights} assets={overview.assets} onDeclare={handleDeclare} busy={busy} />
           <section className="panel forge-panel forge-assistant">

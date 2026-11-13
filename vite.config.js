@@ -354,6 +354,18 @@ function liaForgeStudioApi() {
             return json(200, await service.preflight({ capabilityIds }));
           }
 
+          // Providers (§9): escolha real entre execução local, remota autorizada
+          // e desativado. Configuração gravada no projeto, sem segredos.
+          if (route === '/providers') {
+            if (method === 'GET') return json(200, await service.providers());
+            if (method === 'POST') {
+              const body = await readJsonBody(request);
+              if (!body.id) return json(400, { error: 'id do provider é obrigatório (blender | comfyui).' });
+              return json(200, await service.configureProvider(body));
+            }
+            return json(405, { error: 'Method not allowed' });
+          }
+
           if (route === '/plan') {
             if (method !== 'POST') return json(405, { error: 'Method not allowed' });
             const body = await readJsonBody(request);
@@ -451,6 +463,8 @@ function liaForgeStudioApi() {
 
           return json(404, { error: 'Rota desconhecida da API do Studio Lia Forge.' });
         } catch (error) {
+          // Configuração inválida vinda do usuário é 400, não falha do servidor.
+          if (error?.code === 'PROVIDER_CONFIG_INVALID') return json(400, { error: error.message });
           return json(error?.statusCode === 404 ? 404 : 500, { error: error?.message || 'Falha na API do Studio.' });
         }
       });

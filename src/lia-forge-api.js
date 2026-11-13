@@ -77,6 +77,27 @@ export const liaForgeApi = {
     return request(`/preflight${query({ capabilities: capabilities?.length ? capabilities.join(',') : null })}`);
   },
 
+  /**
+   * Providers (§9): como cada ferramenta externa será usada — local (loopback),
+   * remota (só com autorização gravada) ou desativada — e o estado real medido
+   * agora (versão, endpoint, executável, requisitos não atendidos).
+   */
+  async providers() {
+    const ipc = bridge();
+    if (ipc) return ipc.providers();
+    return request('/providers');
+  },
+
+  /**
+   * Altera um provider. Segredos são recusados pelo serviço (nunca gravados);
+   * endpoint remoto exige `authorization.granted` vindo de decisão humana.
+   */
+  async configureProvider(payload) {
+    const ipc = bridge();
+    if (ipc) return ipc.configureProvider(payload);
+    return request('/providers', { method: 'POST', body: payload });
+  },
+
   /** Só planeja (§10): passos, candidatos, custos, licenças e bloqueios. */
   async plan({ workflowId, destination = null, options = {}, brief = null }) {
     const ipc = bridge();

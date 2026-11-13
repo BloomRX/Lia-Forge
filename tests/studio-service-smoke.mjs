@@ -104,7 +104,13 @@ try {
   check(planned.plan.userActions.every((action) => action.canBeAutomated === false),
     'instalações/autorizações nunca são automatizadas pelo plano');
 
-  const concept = await service.plan({ workflowId: '2d-art-concept' });
+  // Sem o texto do usuário, o plano pede o prompt antes de qualquer ferramenta.
+  const semTexto = await service.plan({ workflowId: '2d-art-concept' });
+  check(semTexto.plan.pendingInputs.some((item) => item.param === 'prompt'), 'o plano pede o texto da arte quando o usuário não escreveu nada');
+  check(semTexto.plan.userActions.every((action) => action.canBeAutomated === false), 'escrever o prompt é decisão humana');
+
+  const concept = await service.plan({ workflowId: '2d-art-concept', brief: 'Heroína de neon correndo sob chuva roxa, vista lateral' });
+  check(concept.plan.pendingInputs.length === 0, 'o brief escrito pelo usuário satisfaz a entrada de texto');
   check(concept.plan.blocked === true, 'geração de conceito (ComfyUI) bloqueada sem o serviço');
   check(/comfyui/i.test(JSON.stringify(concept.plan.blockedSteps)), 'o motivo nomeia o ComfyUI');
   check(concept.plan.userActions.every((action) => action.canBeAutomated === false), 'as ações do plano exigem decisão humana');

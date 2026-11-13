@@ -41,7 +41,7 @@ export const WORKFLOW_RECIPES = Object.freeze({
     description: 'Gera uma imagem de conceito por difusão local e valida o conteúdo; sem servidor disponível, o passo fica bloqueado e a arte pode ser registrada manualmente.',
     destinationAware: true,
     steps: [
-      { id: 'concept', title: 'Gerar conceito 2D', capability: 'image2d.generate-concept', reviewRequired: true, validators: ['png-structural', 'png-content'], optional: true, blockedFallback: 'manual-registration' },
+      { id: 'concept', title: 'Gerar conceito 2D', capability: 'image2d.generate-concept', requiresParam: 'prompt', reviewRequired: true, validators: ['png-structural', 'png-content'], optional: true, blockedFallback: 'manual-registration' },
       { id: 'prepare', title: 'Preparar imagem (fundo/recorte)', capability: 'image2d.transform', dependsOn: ['concept'], params: { op: 'chroma-key' }, validators: ['png-content'] },
       { id: 'deliver', title: 'Empacotar para o destino', capability: 'export.engine', dependsOn: ['prepare'], validators: ['destination-profile'] },
     ],
@@ -106,7 +106,7 @@ export const WORKFLOW_RECIPES = Object.freeze({
     destinationAware: true,
     preservesContract: 'humanoid-prompt-views-to-2d-v1',
     steps: [
-      { id: 'reference-views', title: 'Vistas de referência', capability: 'image2d.generate-concept', validators: ['png-content'], reviewRequired: true, optional: true },
+      { id: 'reference-views', title: 'Vistas de referência', capability: 'image2d.generate-concept', requiresParam: 'prompt', validators: ['png-content'], reviewRequired: true, optional: true },
       { id: 'generate-3d', title: 'Gerar modelo 3D', capability: 'model3d.generate', dependsOn: ['reference-views'], validators: ['glb-structural'], protectedActions: ['download_models_or_weights', 'cost'] },
       { id: 'auto-rig', title: 'Auto-rigging', capability: 'rig3d.auto', dependsOn: ['generate-3d'], validators: ['glb-structural'] },
       { id: 'animate', title: 'Animações', capability: 'motion.cycles', dependsOn: ['auto-rig'], validators: ['animation-loop'] },
@@ -192,6 +192,12 @@ export function planWorkflow({ workflowId, hub, registry, destination = null, op
     if (recipeStep.requiresParam) {
       const provided = options[recipeStep.requiresParam] ?? options[recipeStep.id]?.[recipeStep.requiresParam] ?? null;
       if (provided !== null && provided !== undefined) params[recipeStep.requiresParam] = provided;
+      // O brief escrito pelo usuário É o texto do prompt: aceitá-lo evita pedir
+      // duas vezes a mesma informação na interface.
+      if (recipeStep.requiresParam === 'prompt' && params.prompt === undefined) {
+        const briefText = typeof brief === 'string' ? brief.trim() : '';
+        if (briefText.length >= 12) params.prompt = briefText.slice(0, 8000);
+      }
     }
 
     const step = {
