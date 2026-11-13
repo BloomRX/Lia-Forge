@@ -1091,6 +1091,25 @@ function registerIpcHandlers() {
     if (!RUN_ID_PATTERN.test(String(runId ?? ''))) throw new Error('runId inválido.');
     return (await getStudioService()).readRun(String(runId));
   });
+  ipcMain.handle('lia-forge:studio:runs:active', async (event) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).activeRuns();
+  });
+  ipcMain.handle('lia-forge:studio:runs:cancel', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).cancelRun({
+      runId: requireText(payload?.runId, 'runId', 120),
+      reason: payload?.reason ? requireText(payload.reason, 'reason', 400) : 'cancelado pelo usuário',
+      cancelledBy: payload?.cancelledBy ? requireText(payload.cancelledBy, 'cancelledBy', 120) : 'usuário do Studio',
+    });
+  });
+  ipcMain.handle('lia-forge:studio:runs:resume', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).resumeRun({
+      runId: requireText(payload?.runId, 'runId', 120),
+      reason: payload?.reason ? requireText(payload.reason, 'reason', 400) : null,
+    });
+  });
   ipcMain.handle('lia-forge:studio:runs:review', async (event, payload) => {
     assertTrustedIpcSender(event);
     return (await getStudioService()).reviewStep({

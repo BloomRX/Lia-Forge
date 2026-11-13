@@ -407,6 +407,12 @@
 .forge-compare-card.is-error{border-color:#6d3346}
 .forge-compare-card>strong{color:#f6e7f1;font-size:10.4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .forge-compare-card .forge-thumb{height:96px}
+/* Execução ao vivo: progresso passo a passo e cancelamento */
+.forge-live .forge-panel-tag{color:#ffd9f4}
+.forge-live-steps{display:flex;flex-direction:column;gap:4px;margin:8px 0 0;padding:0;list-style:none}
+.forge-live-steps li{display:flex;align-items:center;gap:7px;padding:5px 7px;border:1px solid var(--line-soft);border-radius:6px;background:#1c161d}
+.forge-live-steps code{color:#f6e7f1;font:9.6px var(--mono)}
+.forge-live-steps span{color:#8d7c8f;font-size:9.6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .forge-rights-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:7px}
 .forge-rights-cell{display:flex;flex-direction:column;gap:3px;padding:8px 9px;border:1px solid var(--line-soft);border-radius:7px;background:#1a141b;opacity:.62}
 .forge-rights-cell.is-active{opacity:1;border-color:#4a3350;background:#221a24}

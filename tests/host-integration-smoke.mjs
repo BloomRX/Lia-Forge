@@ -43,6 +43,7 @@ import { encodePngRgba, decodePng, analyzePngContent } from '../shared/qa/png-co
 import { createProviderStore } from '../shared/integrations/provider-store.mjs';
 import { createHostDefaults } from '../shared/integrations/host-defaults.mjs';
 import { buildGlbFixture } from './glb-fixtures.mjs';
+import { rendererStub, codecShimSource } from './tool-stubs.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..');
@@ -77,81 +78,7 @@ function conceptPng(width = 512, height = 512) {
  * `buildBlenderSpritesheetArgs` produz e grava `spritesheet.png` +
  * `spritesheet.json` na pasta de saída — como o script real faria.
  */
-const RENDERER_STUB = (codecUrl) => `#!/usr/bin/env node
-// SUBSTITUTO DE TESTE — não é o Blender. Gerado por tests/host-integration-smoke.mjs.
-import fs from 'node:fs/promises';
-import path from 'node:path';
-const { encodePngRgba, createImage } = await import(${JSON.stringify(codecUrl)});
 
-const args = process.argv.slice(2);
-const value = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : null; };
-const script = value('--python');
-const input = value('--input');
-const outputDirectory = value('--output-dir');
-const assetName = value('--asset-name');
-const assetType = value('--asset-type');
-const frameWidth = Number(value('--frame-width'));
-const frameHeight = Number(value('--frame-height'));
-const animations = JSON.parse(value('--animations-json') || '[]');
-
-const exists = async (candidate) => { try { await fs.access(candidate); return true; } catch { return false; } };
-if (!script || !(await exists(script))) { console.error('script Blender não encontrado: ' + script); process.exit(2); }
-if (!input || !(await exists(input))) { console.error('modelo de entrada não encontrado: ' + input); process.exit(3); }
-if (!outputDirectory || !Number.isInteger(frameWidth) || !Number.isInteger(frameHeight)) { console.error('argumentos incompletos'); process.exit(4); }
-
-const columns = 8;
-const rows = Math.max(1, animations.length);
-const sheetWidth = columns * frameWidth;
-const sheetHeight = rows * frameHeight;
-const image = createImage(sheetWidth, sheetHeight);
-const frames = [];
-for (let row = 0; row < rows; row += 1) {
-  for (let column = 0; column < columns; column += 1) {
-    const offsetX = column * frameWidth;
-    const offsetY = row * frameHeight;
-    const inset = Math.max(2, Math.round(frameWidth * 0.18));
-    for (let y = offsetY + inset; y < offsetY + frameHeight - inset; y += 1) {
-      for (let x = offsetX + inset; x < offsetX + frameWidth - inset; x += 1) {
-        image.rgba.set([230 - row * 30, 90 + column * 12, 200, 255], (y * sheetWidth + x) * 4);
-      }
-    }
-    frames.push({
-      filename: \`\${assetName}-\${animations[row] ?? 'frame'}-\${String(column).padStart(2, '0')}\`,
-      animation: animations[row] ?? 'frame',
-      frame: column,
-      sourceFrame: assetType === 'item' ? null : column + 1,
-      durationMs: 100,
-      pivot: { x: Math.round(frameWidth / 2), y: assetType === 'item' ? Math.round(frameHeight / 2) : frameHeight - 1 },
-      x: offsetX,
-      y: offsetY,
-      width: frameWidth,
-      height: frameHeight,
-    });
-    console.log(\`Frame \${frames.length}/\${columns * rows} · \${animations[row] ?? 'frame'} #\${column}\`);
-  }
-}
-
-await fs.mkdir(outputDirectory, { recursive: true });
-await fs.writeFile(path.join(outputDirectory, 'spritesheet.png'), encodePngRgba(image.rgba, image.width, image.height), { flag: 'wx' });
-const metadata = {
-  schemaVersion: 1,
-  generator: 'substituto-de-teste (não é o Blender)',
-  asset: assetName,
-  assetType,
-  frameWidth,
-  frameHeight,
-  sheetWidth,
-  sheetHeight,
-  columns,
-  rows,
-  origin: 'top-left',
-  anchor: assetType === 'item' ? 'center' : 'feet',
-  animations,
-  frames,
-};
-await fs.writeFile(path.join(outputDirectory, 'spritesheet.json'), JSON.stringify(metadata, null, 2), { flag: 'wx' });
-console.log('Spritesheet gravada: ' + sheetWidth + 'x' + sheetHeight + ' (' + frames.length + ' frames)');
-`;
 
 /** Imagem e encoder usados pelo stub: um único módulo do repo, sem duplicar código. */
 const CODEC_URL = pathToFileURL(path.join(REPO_ROOT, 'shared', 'imaging', 'core.mjs')).href;
@@ -227,8 +154,8 @@ try {
 
   // O stub precisa de um módulo que exporte createImage E encodePngRgba.
   const shimPath = path.join(toolDirectory, 'codec-shim.mjs');
-  await fs.writeFile(shimPath, `export { createImage } from ${JSON.stringify(CODEC_URL)};\nexport { encodePngRgba } from ${JSON.stringify(PNG_CODEC_URL)};\n`, 'utf8');
-  const stubSource = RENDERER_STUB(pathToFileURL(shimPath).href);
+  await fs.writeFile(shimPath, codecShimSource({ imagingUrl: CODEC_URL, pngCodecUrl: PNG_CODEC_URL }), 'utf8');
+  const stubSource = rendererStub(pathToFileURL(shimPath).href);
   const rendererPath = path.join(toolDirectory, 'renderizador-de-teste.mjs');
   await fs.writeFile(rendererPath, stubSource, 'utf8');
   await fs.chmod(rendererPath, 0o755);

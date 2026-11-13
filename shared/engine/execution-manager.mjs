@@ -73,6 +73,9 @@ export class ExecutionManager {
     if (prepareContext !== null && typeof prepareContext !== 'function') throw new TypeError('ExecutionManager: prepareContext precisa ser função ou null');
     this.resolveAdapter = resolveAdapter;
     this.persist = persist;
+    // Escritas de snapshot são serializadas: dois passos terminando ao mesmo
+    // tempo não podem se atropelar no mesmo arquivo.
+    this.persistQueue = Promise.resolve();
     this.onEvent = onEvent;
     this.now = now;
     this.hash = hash;
@@ -189,7 +192,7 @@ export class ExecutionManager {
         current.status = 'blocked';
         this.emit(current, { type: 'run-blocked', code: gate.code, message: gate.reason });
         for (const step of current.steps) step.state = 'blocked';
-        await this.persist(this.snapshot(current));
+        await this.persistSnapshot(current);
         return this.snapshot(current);
       }
       current.authorization = { ...(authorization ?? {}), fingerprint: gate.fingerprint, granted: true };
@@ -234,7 +237,7 @@ export class ExecutionManager {
       current.status = status;
       current.finishedAt = this.now().toISOString();
       this.emit(current, { type: 'run-finished', status, summary: summarizeDag(dag, states()) });
-      await this.persist(this.snapshot(current));
+      await this.persistSnapshot(current);
       return this.snapshot(current);
     };
 
@@ -244,6 +247,9 @@ export class ExecutionManager {
       stepRecord.attempts += 1;
       stepRecord.startedAt = this.now().toISOString();
       this.emit(current, { type: 'step-started', stepId: step.id, adapter: step.adapter, attempt: stepRecord.attempts });
+      // Progresso visível antes do passo terminar: é o que a interface mostra
+      // enquanto uma ferramenta externa trabalha, e o que permite cancelar.
+      await this.persistSnapshot(current);
 
       // Gate de entrada alterada (quando o plano declara entradas com hash)
       if (Array.isArray(step.inputs) && step.inputs.length) {
@@ -463,7 +469,7 @@ export class ExecutionManager {
       const { batch } = scheduleBatch({ dag, states: states(), limits: this.limits });
       for (const stepId of batch) {
         const stepRecord = current.steps.find((item) => item.id === stepId);
-        const promise = runStep(stepRecord).then(() => {
+        const promise = runStep(stepRecord).then(async () => {
           running.delete(stepId);
           // dependentes de um passo que falhou/cancelou/bloqueou são pulados
           if (stepRecord.state !== 'succeeded' && stepRecord.state !== 'skipped') {
@@ -475,6 +481,10 @@ export class ExecutionManager {
               }
             }
           }
+          // Snapshot gravado a cada passo terminado: é o que permite à interface
+          // mostrar progresso de verdade e à retomada aproveitar o que já foi
+          // feito mesmo se o processo cair no meio.
+          await this.persistSnapshot(current);
         });
         running.set(stepId, promise);
         if (this.limits.maxConcurrent <= 1) await promise;
@@ -495,6 +505,22 @@ export class ExecutionManager {
     if (summary.counts.cancelled > 0) return finishRun('cancelled');
     if (summary.counts.succeeded + summary.counts.skipped === summary.total) return finishRun('succeeded');
     return finishRun('paused');
+  }
+
+  /**
+   * Grava o snapshot do run (progresso, estado de cada passo, gates, logs) de
+   * forma serializada. Falha ao gravar não derruba a execução: vai para o log.
+   */
+  persistSnapshot(current) {
+    const snapshot = this.snapshot(current);
+    this.persistQueue = this.persistQueue.then(async () => {
+      try {
+        await this.persist(snapshot);
+      } catch (error) {
+        this.log(current, 'warn', `Não foi possível gravar o progresso do run: ${error?.message ?? error}`, { code: error?.code ?? null });
+      }
+    });
+    return this.persistQueue;
   }
 
   /** Cancelamento cooperativo: devolve o controller para o chamador abortar. */

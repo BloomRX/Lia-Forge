@@ -43,6 +43,7 @@ import {
   Terminal,
   Upload,
   FolderOpen,
+  RotateCcw,
   GitCompareArrows,
   Workflow as WorkflowIcon,
 } from 'lucide-react';
@@ -84,6 +85,7 @@ const RUN_STATE_LABELS = {
   skipped: 'Ignorado',
   blocked: 'Aguardando você',
   cancelled: 'Cancelado',
+  paused: 'Pausado',
 };
 
 const VALIDATION_LABELS = {
@@ -884,6 +886,7 @@ export default function ForgeStudio({ onNotify = () => {} }) {
   const [compareCandidates, setCompareCandidates] = useState([]);
   const [comparison, setComparison] = useState(null);
   const [registeredVersion, setRegisteredVersion] = useState(null);
+  const [liveRun, setLiveRun] = useState(null);
 
   const notify = useCallback((message, tone = 'info') => {
     if (typeof onNotify === 'function') onNotify(message, tone);
@@ -968,6 +971,43 @@ export default function ForgeStudio({ onNotify = () => {} }) {
     if (modelParam && modelPath.trim()) params[modelParam] = modelPath.trim();
     return params;
   }, [needsSourceImage, sourceImage, isVfxWorkflow, vfx, needsPriorRun, fromRun, modelParam, modelPath]);
+
+  /**
+   * Progresso ao vivo: enquanto o run executa, a interface pergunta o que está
+   * em andamento e lê o snapshot gravado a cada passo. Sem isso o usuário veria
+   * só o resultado final — e não teria o que cancelar.
+   */
+  useEffect(() => {
+    if (busy !== 'run') {
+      setLiveRun(null);
+      return undefined;
+    }
+    let active = true;
+    const tick = async () => {
+      try {
+        const list = await liaForgeApi.activeRuns();
+        const current = Array.isArray(list) && list.length ? list[list.length - 1] : null;
+        if (!current) {
+          if (active) setLiveRun(null);
+          return;
+        }
+        const snapshot = await liaForgeApi.readRun(current.runId).catch(() => null);
+        if (!active) return;
+        setLiveRun(snapshot ?? {
+          runId: current.runId,
+          status: 'running',
+          steps: [],
+          summary: { total: 0, progress: 0 },
+          startedAt: current.startedAt,
+        });
+      } catch {
+        /* não haver progresso publicado ainda não é erro: o run pode estar planejando */
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 1200);
+    return () => { active = false; clearInterval(timer); };
+  }, [busy]);
 
   const refreshInputs = useCallback(async () => {
     try {
@@ -1069,6 +1109,46 @@ export default function ForgeStudio({ onNotify = () => {} }) {
     setOverview(await liaForgeApi.overview());
     notify(`Versão ${version?.version ?? 'nova'} gravada no asset "${id}".`, 'info');
     return version;
+  });
+
+  /**
+   * Cancelamento cooperativo: o passo para no próximo ponto de verificação e o
+   * run é gravado como cancelado. Nada é apagado — o que já foi feito continua
+   * em disco e pode ser retomado.
+   */
+  const handleCancelRun = (targetRunId = null, reason = null) => runAction('cancel', async () => {
+    const id = targetRunId ?? liveRun?.runId ?? run?.runId;
+    if (!id) {
+      notify('Não há execução em andamento para cancelar.', 'info');
+      return null;
+    }
+    const result = await liaForgeApi.cancelRun(id, { reason, cancelledBy: 'usuário do Studio' });
+    if (result?.ok) {
+      const fresh = await liaForgeApi.readRun(id).catch(() => null);
+      if (fresh) setRun(fresh);
+      setRuns(await liaForgeApi.runs().catch(() => []));
+      notify(result.stale
+        ? 'A execução já não estava neste processo; o estado gravado foi corrigido para cancelado.'
+        : 'Cancelamento enviado: o run para no próximo ponto de verificação.', 'info');
+    } else {
+      notify(result?.reason ?? 'Não foi possível cancelar.', 'info');
+    }
+    return result;
+  });
+
+  const handleResumeRun = () => runAction('resume', async () => {
+    if (!run?.runId) return null;
+    const result = await liaForgeApi.resumeRun(run.runId, { reason: 'retomado pelo usuário no Studio' });
+    if (result?.ok && result.result) {
+      setRun(result.result);
+      setRunTab('passos');
+      setExportResult(null);
+      setRuns(await liaForgeApi.runs().catch(() => []));
+      notify(`Run retomado a partir de ${result.checkpointsReused} checkpoint(s): ${result.result.status}.`, result.result.status === 'succeeded' ? 'success' : 'info');
+    } else {
+      notify(result?.reason ?? 'Nada a retomar.', 'info');
+    }
+    return result;
   });
 
   const handleConfigureProvider = (payload) => runAction('provider', async () => {
@@ -1374,6 +1454,47 @@ export default function ForgeStudio({ onNotify = () => {} }) {
             </section>
           ) : null}
 
+          {busy === 'run' ? (
+            <section className="panel forge-panel forge-live">
+              <header className="forge-panel-head">
+                <Activity size={15} strokeWidth={1.8} />
+                <h2>4 · Execução em andamento</h2>
+                <span className="forge-panel-tag">
+                  {liveRun
+                    ? `${Math.round(liveRun.summary?.progress ?? 0)}% · ${(liveRun.steps ?? []).filter((step) => step.state === 'succeeded').length}/${(liveRun.steps ?? []).length} passos`
+                    : 'planejando…'}
+                </span>
+              </header>
+              <div className="forge-progress"><span style={{ width: `${liveRun ? Math.max(4, Math.round(liveRun.summary?.progress ?? 0)) : 4}%` }} /></div>
+              {liveRun?.steps?.length ? (
+                <ul className="forge-live-steps">
+                  {liveRun.steps.map((step) => (
+                    <li key={step.id}>
+                      <StateBadge state={step.state} label={RUN_STATE_LABELS[step.state] ?? step.state} />
+                      <code>{step.id}</code>
+                      <span>{step.title ?? step.adapter}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="forge-note">O plano está sendo montado e conferido contra o que existe nesta máquina.</p>
+              )}
+              <div className="forge-panel-actions">
+                <button
+                  type="button"
+                  className="button button-quiet"
+                  onClick={() => handleCancelRun(liveRun?.runId ?? null, 'cancelado pelo usuário no Studio')}
+                  disabled={busy === 'cancel' || !liveRun?.runId}
+                >
+                  {busy === 'cancel' ? <span className="spin" /> : <CircleAlert size={14} />} Cancelar execução
+                </button>
+                <p className="forge-note">
+                  Cancelar para o passo no próximo ponto de verificação. Nada é apagado: o que já foi feito continua em disco e o run pode ser retomado.
+                </p>
+              </div>
+            </section>
+          ) : null}
+
           {run ? (
             <section className="panel forge-panel">
               <header className="forge-panel-head">
@@ -1491,6 +1612,16 @@ export default function ForgeStudio({ onNotify = () => {} }) {
                 <button type="button" className="button button-quiet" onClick={handleAttach} disabled={busy === 'attach' || !run.provenance?.length}>
                   {busy === 'attach' ? <span className="spin" /> : <Package size={14} />} Guardar no projeto
                 </button>
+                {['cancelled', 'paused', 'failed'].includes(run.status) ? (
+                  <button type="button" className="button button-quiet" onClick={handleResumeRun} disabled={busy === 'resume'}>
+                    {busy === 'resume' ? <span className="spin" /> : <RotateCcw size={14} />} Retomar do checkpoint
+                  </button>
+                ) : null}
+                {run.status === 'running' ? (
+                  <button type="button" className="button button-quiet" onClick={() => handleCancelRun(run.runId)} disabled={busy === 'cancel'}>
+                    {busy === 'cancel' ? <span className="spin" /> : <CircleAlert size={14} />} Cancelar
+                  </button>
+                ) : null}
               </footer>
               {run.status !== 'succeeded' ? (
                 <p className="forge-note">A exportação libera quando o run conclui. Passos bloqueados existem para não entregar arquivo vazio como se fosse arte.</p>

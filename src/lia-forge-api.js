@@ -187,6 +187,33 @@ export const liaForgeApi = {
   },
 
   /** Revisão humana: aprovar retoma do checkpoint; rejeitar mantém bloqueado. */
+  /** Execuções em andamento neste processo (progresso + cancelamento real). */
+  async activeRuns() {
+    const ipc = bridge();
+    if (ipc) return ipc.activeRuns();
+    const data = await request('/runs/active');
+    return data?.active ?? [];
+  },
+
+  /**
+   * Cancela um run. Se ele está em execução neste processo, o sinal vai para o
+   * engine e o passo para no próximo ponto de verificação; se a execução já não
+   * existe aqui, o estado gravado é corrigido e a resposta diz isso
+   * (`stale: true`) — o produto nunca finge que parou algo que não parou.
+   */
+  async cancelRun(runId, { reason = null, cancelledBy = null } = {}) {
+    const ipc = bridge();
+    if (ipc) return ipc.cancelRun({ runId, reason, cancelledBy });
+    return request(`/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST', body: { reason, cancelledBy } });
+  },
+
+  /** Retoma um run interrompido a partir dos checkpoints válidos. */
+  async resumeRun(runId, { reason = null } = {}) {
+    const ipc = bridge();
+    if (ipc) return ipc.resumeRun({ runId, reason });
+    return request(`/runs/${encodeURIComponent(runId)}/resume`, { method: 'POST', body: { reason } });
+  },
+
   async reviewStep(runId, { stepId, approved, reviewer = null, note = null }) {
     const ipc = bridge();
     if (ipc) return ipc.reviewStep({ runId, stepId, approved, reviewer, note });

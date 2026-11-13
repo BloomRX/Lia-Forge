@@ -385,10 +385,38 @@ try {
   assert.ok(labMarkup.includes('Registrar como versão do asset'), 'a escolha pode ser gravada como versão');
   assert.ok(labMarkup.includes('recusado'), 'caminho recusado é mostrado como erro, não como artefato');
 
+  // --------------------- 8. ciclo de vida do run pelo transporte HTTP (cancelar/retomar)
+  const activeNow = await liaForgeApi.activeRuns();
+  assert.deepEqual(activeNow, [], 'nenhuma execução fica registrada como ativa depois de encerrada');
+
+  const cancelFinished = await liaForgeApi.cancelRun(runId, { reason: 'tentativa depois de encerrado' });
+  assert.equal(cancelFinished.ok, false, 'cancelar um run encerrado não finge sucesso');
+  assert.match(cancelFinished.reason, /encerrado/, 'o estado real vem no motivo da recusa');
+
+  const resumeFinished = await liaForgeApi.resumeRun(runId);
+  assert.equal(resumeFinished.ok, false, 'retomar um run concluído é recusado sem mexer no disco');
+  assert.match(resumeFinished.reason, /não precisa de retomada/, 'a recusa explica por quê');
+
+  const missingCancel = await nativeFetch(`${origin}/api/lia-forge/studio/runs/run-inexistente/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: 'teste' }),
+  });
+  assert.equal(missingCancel.status, 404, 'cancelar run inexistente devolve 404');
+  const missingResume = await nativeFetch(`${origin}/api/lia-forge/studio/runs/run-inexistente/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  assert.equal(missingResume.status, 404, 'retomar run inexistente devolve 404');
+  const activeRoute = await nativeFetch(`${origin}/api/lia-forge/studio/runs/active`);
+  assert.equal(activeRoute.status, 200, 'a rota de execuções em andamento existe no transporte HTTP');
+  assert.deepEqual((await activeRoute.json()).active, [], 'sem execução em andamento neste processo');
+
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 
-  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações, providers, upload de referências e Comparison Lab na UI; transporte ${liaForgeApi.transport}).`);
+  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab e ciclo de vida do run na UI; transporte ${liaForgeApi.transport}).`);
 } finally {
   globalThis.fetch = nativeFetch;
   await vite.close();

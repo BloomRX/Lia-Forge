@@ -453,7 +453,14 @@ function liaForgeStudioApi() {
             return json(200, { runs: await service.listRuns() });
           }
 
-          const runMatch = route.match(/^\/runs\/([A-Za-z0-9._-]+)(?:\/(review|export))?$/);
+          // Execuções em andamento neste processo: é o que a interface usa para
+          // mostrar progresso e oferecer cancelamento de verdade.
+          if (route === '/runs/active') {
+            if (method !== 'GET') return json(405, { error: 'Method not allowed' });
+            return json(200, { active: service.activeRuns() });
+          }
+
+          const runMatch = route.match(/^\/runs\/([A-Za-z0-9._-]+)(?:\/(review|export|cancel|resume))?$/);
           if (runMatch) {
             const [, runId, action] = runMatch;
             if (!action) {
@@ -464,6 +471,21 @@ function liaForgeStudioApi() {
             }
             if (method !== 'POST') return json(405, { error: 'Method not allowed' });
             const body = await readJsonBody(request);
+            if (action === 'cancel' || action === 'resume') {
+              try {
+                if (action === 'cancel') {
+                  return json(200, await service.cancelRun({
+                    runId,
+                    reason: body.reason ? String(body.reason) : 'cancelado pelo usuário',
+                    cancelledBy: body.cancelledBy ? String(body.cancelledBy) : 'usuário do Studio',
+                  }));
+                }
+                return json(200, await service.resumeRun({ runId, reason: body.reason ? String(body.reason) : null }));
+              } catch (error) {
+                const message = String(error?.message ?? error);
+                return json(message.includes('não encontrado') ? 404 : 400, { error: message });
+              }
+            }
             if (action === 'review') {
               if (!body.stepId) return json(400, { error: 'stepId é obrigatório.' });
               return json(200, await service.reviewStep({

@@ -656,6 +656,15 @@ export function createStudioService(options = {}) {
 
   const managerCache = new Map();
 
+  /**
+   * Execuções em andamento **neste processo**. É o que permite cancelar um run
+   * de verdade: sem este registro, o sinal de cancelamento não tem para quem
+   * ir e o produto só poderia mentir ("cancelado") sem parar nada.
+   */
+  const activeRuns = new Map();
+  /** Pedidos de cancelamento: quem cancelou e por quê fica gravado no run. */
+  const cancellationRequests = new Map();
+
   function managerFor(runId) {
     if (!managerCache.has(runId)) {
       const runDirectory = path.join(projectRoot, RUNS_DIRECTORY, runId);
@@ -750,6 +759,21 @@ export function createStudioService(options = {}) {
      */
     async run({ workflowId, destination = null, options: runOptions = {}, brief = null, params = {}, authorization = null, onEvent = null, signal = null, resume = null }) {
       const runId = resume?.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      // Cancelamento cooperativo: o engine recebe este signal e para no próximo
+      // ponto de verificação. Um signal externo (do hospedeiro) é encadeado.
+      const controller = new AbortController();
+      const forwardAbort = () => controller.abort(signal?.reason ?? new Error('Execução cancelada pelo chamador.'));
+      if (signal) {
+        if (signal.aborted) forwardAbort();
+        else signal.addEventListener('abort', forwardAbort, { once: true });
+      }
+      activeRuns.set(runId, Object.freeze({
+        controller,
+        runId,
+        workflowId,
+        startedAt: new Date().toISOString(),
+        resumed: Boolean(resume),
+      }));
       const runDirectory = path.join(projectRoot, RUNS_DIRECTORY, runId);
       // Run anterior reaproveitado como entrada (rig/partes já revisados).
       const fromRun = params.fromRun ?? runOptions.fromRun ?? null;
@@ -858,13 +882,30 @@ export function createStudioService(options = {}) {
       const snapshot = await manager.execute(plan, {
         context,
         authorization,
-        signal,
+        // O signal interno é o que `cancelRun` aborta; o signal do chamador
+        // (quando existe) foi encadeado nele acima.
+        signal: controller.signal,
         onEvent,
         // o id do run é decidido aqui: é o nome da pasta em .lia-forge/runs/
         runId,
         resume: Boolean(resume),
         checkpoints: resume?.checkpoints ?? null,
       });
+      // O motivo e a autoria do cancelamento não existem dentro do engine: são
+      // gravados aqui, sobre o snapshot final, para o histórico do run dizer quem
+      // parou a execução e por quê (com segredos redigidos).
+      const cancellation = cancellationRequests.get(runId) ?? null;
+      if (cancellation && snapshot.status === 'cancelled') {
+        const entry = {
+          at: cancellation.at,
+          level: 'warn',
+          message: `Execução cancelada por ${cancellation.cancelledBy}: ${cancellation.reason}`,
+          details: { code: 'WORKFLOW_CANCELLED', cancelledBy: cancellation.cancelledBy },
+        };
+        const recorded = { ...snapshot, cancellation, logs: [...(snapshot.logs ?? []), entry] };
+        await fs.writeFile(path.join(runDirectory, 'run.json'), `${JSON.stringify(recorded, null, 2)}\n`, 'utf8').catch(() => {});
+        return Object.freeze({ runId, plan, snapshot: Object.freeze(recorded), runDirectory: path.relative(projectRoot, runDirectory) });
+      }
       return Object.freeze({ runId, plan, snapshot, runDirectory: path.relative(projectRoot, runDirectory) });
       } catch (error) {
         // Falha antes de qualquer passo executar (entrada inexistente, plano
@@ -891,7 +932,134 @@ export function createStudioService(options = {}) {
         await fs.mkdir(runDirectory, { recursive: true }).catch(() => {});
         await fs.writeFile(path.join(runDirectory, 'run.json'), `${JSON.stringify(failed, null, 2)}\n`, 'utf8').catch(() => {});
         return Object.freeze({ runId, plan, snapshot: failed, runDirectory: path.relative(projectRoot, runDirectory) });
+      } finally {
+        activeRuns.delete(runId);
+        cancellationRequests.delete(runId);
+        if (signal) signal.removeEventListener('abort', forwardAbort);
       }
+    },
+
+    /** Execuções em andamento neste processo (para a interface offrir cancelar). */
+    activeRuns() {
+      return activeRuns.size
+        ? [...activeRuns.values()].map((item) => Object.freeze({ runId: item.runId, workflowId: item.workflowId, startedAt: item.startedAt, resumed: item.resumed }))
+        : [];
+    },
+
+    /**
+     * Cancela um run em andamento. Três casos, todos ditos com clareza:
+     *
+     * 1. está em execução neste processo → envia o sinal e o engine grava `cancelled`;
+     * 2. terminou → nada é alterado e o estado real é devolvido;
+     * 3. aparece como `running` mas não está neste processo (o aplicativo foi
+     *    fechado, por exemplo) → o estado é gravado como cancelado **com a marca
+     *    de execução ausente**: o produto não finge que parou algo que não parou.
+     */
+    async cancelRun({ runId, reason = 'cancelado pelo usuário', cancelledBy = 'usuario' } = {}) {
+      const id = String(runId ?? '').trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) || id.includes('..')) {
+        throw new Error('cancelRun: runId inválido — use o id de um run em .lia-forge/runs/ (sem caminhos).');
+      }
+      const text = redactSecrets(String(reason));
+      const at = new Date().toISOString();
+      const active = activeRuns.get(id);
+      if (active) {
+        cancellationRequests.set(id, { reason: text, cancelledBy: String(cancelledBy), at });
+        active.controller.abort(new Error(text));
+        return Object.freeze({
+          ok: true,
+          runId: id,
+          status: 'cancelling',
+          cancelledBy: String(cancelledBy),
+          reason: text,
+          note: 'Sinal de cancelamento enviado: o passo em andamento para no próximo ponto de verificação e o run é gravado como cancelado.',
+        });
+      }
+      const file = path.join(projectRoot, RUNS_DIRECTORY, id, 'run.json');
+      if (!await pathExists(file)) throw new Error(`cancelRun: run "${id}" não encontrado em .lia-forge/runs/`);
+      const stored = JSON.parse(await fs.readFile(file, 'utf8'));
+      if (!['running', 'planned', 'paused'].includes(stored.status)) {
+        return Object.freeze({
+          ok: false,
+          runId: id,
+          status: stored.status,
+          reason: `O run já estava encerrado como "${stored.status}"; nada foi alterado.`,
+        });
+      }
+      const cancelled = {
+        ...stored,
+        status: 'cancelled',
+        finishedAt: at,
+        cancelled: { reason: text, cancelledBy: String(cancelledBy), at, executionPresent: false },
+        steps: (stored.steps ?? []).map((step) => (['pending', 'running', 'queued'].includes(step.state)
+          ? { ...step, state: 'cancelled', error: { code: 'WORKFLOW_CANCELLED', message: text } }
+          : step)),
+        logs: [...(stored.logs ?? []), {
+          at,
+          level: 'warn',
+          message: `Run marcado como cancelado sem execução neste processo: ${text}`,
+          details: { executionPresent: false },
+        }],
+        summary: { ...(stored.summary ?? {}), finished: true },
+      };
+      const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+      await fs.writeFile(temporary, `${JSON.stringify(cancelled, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+      await fs.rename(temporary, file);
+      return Object.freeze({
+        ok: true,
+        runId: id,
+        status: 'cancelled',
+        stale: true,
+        cancelledBy: String(cancelledBy),
+        reason: text,
+        note: 'Não havia execução neste processo (o aplicativo pode ter sido fechado). O estado gravado foi corrigido para cancelado; checkpoints de passos concluídos continuam válidos para retomada.',
+      });
+    },
+
+    /**
+     * Retoma um run interrompido (cancelado, pausado, bloqueado ou falho) a
+     * partir dos checkpoints válidos, com as **mesmas entradas originais** e as
+     * revisões já gravadas — sem elas o gate de revisão seria perdido.
+     */
+    async resumeRun({ runId, reason = null } = {}) {
+      const id = String(runId ?? '').trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) || id.includes('..')) {
+        throw new Error('resumeRun: runId inválido — use o id de um run em .lia-forge/runs/ (sem caminhos).');
+      }
+      if (activeRuns.has(id)) throw new Error(`resumeRun: o run "${id}" ainda está em execução neste processo; cancele antes de retomar.`);
+      const snapshot = await this.readRun(id);
+      if (!snapshot) throw new Error(`resumeRun: run "${id}" não encontrado em .lia-forge/runs/`);
+      if (!['cancelled', 'paused', 'blocked', 'failed'].includes(snapshot.status)) {
+        return Object.freeze({ ok: false, runId: id, status: snapshot.status, reason: `Run "${snapshot.status}" não precisa de retomada.` });
+      }
+      const runDirectory = path.join(projectRoot, RUNS_DIRECTORY, id);
+      const planFile = path.join(runDirectory, 'plan.json');
+      if (!await pathExists(planFile)) {
+        throw new Error(`resumeRun: o plano original do run "${id}" não foi encontrado; sem ele não há como retomar com as mesmas entradas.`);
+      }
+      const stored = JSON.parse(await fs.readFile(planFile, 'utf8'));
+      const reviews = await fs.readFile(path.join(runDirectory, 'reviews.json'), 'utf8')
+        .then((text) => JSON.parse(text))
+        .catch(() => ({}));
+      const checkpoints = Object.fromEntries((snapshot.steps ?? [])
+        .filter((step) => step.state === 'succeeded')
+        .map((step) => [step.id, { stepId: step.id, adapter: step.adapter, outputs: step.outputs, sha256: step.sha256, finishedAt: step.finishedAt }]));
+      const resumed = await this.run({
+        workflowId: stored.workflowId,
+        destination: stored.destination,
+        brief: stored.brief,
+        options: stored.options ?? {},
+        params: { ...(stored.params ?? {}), reviews },
+        resume: { runId: id, checkpoints },
+      });
+      return Object.freeze({
+        ok: true,
+        runId: id,
+        resumedFrom: snapshot.status,
+        checkpointsReused: Object.keys(checkpoints).length,
+        reason: reason ? redactSecrets(String(reason)) : null,
+        result: resumed.snapshot,
+      });
     },
 
     /**
