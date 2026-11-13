@@ -436,6 +436,10 @@
 .forge-journey-steps li.is-human{border-color:#7a5a2f;background:#221c14}
 .forge-journey-steps li.is-human>svg{color:#ffcf87}
 .forge-journey-steps li.is-optional{opacity:.82}
+/* Run interrompido: o estado gravado não mente e a recuperação está à mão */
+.forge-list.is-runs li.is-stale{border-color:#7a5a2f;background:#1e1a14}
+.forge-run-recover{display:flex;flex-direction:column;gap:5px;margin:5px 0 2px;padding:6px 7px;border-radius:6px;background:#221c14}
+.forge-run-recover>span{color:#ffd8a8;font-size:9px;line-height:1.4}
 .forge-rights-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:7px}
 .forge-rights-cell{display:flex;flex-direction:column;gap:3px;padding:8px 9px;border:1px solid var(--line-soft);border-radius:7px;background:#1a141b;opacity:.62}
 .forge-rights-cell.is-active{opacity:1;border-color:#4a3350;background:#221a24}

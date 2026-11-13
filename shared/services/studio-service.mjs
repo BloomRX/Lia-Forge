@@ -1110,10 +1110,19 @@ export function createStudioService(options = {}) {
       return Object.freeze({ runId, stepId, decision, resumed: true, result: resumed.snapshot });
     },
 
+    /**
+     * Lista os runs gravados. Dois campos a mais dizem a verdade sobre a
+     * execução: `active` (está rodando neste processo agora) e `stale` (o
+     * arquivo diz que está em andamento, mas não há execução aqui — o aplicativo
+     * foi fechado, por exemplo). Sem isso, um run interrompido ficaria para
+     * sempre "em andamento" na interface.
+     */
     async listRuns() {
       const root = path.join(projectRoot, RUNS_DIRECTORY);
       if (!await pathExists(root)) return [];
       const entries = await fs.readdir(root, { withFileTypes: true });
+      const running = new Set(activeRuns.keys());
+      const unfinished = new Set(['running', 'planned', 'paused']);
       const runs = [];
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
@@ -1121,9 +1130,21 @@ export function createStudioService(options = {}) {
         if (!await pathExists(file)) continue;
         try {
           const snapshot = JSON.parse(await fs.readFile(file, 'utf8'));
-          runs.push({ runId: snapshot.runId, planId: snapshot.planId, planTitle: snapshot.planTitle, status: snapshot.status, startedAt: snapshot.startedAt, finishedAt: snapshot.finishedAt, summary: snapshot.summary });
+          const runId = snapshot.runId ?? entry.name;
+          const active = running.has(runId);
+          runs.push({
+            runId,
+            planId: snapshot.planId,
+            planTitle: snapshot.planTitle,
+            status: snapshot.status,
+            startedAt: snapshot.startedAt,
+            finishedAt: snapshot.finishedAt,
+            summary: snapshot.summary,
+            active,
+            stale: !active && unfinished.has(snapshot.status),
+          });
         } catch {
-          runs.push({ runId: entry.name, status: 'unreadable' });
+          runs.push({ runId: entry.name, status: 'unreadable', active: false, stale: false });
         }
       }
       return runs.sort((a, b) => String(b.startedAt ?? '').localeCompare(String(a.startedAt ?? '')));

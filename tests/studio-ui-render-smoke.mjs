@@ -531,10 +531,40 @@ try {
   assert.ok(journeyMarkup.includes('Passo 3 — Escolher o objetivo'), 'o roteiro diz qual é o próximo passo em linguagem de gente');
   assert.ok(journeyMarkup.includes('ver os 12 passos'), 'a lista completa está a um clique');
 
+  // --------------------------------- 11. run interrompido visível e recuperável
+  const { SavedRunItem } = await vite.ssrLoadModule('/src/ForgeStudio.jsx');
+  const listedRuns = await liaForgeApi.runs();
+  assert.ok(listedRuns.length > 0, 'há runs gravados no projeto do smoke');
+  assert.equal(listedRuns.every((item) => item.active === false), true, 'nenhum run do smoke segue ativo depois de encerrado');
+  assert.equal(listedRuns.every((item) => item.stale === false), true, 'run encerrado não é marcado como interrompido');
+
+  const normalMarkup = renderToStaticMarkup(createElement(SavedRunItem, {
+    item: listedRuns[0],
+    currentRunId: null,
+    busy: null,
+    onOpen: () => {},
+    onRecover: () => {},
+    onResume: () => {},
+  }));
+  assert.ok(normalMarkup.includes(listedRuns[0].runId), 'o item lista o id do run');
+  assert.ok(!normalMarkup.includes('Corrigir estado'), 'run encerrado não oferece recuperação');
+
+  const staleMarkup = renderToStaticMarkup(createElement(SavedRunItem, {
+    item: { ...listedRuns[0], status: 'running', stale: true, active: false },
+    currentRunId: null,
+    busy: null,
+    onOpen: () => {},
+    onRecover: () => {},
+    onResume: () => {},
+  }));
+  assert.ok(staleMarkup.includes('Interrompido'), 'o estado interrompido é dito com todas as letras');
+  assert.ok(staleMarkup.includes('não há execução neste processo'), 'o item explica por que está interrompido');
+  assert.ok(staleMarkup.includes('Corrigir estado') && staleMarkup.includes('Retomar'), 'as duas saídas são oferecidas no próprio item');
+
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 
-  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab, ciclo de vida do run, projeto e roteiro de 12 passos na UI; transporte ${liaForgeApi.transport}).`);
+  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab, ciclo de vida do run, projeto, roteiro de 12 passos e run interrompido na UI; transporte ${liaForgeApi.transport}).`);
 } finally {
   globalThis.fetch = nativeFetch;
   await vite.close();

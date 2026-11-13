@@ -99,12 +99,20 @@ try {
   check(during.summary?.finished !== true, 'o run é gravado como em andamento enquanto executa');
   check(during.steps.some((step) => step.state === 'running'), 'o passo em andamento aparece no snapshot gravado em disco');
 
+  // A lista de runs diz a verdade sobre a execução enquanto ela acontece.
+  const whileRunning = (await service.listRuns()).find((item) => item.runId === runId);
+  check(whileRunning?.active === true, 'a lista de runs marca como ativo o run que está executando neste processo');
+  check(whileRunning?.stale === false, 'run ativo não é marcado como interrompido');
+
   const cancelling = await service.cancelRun({ runId, reason: 'usuário desistiu desta geração' });
   check(cancelling.ok === true && cancelling.status === 'cancelling', 'cancelRun envia o sinal e diz que o run está parando');
   check(/ponto de verificação/.test(cancelling.note), 'a resposta explica que o cancelamento é cooperativo');
 
   const cancelled = await running;
   check(cancelled.snapshot.status === 'cancelled', `o run termina cancelado (${cancelled.snapshot.status})`);
+  const afterCancel = (await service.listRuns()).find((item) => item.runId === runId);
+  check(afterCancel?.active === false && afterCancel?.stale === false && afterCancel?.status === 'cancelled',
+    'depois do cancelamento a lista mostra o run encerrado, nem ativo nem interrompido');
   const cancelledStep = cancelled.snapshot.steps.find((step) => step.state === 'cancelled');
   check(Boolean(cancelledStep), 'o passo que estava em andamento fica marcado como cancelado');
   check(cancelledStep.error?.code === 'WORKFLOW_CANCELLED', `o motivo é WORKFLOW_CANCELLED (${cancelledStep.error?.code})`);
@@ -177,6 +185,10 @@ try {
     summary: { total: 3, progress: 33, finished: false, failed: [], blocked: [] },
   }, null, 2)}\n`, 'utf8');
 
+  const orphanListed = (await service.listRuns()).find((item) => item.runId === 'run-orfao-de-teste');
+  check(orphanListed?.stale === true, 'run gravado como em andamento sem execução aqui é marcado como interrompido');
+  check(orphanListed?.active === false, 'e não aparece como ativo neste processo');
+
   const orphan = await service.cancelRun({ runId: 'run-orfao-de-teste', reason: 'o aplicativo foi fechado durante a execução' });
   check(orphan.ok === true && orphan.stale === true, 'run marcado como em andamento sem execução aqui é corrigido com a marca de execução ausente');
   check(/não havia execução neste processo/i.test(orphan.note), 'a resposta não finge que parou um processo que não existia');
@@ -187,6 +199,9 @@ try {
   check(orphanSnapshot.steps.find((step) => step.id === 'render').state === 'cancelled', 'o passo que aparecia em andamento é marcado como cancelado');
   await assert.rejects(() => service.resumeRun({ runId: 'run-orfao-de-teste' }),
     /plano original .* não foi encontrado/, 'retomar sem o plano original é recusado com motivo claro');
+  const orphanAfter = (await service.listRuns()).find((item) => item.runId === 'run-orfao-de-teste');
+  check(orphanAfter?.stale === false && orphanAfter?.status === 'cancelled',
+    'depois de corrigido, o run deixa de aparecer como interrompido e consta cancelado');
 
   // ------------------------------------------------------- 5. recusas e limites
   await assert.rejects(() => service.cancelRun({ runId: '../../etc/passwd' }), /runId inválido/, 'cancelRun recusa caminho como runId');

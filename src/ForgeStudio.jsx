@@ -828,6 +828,44 @@ export function buildJourneySteps({
   return steps.map((step, position) => ({ ...step, index: position +1 }));
 }
 
+/**
+ * Um run gravado na lista lateral. Quando o arquivo diz "em andamento" mas não
+ * há execução neste processo (o aplicativo foi fechado, por exemplo), o item
+ * mostra isso e oferece corrigir o estado ou retomar — em vez de deixar o run
+ * para sempre com cara de ocupado.
+ */
+export function SavedRunItem({ item, currentRunId = null, busy = null, onOpen, onRecover, onResume }) {
+  return (
+    <li className={item.stale ? 'is-stale' : undefined}>
+      <button
+        type="button"
+        className={`forge-run-link ${currentRunId === item.runId ? 'is-active' : ''}`}
+        onClick={() => onOpen(item.runId)}
+      >
+        <code>{item.runId}</code>
+        <StateBadge
+          state={item.status}
+          label={item.active ? 'Em execução agora' : item.stale ? 'Interrompido' : RUN_STATE_LABELS[item.status] ?? item.status}
+        />
+        <span>{item.planTitle ?? item.planId}</span>
+      </button>
+      {item.stale ? (
+        <div className="forge-run-recover">
+          <span>Consta como em andamento, mas não há execução neste processo.</span>
+          <div className="forge-picker-actions">
+            <button type="button" className="button button-quiet" disabled={busy !== null} onClick={() => onRecover(item.runId)}>
+              {busy === 'recover' ? <span className="spin" /> : <RotateCcw size={12} strokeWidth={2} />} Corrigir estado
+            </button>
+            <button type="button" className="button button-quiet" disabled={busy !== null} onClick={() => onResume(item.runId)}>
+              {busy === 'resume' ? <span className="spin" /> : <RotateCcw size={12} strokeWidth={2} />} Retomar
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
 const JOURNEY_ICONS = { done: Check, now: ChevronRight, human: UserRound, todo: CircleDashed, optional: CircleDashed };
 
 /** Roteiro visível: o leigo sabe onde está e o que vem a seguir, sem decorar termos. */
@@ -1434,6 +1472,45 @@ export default function ForgeStudio({ onNotify = () => {} }) {
     return result;
   });
 
+  const handleOpenRun = useCallback(async (runId) => {
+    setBusy('open-run');
+    try {
+      setRun(await liaForgeApi.readRun(runId));
+      setRunTab('passos');
+      setExportResult(null);
+    } catch (error) {
+      setActionError(error.message);
+      notify(error.message, 'error');
+    } finally {
+      setBusy(null);
+    }
+  }, [notify]);
+
+  /** Run que consta em andamento sem execução aqui: corrige o estado gravado. */
+  const handleRecoverRun = (runId) => runAction('recover', async () => {
+    const result = await liaForgeApi.cancelRun(runId, { reason: 'estado corrigido pelo usuário: não havia execução neste processo' });
+    setRuns(await liaForgeApi.runs().catch(() => []));
+    if (run?.runId === runId) setRun(await liaForgeApi.readRun(runId).catch(() => run));
+    notify(result?.ok
+      ? 'Estado corrigido: o run consta como cancelado e os passos concluídos podem ser retomados.'
+      : result?.reason ?? 'Nada a corrigir neste run.', 'info');
+    return result;
+  });
+
+  const handleResumeListedRun = (runId) => runAction('resume', async () => {
+    const result = await liaForgeApi.resumeRun(runId, { reason: 'retomado pelo usuário na lista de runs' });
+    if (result?.ok && result.result) {
+      setRun(result.result);
+      setRunTab('passos');
+      setExportResult(null);
+      setRuns(await liaForgeApi.runs().catch(() => []));
+      notify(`Run retomado de ${result.checkpointsReused} checkpoint(s): ${result.result.status}.`, result.result.status === 'succeeded' ? 'success' : 'info');
+    } else {
+      notify(result?.reason ?? 'Não foi possível retomar este run.', 'info');
+    }
+    return result;
+  });
+
   const handleRefreshProject = () => runAction('project-refresh', async () => {
     const info = await liaForgeApi.projectInfo();
     setProject(info);
@@ -2021,28 +2098,15 @@ export default function ForgeStudio({ onNotify = () => {} }) {
             </header>
             <ul className="forge-list is-runs">
               {runs.map((item) => (
-                <li key={item.runId}>
-                  <button
-                    type="button"
-                    className={`forge-run-link ${run?.runId === item.runId ? 'is-active' : ''}`}
-                    onClick={async () => {
-                      setBusy('open-run');
-                      try {
-                        setRun(await liaForgeApi.readRun(item.runId));
-                        setRunTab('passos');
-                        setExportResult(null);
-                      } catch (error) {
-                        setActionError(error.message);
-                      } finally {
-                        setBusy(null);
-                      }
-                    }}
-                  >
-                    <code>{item.runId}</code>
-                    <StateBadge state={item.status} label={RUN_STATE_LABELS[item.status] ?? item.status} />
-                    <span>{item.planTitle ?? item.planId}</span>
-                  </button>
-                </li>
+                <SavedRunItem
+                  key={item.runId}
+                  item={item}
+                  currentRunId={run?.runId ?? null}
+                  busy={busy}
+                  onOpen={handleOpenRun}
+                  onRecover={handleRecoverRun}
+                  onResume={handleResumeListedRun}
+                />
               ))}
               {!runs.length ? <li className="forge-note">Nenhum run gravado neste projeto ainda.</li> : null}
             </ul>
