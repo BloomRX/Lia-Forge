@@ -418,6 +418,24 @@
 .forge-project-counts{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:7px}
 .forge-project-counts span{padding:3px 7px;border:1px solid var(--line-soft);border-radius:999px;background:#1e171f;color:#c3aec0;font:8.8px var(--mono)}
 .forge-project-counts span.is-live{border-color:#ff4fd8;color:#ffd9f4}
+/* Roteiro de produção: 12 passos derivados do estado real */
+.forge-journey .forge-note.is-now{color:#ffd9f4;border-left:2px solid #ff4fd8;padding-left:7px}
+.forge-journey .forge-note.is-now strong{color:#fff}
+.forge-journey .forge-note.is-human{display:flex;gap:6px;align-items:flex-start;color:#ffd8a8}
+.forge-journey-steps{display:flex;flex-direction:column;gap:4px;margin:8px 0 0;padding:0;list-style:none}
+.forge-journey-steps li{display:grid;grid-template-columns:14px minmax(0,1fr);gap:6px;padding:6px 8px;border:1px solid var(--line-soft);border-radius:7px;background:#1c161d;align-items:start}
+.forge-journey-steps li>svg{margin-top:2px;color:#6f5f70}
+.forge-journey-steps li strong{display:block;color:#cbb6c6;font-size:10.2px;font-weight:600}
+.forge-journey-steps li em{display:block;color:#8d7c8f;font-size:9.2px;font-style:normal;line-height:1.4;margin-top:2px}
+.forge-journey-steps li.is-done{border-color:#2f5d43;background:#17211b}
+.forge-journey-steps li.is-done>svg{color:#7ee2a8}
+.forge-journey-steps li.is-done strong{color:#d7f5e2}
+.forge-journey-steps li.is-now{border-color:#ff4fd8;background:#251a28}
+.forge-journey-steps li.is-now>svg{color:#ff9ce8}
+.forge-journey-steps li.is-now strong{color:#fff}
+.forge-journey-steps li.is-human{border-color:#7a5a2f;background:#221c14}
+.forge-journey-steps li.is-human>svg{color:#ffcf87}
+.forge-journey-steps li.is-optional{opacity:.82}
 .forge-rights-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:7px}
 .forge-rights-cell{display:flex;flex-direction:column;gap:3px;padding:8px 9px;border:1px solid var(--line-soft);border-radius:7px;background:#1a141b;opacity:.62}
 .forge-rights-cell.is-active{opacity:1;border-color:#4a3350;background:#221a24}

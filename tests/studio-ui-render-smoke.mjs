@@ -449,10 +449,92 @@ try {
   assert.ok(desktopProject.includes('Ver no sistema'), 'no desktop a pasta pode ser revelada no sistema');
   assert.ok(desktopProject.includes('preservado'), 'o conteúdo legado aparece como preservado, não como migrado');
 
+  // --------------------------------------- 10. roteiro de produção (12 passos)
+  const { buildJourneySteps, JourneyChecklist } = await vite.ssrLoadModule('/src/ForgeStudio.jsx');
+
+  const journeyStart = buildJourneySteps({
+    project,
+    inputs: listedInputs.entries,
+    requiresInput: true,
+    workflowId: '2d-character-parts',
+    brief: '',
+    destination: 'godot-4',
+    plan: null,
+    preflight: overview.preflight,
+    run: null,
+    assets: [],
+  });
+  assert.equal(journeyStart.length, 12, `o roteiro cobre os 12 passos da jornada (${journeyStart.length})`);
+  assert.deepEqual(journeyStart.map((step) => step.index), Array.from({ length: 12 }, (_, index) => index + 1), 'os passos são numerados em ordem');
+  assert.equal(journeyStart.find((step) => step.id === 'project').state, 'done', 'projeto aberto e gravável conta como passo concluído');
+  assert.equal(journeyStart.find((step) => step.id === 'references').state, 'done', 'entradas em input/ contam como passo concluído');
+  assert.equal(journeyStart.find((step) => step.id === 'objective').state, 'now', 'sem plano, o passo atual é escolher o objetivo');
+  assert.equal(journeyStart.filter((step) => step.state === 'done').length, 2, 'nada é marcado como concluído sem evidência');
+
+  const journeyPlanned = buildJourneySteps({
+    project,
+    inputs: listedInputs.entries,
+    requiresInput: false,
+    workflowId: '3d-character-spritesheet',
+    brief: 'heroína neon para o capítulo 1',
+    destination: 'godot-4',
+    plan: planned.plan,
+    preflight: overview.preflight,
+    run: null,
+    assets: [],
+  });
+  assert.equal(journeyPlanned.find((step) => step.id === 'plan').state, 'done', 'plano na tela conta como passo concluído');
+  assert.equal(journeyPlanned.find((step) => step.id === 'brief').state, 'done', 'descrição escrita conta como passo concluído');
+  assert.equal(journeyPlanned.find((step) => step.id === 'requirements').state, 'human', 'passo sem provider nesta máquina é decisão humana, não passo concluído');
+  assert.match(journeyPlanned.find((step) => step.id === 'requirements').detail, /Instalar ou autorizar é decisão sua/, 'o passo humano diz o que só o usuário pode fazer');
+  assert.equal(journeyPlanned.find((step) => step.id === 'execute').state, 'now', 'com o plano pronto, o passo atual é executar');
+
+  const journeyFinished = buildJourneySteps({
+    project,
+    inputs: listedInputs.entries,
+    requiresInput: true,
+    workflowId: '2d-character-parts',
+    brief: 'herói neon',
+    destination: 'godot-4',
+    plan: characterRun.plan,
+    preflight: overview.preflight,
+    run: snapshot,
+    liveRun: null,
+    comparison,
+    exportResult: exported,
+    registeredVersion: { assetId: 'hero-comparison', path: comparison.entries[0].path, version: 'v1' },
+    assets: listed.assets,
+  });
+  const doneIds = journeyFinished.filter((step) => step.state === 'done').map((step) => step.id);
+  for (const expected of ['project', 'references', 'objective', 'brief', 'plan', 'execute', 'follow', 'review', 'compare', 'export', 'keep']) {
+    assert.ok(doneIds.includes(expected), `passo "${expected}" aparece como concluído quando existe evidência`);
+  }
+  assert.equal(journeyFinished.find((step) => step.id === 'export').detail.includes('verificado no destino: não'), true,
+    'a exportação diz que a importação no destino não foi verificada');
+  assert.equal(journeyFinished.find((step) => step.id === 'keep').state, 'done', 'versão registrada no asset conclui o roteiro');
+  assert.equal(journeyFinished.filter((step) => step.state === 'now').length, 0, 'roteiro concluído não tem passo atual pendente');
+
+  const journeyMarkup = renderToStaticMarkup(createElement(JourneyChecklist, {
+    project,
+    inputs: listedInputs.entries,
+    requiresInput: true,
+    workflowId: '2d-character-parts',
+    brief: '',
+    destination: 'godot-4',
+    plan: null,
+    preflight: overview.preflight,
+    run: null,
+    assets: [],
+  }));
+  assert.ok(journeyMarkup.includes('Roteiro de produção'), 'o roteiro aparece na página');
+  assert.ok(journeyMarkup.includes('2 de 12 passos'), 'o resumo diz quantos passos estão concluídos');
+  assert.ok(journeyMarkup.includes('Passo 3 — Escolher o objetivo'), 'o roteiro diz qual é o próximo passo em linguagem de gente');
+  assert.ok(journeyMarkup.includes('ver os 12 passos'), 'a lista completa está a um clique');
+
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 
-  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab, ciclo de vida do run e projeto na UI; transporte ${liaForgeApi.transport}).`);
+  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab, ciclo de vida do run, projeto e roteiro de 12 passos na UI; transporte ${liaForgeApi.transport}).`);
 } finally {
   globalThis.fetch = nativeFetch;
   await vite.close();
