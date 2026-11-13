@@ -139,21 +139,56 @@ O que passou a existir (mesmo serviço, mesmos gates, dois transportes):
 | Entrada enviada → workflow completo | `POST /run` com `params.sourceImage = 'input/Referencia-Heroi.PNG'` → `blocked` → 2 revisões aprovadas (retomada real) → **`succeeded`** em 5 passos; validações `animation-loop`, `png-content`, `spritesheet-manifest` e `destination-profile` = `passed`; 7 artefatos; export Godot 4.x com 7 arquivos, 60 fps, pivô `bottom-center`, `verifiedOnDestination: false` |
 | Artefato final medido | folha **384×144** servida por `/artifact` com **21 cores** — as mesmas 21 cores da referência enviada pelo usuário, ou seja, o pipeline consumiu a entrada de verdade |
 
-O envio de arquivos para **serviços externos** continua fora: nada sai da máquina, e a pendência de upload segue em §11.
+O envio de arquivos para **serviços externos** continua fora: nada sai da máquina, e a pendência de upload segue em §12.
 
-## 8. Testes que provam o acima
+## 8. Ciclo de vida do run: progresso, cancelamento e retomada
+
+O engine já tinha cancelamento cooperativo e retomada por checkpoint, mas **nada disso chegava ao produto**: o snapshot do run só era gravado no fim (portanto não havia progresso para mostrar), nenhum canal permitia cancelar uma execução em andamento e um run interrompido só retomava se houvesse revisão pendente. Três correções, sem criar sistema paralelo:
+
+- `shared/engine/execution-manager.mjs` grava o snapshot **a cada passo** (no início, com o passo em `running`, e no fim), por uma fila serializada: dois passos terminando juntos não se atropelam no mesmo arquivo, e falha ao gravar vira aviso no log do run, não queda da execução.
+- `shared/services/studio-service.mjs` mantém o registro das execuções em andamento **neste processo** (`activeRuns()`), cria um `AbortController` por run (encadeando o signal do hospedeiro, quando existe) e expõe `cancelRun()` e `resumeRun()`. O motivo e a autoria do cancelamento são gravados no run (`cancellation` + entrada de log), com segredos redigidos.
+- Transporte e interface: `GET /runs/active`, `POST /runs/{id}/cancel`, `POST /runs/{id}/resume` (404 quando o run não existe) e os canais IPC `lia-forge:studio:runs:active|cancel|resume`. A interface mostra o card "Execução em andamento" com o progresso passo a passo lido do disco, o botão **Cancelar execução** e, num run cancelado/pausado/falho, **Retomar do checkpoint**.
+
+Cancelamento tem três casos e os três são ditos com clareza, porque confundir "parei" com "não havia o que parar" é exatamente o tipo de mentira que este registro evita:
+
+| Caso | Comportamento |
+|---|---|
+| Run em execução neste processo | `ok: true`, `status: 'cancelling'`; o signal chega ao engine, o processo externo recebe `SIGTERM` e o passo para no próximo ponto de verificação; o run é gravado como `cancelled` com motivo e autoria |
+| Run já encerrado (`succeeded`, `failed`, `blocked`…) | `ok: false` com o estado real no motivo e **nenhuma reescrita** em disco |
+| Run marcado `running` sem execução aqui (o aplicativo foi fechado) | o estado gravado é corrigido para `cancelled` com `cancelled.executionPresent: false` e nota dizendo que não havia processo para parar; checkpoints de passos concluídos seguem válidos para retomada |
+
+### O que foi executado de verdade
+
+`tests/run-lifecycle-smoke.mjs` (novo) usa um **executável de teste** no lugar do Blender — que não está instalado aqui — e percorre o caminho real (`spawn` com os argumentos do contrato, signal até o processo filho, leitura de saída, validação, checkpoints):
+
+| Verificação | Resultado medido |
+|---|---|
+| Progresso antes do fim | snapshot em disco com `inspect: succeeded` e `render: running` enquanto a ferramenta externa trabalha |
+| Cancelamento | run `cancelled`, passo `cancelled` com `WORKFLOW_CANCELLED`, dependentes `skipped`, nenhum passo preso em `running`, motivo no log |
+| Processo externo | PID gravado pelo executável de teste **deixa de existir** após o cancelamento (não ficou rodando sozinho) |
+| Cancelar duas vezes | segunda chamada devolve `ok: false` e o `run.json` fica byte a byte igual |
+| Retomada | `resumeRun` com 1 checkpoint reaproveitado, `finishedAt` do passo concluído idêntico (não reexecutou), evento `step-reused` no histórico, run termina `succeeded` com o processo externo real |
+| Falha intermediária | executável que sai com código 3 → run `failed`, mensagem com o código de saída e o stderr preservado, dependentes `skipped`; após trocar o executável, `resumeRun` sai do `failed` e conclui |
+| Run órfão | `run.json` escrito à mão como `running` → `cancelRun` devolve `stale: true`, grava `cancelled` com `executionPresent: false`, mantém o passo concluído e marca o que estava em andamento como cancelado; `resumeRun` sem `plan.json` é recusado com motivo claro |
+| Recusas | `cancelRun`/`resumeRun` com caminho como `runId`, run inexistente, run concluído, run ainda em execução |
+
+O mesmo caminho foi exercitado **por HTTP no dev-server** (projeto real em disco, executável de teste): `GET /runs/active` devolveu o run com `render: running`; `POST /runs/{id}/cancel` devolveu `cancelling` e o estado final gravado foi `cancelled` com `cancellation.reason = "usuário desistiu desta geração"` e `cancelledBy = "validação HTTP"`; o processo de teste (PID 2708) não estava mais vivo; `POST /runs/{id}/resume` reaproveitou 1 checkpoint e terminou `succeeded` com `png-structural`, `png-content` e `destination-profile` aprovados e 6 artefatos; `POST /runs/run-inexistente/cancel` devolveu `404`.
+
+O que **não** foi executado aqui: cancelamento/reconciliação de uma chamada remota já enviada (ComfyUI remoto segue não autorizado — ver §12) e o comportamento após queda abrupta do processo do produto (o run órfão é corrigido pelo caminho acima, mas a reconciliação de requisições de API duplicadas continua como alvo em `WORKFLOW-ENGINE.md`).
+
+## 9. Testes que provam o acima
 
 | Comando | Resultado |
 |---|---|
-| `npm test` | **29 smokes verdes** (Node 22, sem rede; o smoke de integração usa processo e HTTP loopback reais, sem ferramenta externa instalada) |
+| `npm test` | **30 smokes verdes** (Node 22, sem rede; o smoke de integração usa processo e HTTP loopback reais, sem ferramenta externa instalada) |
 | `npm run test:python` | **30 testes OK** |
 | `npx vite build` | build de produção sem erro |
 
-Nesta rodada, `tests/studio-service-smoke.mjs` ganhou a seção 11 (medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada e Comparison Lab com caminho recusado) e `tests/studio-ui-render-smoke.mjs` passou a enviar um arquivo por HTTP, conferir `400`/`403`, servir a prévia, comparar artefatos, gravar a escolha como versão do asset e renderizar `InputPicker` e `ComparisonLab`.
+Nesta rodada, `tests/run-lifecycle-smoke.mjs` é novo (ciclo de vida do run: progresso por passo, cancelamento com processo externo encerrado, falha intermediária, retomada por checkpoint, run órfão e recusas — ver §8), os substitutos de ferramenta externa foram reunidos em `tests/tool-stubs.mjs` (usados pelo smoke de ciclo de vida e pelo de integração, sem duplicar código), `tests/studio-ui-render-smoke.mjs` passou a cobrir `GET /runs/active` e `POST /runs/{id}/cancel|resume` e `tests/studio-service-smoke.mjs` ganhou a seção 11 (medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada e Comparison Lab com caminho recusado) e `tests/studio-ui-render-smoke.mjs` passou a enviar um arquivo por HTTP, conferir `400`/`403`, servir a prévia, comparar artefatos, gravar a escolha como versão do asset e renderizar `InputPicker` e `ComparisonLab`.
 
 Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: integração real com processo externo e ComfyUI em loopback, providers, recusas e gates — ver §6), `tests/workflow-coverage-smoke.mjs` (novo: 11 casos sobre os 8 workflows, com matriz de evidência impressa), `tests/studio-service-smoke.mjs` (passo opcional que produz prévia e passo opcional com erro que vira skip), `tests/orchestrator-engine-smoke.mjs` (entradas pendentes, `pendingInputs`, bloqueio nomeado por passo), `tests/studio-ui-render-smoke.mjs` (rig entre runs pela API, entradas pendentes, validações e o painel de providers renderizados na UI), `tests/preflight-destinations-smoke.mjs` (conformidade do pacote com o perfil publicado do destino), `tests/adapter-sdk-smoke.mjs` (caminho de executável inválido não vira ferramenta disponível), `tests/studio-service-smoke.mjs` (brief como entrada de texto do passo de conceito).
 
-## 9. O que **não** foi executado (e o que seria necessário)
+## 10. O que **não** foi executado (e o que seria necessário)
 
 | Item | Estado | O que falta |
 |---|---|---|
@@ -165,7 +200,7 @@ Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: in
 | Direitos das artes da Biblioteca | pendente | 6 itens `RIGHTS_PENDING` em `LIBRARY-VISUAL-REFERENCE-INVENTORY.md` |
 | Envio de referências do usuário para serviço externo | não autorizado | o upload copia apenas para `input/` do projeto; enviar para fora exige decisão humana (serviço, escopo e custo) |
 
-## 10. Commits da fase T13 (branch `arena/649f88bd-3dspritesheet`)
+## 11. Commits da fase T13 (branch `arena/649f88bd-3dspritesheet`)
 
 | Commit | Conteúdo |
 |---|---|
@@ -179,8 +214,10 @@ Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: in
 | `28a99a5` | ferramentas reais em qualquer hospedeiro, providers configuráveis (local/remoto/desativado), correções de honestidade no Hub e nos adapters, smoke de integração real |
 | `aa91b89` | documentação de execução da integração real (§6) e cabeçalhos reconciliados |
 | `c087602` | entradas do usuário em `input/` (upload, verificação de conteúdo, leitura confinada) e Comparison Lab com registro da escolha como versão do asset |
+| `bedcdae` | documentação de execução das entradas e do Comparison Lab (§7) |
+| `ea6a9f0` | ciclo de vida do run: snapshot gravado a cada passo, `cancelRun`/`resumeRun`/`activeRuns` nos dois transportes, botões de cancelar e retomar e smoke de cancelamento/falha/retomada |
 
-## 11. Pendências que exigem decisão humana
+## 12. Pendências que exigem decisão humana
 
 Adoção de Spine ou de qualquer provider comercial/de IA · alternativa A de identidade Studio × Forge · licenças incertas (`2DAutoRigger`, `see-through`, MotionBricks) · backend remoto pago e teto de custo · upload de arquivos · instalação/download de ferramentas de terceiros · execução dos scripts de diagnóstico na máquina alvo (Windows + RX 580) · direitos das 6 artes `RIGHTS_PENDING`.
 
