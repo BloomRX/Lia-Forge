@@ -71,28 +71,70 @@ Reforços desta fase:
 - `reviewStep` repassa a origem do run gravada em `plan.json` (`fromRun`, `sourceImage`, opções): retomar não perde mais o contexto que só existia na primeira execução;
 - `needsAuthorization` deixou de ser derivado de `protectedActions` (que lista o que o adapter **se recusa** a fazer): adapters locais não geram mais pendências falsas de autorização no plano.
 
-## 6. Testes que provam o acima
+## 6. Ferramentas externas: integração real em qualquer hospedeiro + providers
+
+Até esta rodada, as implementações reais (`electron/blender-adapter.cjs`, `external-tools.cjs`, `manual-artifacts.cjs`, `task-manager.cjs`, `scripts/comfyui-client.mjs`) só eram injetadas pelo `electron/main.cjs`. Fora do Electron, os defaults do serviço lançavam erro ou eram no-op: **um Blender ou ComfyUI instalado pelo usuário era invisível** no dev-server, nos testes e em qualquer processo Node. Isso foi corrigido sem criar um segundo sistema:
+
+- `shared/integrations/host-defaults.mjs` carrega essas implementações de forma preguiçosa (`createRequire`) e tolerante a falha — se um módulo não carrega, devolve `null` e lista o motivo em `unavailable`;
+- `shared/engine/execution-manager.mjs` ganhou o hook `prepareContext`: o hospedeiro completa o contrato de cada passo (pasta de saída real, script, `asset`, dimensões, modelo de entrada, prompt, checkpoint) e o engine continua sem conhecer ferramenta alguma;
+- `shared/services/studio-service.mjs` passa a usar esses defaults e a hashiar artefatos gravados por processo externo, para o gate de revisão continuar ancorado em SHA-256.
+
+**Escolha de provider (§9) deixou de ser implícita.** `shared/integrations/provider-store.mjs` grava `.lia-forge/providers.json` (escrita atômica, confinada ao projeto) com:
+
+| Provider | Modos | O que é recusado |
+|---|---|---|
+| ComfyUI | `local-loopback` (padrão) · `remote` · `disabled` | endpoint não-loopback no modo local; segredo em qualquer campo (só `credentialRef`); modo remoto sem autorização gravada (quem, quando, escopo `send_data+cost`) |
+| Blender | `auto` (PATH + locais conhecidos) · `path` · `disabled` | caminho inexistente ou não executável nunca vira "disponível" |
+
+A interface expõe isso no painel **Providers & backends** (`src/ForgeStudio.jsx`), por HTTP (`GET`/`POST /api/lia-forge/studio/providers`, configuração inválida → `400`) e por IPC (`lia-forge:studio:providers[:configure]`).
+
+Correções de honestidade que essa integração revelou:
+
+- `comfyui-concept` lia `status.available` de um cliente que reporta `connected`: **um servidor ComfyUI respondendo era marcado como ausente**. Corrigido, e o adapter agora recusa endpoint que não seja da própria máquina (enviar dados é papel do `comfyui-remote`, com autorização);
+- `blender-spritesheet` aceitava qualquer caminho configurado como ferramenta: agora verifica existência + `X_OK` na descoberta e na execução, e falha de spawn (`ENOENT`/`EACCES`) vira **bloqueio nomeado**, nunca falha do produto;
+- o Hub tratava requisito não medido como veto: agora requisito **medido e insuficiente** → `blocked` com o número na mensagem (ex.: "RAM: precisa de 8192 MB e há 3940 MB"), e requisito **não medido** (VRAM sem probe autorizado) → aviso, não veto;
+- passos de difusão declaram `requiresParam: 'prompt'` e o brief escrito pelo usuário satisfaz essa entrada: o plano pede o texto antes de executar, em vez de falhar no meio;
+- `destination-profile` passou a conferir o pacote contra o **perfil publicado** do destino (destino existente no catálogo, fps/eixos/unidades/pivô/formatos idênticos, formatos aceitos por arquivo, bloqueios de compatibilidade). Continua sem afirmar importação real: `verifiedOnDestination` vem do perfil.
+
+### O que o smoke de integração executa de verdade
+
+`tests/host-integration-smoke.mjs` exercita o caminho completo com **substitutos rotulados** (um executável de teste no lugar do Blender e um servidor HTTP de teste no lugar do ComfyUI — neste ambiente não existe nenhum dos dois):
+
+| Verificação | Resultado medido |
+|---|---|
+| Descoberta por PATH | executável de teste encontrado por `findExternalTool('blender', { env: { PATH } })` |
+| Processo externo real | `spawn` com os argumentos do contrato; proveniência gravada no passo (`execution.kind = 'process'`, executável + args) |
+| Artefato do processo | folha **384×144** (grade 8×3 de 48×48), **39,1%** de cobertura medida, `png-content` aprovado, SHA-256 de 64 chars |
+| ComfyUI em loopback | HTTP real: `/system_stats`, `/queue`, `/models/checkpoints`, `/prompt`, `/history/{id}`, `/view`; **1** POST `/prompt` com o checkpoint escolhido e o texto do usuário no grafo; PNG de **52.766 cores** validado |
+| Gate de revisão | passo para em `review-missing` após executar; aprovação ancora SHA-256 e retoma |
+| Requisito medido | 3.940 MB de RAM < 8.192 MB exigidos → passo `blocked` e **zero** requisição de geração |
+| Remoto sem autorização | nada enviado, nada gerado, pendência visível na configuração |
+| Recusas | endpoint não-loopback no modo local, campo de segredo, caminho de executável inválido, provider desativado |
+
+Nenhuma linha desse teste afirma "Blender renderizou" ou "ComfyUI difundiu": afirma que o produto chama, valida e registra corretamente uma ferramenta externa — a execução na ferramenta real continua pendente de instalação pelo usuário.
+
+## 7. Testes que provam o acima
 
 | Comando | Resultado |
 |---|---|
-| `npm test` | **28 smokes verdes** (Node 22, sem rede, sem ferramentas externas) |
+| `npm test` | **29 smokes verdes** (Node 22, sem rede; o smoke de integração usa processo e HTTP loopback reais, sem ferramenta externa instalada) |
 | `npm run test:python` | **30 testes OK** |
 | `npx vite build` | build de produção sem erro |
 
-Smokes novos/estendidos nesta fase: `tests/workflow-coverage-smoke.mjs` (novo: 11 casos sobre os 8 workflows, com matriz de evidência impressa), `tests/studio-service-smoke.mjs` (passo opcional que produz prévia e passo opcional com erro que vira skip), `tests/orchestrator-engine-smoke.mjs` (entradas pendentes, `pendingInputs`, bloqueio nomeado por passo), `tests/studio-ui-render-smoke.mjs` (rig entre runs pela API, entradas pendentes e validações renderizadas na UI).
+Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: integração real com processo externo e ComfyUI em loopback, providers, recusas e gates — ver §6), `tests/workflow-coverage-smoke.mjs` (novo: 11 casos sobre os 8 workflows, com matriz de evidência impressa), `tests/studio-service-smoke.mjs` (passo opcional que produz prévia e passo opcional com erro que vira skip), `tests/orchestrator-engine-smoke.mjs` (entradas pendentes, `pendingInputs`, bloqueio nomeado por passo), `tests/studio-ui-render-smoke.mjs` (rig entre runs pela API, entradas pendentes, validações e o painel de providers renderizados na UI), `tests/preflight-destinations-smoke.mjs` (conformidade do pacote com o perfil publicado do destino), `tests/adapter-sdk-smoke.mjs` (caminho de executável inválido não vira ferramenta disponível), `tests/studio-service-smoke.mjs` (brief como entrada de texto do passo de conceito).
 
-## 7. O que **não** foi executado (e o que seria necessário)
+## 8. O que **não** foi executado (e o que seria necessário)
 
 | Item | Estado | O que falta |
 |---|---|---|
-| Render 3D real (Blender) | não executado | Blender instalado pelo usuário + arquivo `.blend`/GLB de entrada; o adapter existe e reporta `missing` |
-| Geração 2D por difusão (ComfyUI) | não executado | servidor ComfyUI local autorizado; o adapter existe e recusa loopback não autorizado |
+| Render 3D real (Blender) | não executado na ferramenta real | Blender instalado pelo usuário + modelo de entrada. O caminho completo (descoberta, `spawn`, argumentos, artefato em disco, validação de conteúdo, proveniência) foi executado com um **substituto de teste rotulado** — ver §6 |
+| Geração 2D por difusão (ComfyUI) | não executada na ferramenta real | servidor ComfyUI instalado pelo usuário e checkpoint já presente nele. O caminho completo (HTTP loopback, grafo com checkpoint e prompt, download do PNG, validação de conteúdo) foi executado com um **servidor de teste rotulado** — ver §6 |
+| Importação em engine de destino (Godot/Unity/Unreal) | não executada | nenhuma engine está instalada aqui. O que é executado: conformidade do pacote com o perfil publicado do destino (formatos, fps, eixos, SHA-256) — `verifiedOnDestination` continua `false` |
 | Backend remoto / GPU alugada / hosted | não autorizado | decisão humana sobre envio de dados e teto de custo; arquitetura pronta, execução pendente |
 | GPU/Vulkan (RX 580, gfx803) | não medido aqui | máquina alvo com driver; nada é afirmado sem evidência |
-| Validação no destino (Godot/Unity/Unreal) | não executada | importar o pacote na engine; `verifiedOnDestination` continua `false` por honestidade |
 | Direitos das artes da Biblioteca | pendente | 6 itens `RIGHTS_PENDING` em `LIBRARY-VISUAL-REFERENCE-INVENTORY.md` |
 
-## 8. Commits da fase T13 (branch `arena/649f88bd-3dspritesheet`)
+## 9. Commits da fase T13 (branch `arena/649f88bd-3dspritesheet`)
 
 | Commit | Conteúdo |
 |---|---|
@@ -102,8 +144,10 @@ Smokes novos/estendidos nesta fase: `tests/workflow-coverage-smoke.mjs` (novo: 1
 | `f2d6810` | F4/F5/F6/F8 — orquestrador, engine de execução, Hub, Asset Manager e serviço do Studio |
 | `636724a` | F8 na interface — página "Pipeline de Produção" ligada ao serviço real (HTTP + IPC) |
 | `b83bf49` | §12.1 — 8 workflows funcionais, validação declarada executada, estados honestos, retomada fiel |
+| `ef777e4` | documentação de execução (este registro) + cabeçalhos reconciliados com o código |
+| `28a99a5` | ferramentas reais em qualquer hospedeiro, providers configuráveis (local/remoto/desativado), correções de honestidade no Hub e nos adapters, smoke de integração real |
 
-## 9. Pendências que exigem decisão humana
+## 10. Pendências que exigem decisão humana
 
 Adoção de Spine ou de qualquer provider comercial/de IA · alternativa A de identidade Studio × Forge · licenças incertas (`2DAutoRigger`, `see-through`, MotionBricks) · backend remoto pago e teto de custo · upload de arquivos · instalação/download de ferramentas de terceiros · execução dos scripts de diagnóstico na máquina alvo (Windows + RX 580) · direitos das 6 artes `RIGHTS_PENDING`.
 

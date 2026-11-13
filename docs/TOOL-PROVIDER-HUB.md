@@ -1,6 +1,6 @@
 # Tool / Provider Hub — catálogo e adapters
 
-> **Estado:** **parcialmente implementado** (T13, 2026-11-13 UTC). Existe Hub genérico em `shared/hub/provider-hub.mjs` (candidatos por capacidade com estado real `ready/unknown/missing/blocked`, ordem estável, timeout de descoberta de 8 s) e Adapter SDK em `shared/adapters/sdk.mjs` (15 campos de manifesto, 3 classes — `local-tool`, `internal-process`, `remote-service` —, 9 códigos de erro, ações protegidas e custo/licença explícitos). O registro `electron/adapters/index.mjs` declara 7 adapters: 4 internos executados em teste (`local-image-ops`, `rig2d-software`, `glb-inspect`, `export-package`), Blender (ausente neste ambiente) e ComfyUI local/remoto (não autorizado). **Nenhuma ferramenta externa foi instalada, baixada ou executada**: o Hub só descobre e reporta. Evidências: [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md), `tests/adapter-sdk-smoke.mjs`, `tests/preflight-destinations-smoke.mjs`, [`T13-IMPLEMENTATION-EVIDENCE.md`](T13-IMPLEMENTATION-EVIDENCE.md).
+> **Estado:** **parcialmente implementado** (T13, 2026-11-13 UTC). Existe Hub genérico em `shared/hub/provider-hub.mjs` (candidatos por capacidade com estado real `ready/unknown/missing/blocked`, ordem estável, timeout de descoberta de 8 s) e Adapter SDK em `shared/adapters/sdk.mjs` (15 campos de manifesto, 3 classes — `local-tool`, `internal-process`, `remote-service` —, 9 códigos de erro, ações protegidas e custo/licença explícitos). O registro `electron/adapters/index.mjs` declara 7 adapters: 4 internos executados em teste (`local-image-ops`, `rig2d-software`, `glb-inspect`, `export-package`), Blender (ausente neste ambiente) e ComfyUI local/remoto (não autorizado). **Nenhuma ferramenta externa foi instalada, baixada ou executada**: o Hub só descobre e reporta. A seleção de provider (local/remoto autorizado/desativado) é configurável pelo usuário e está descrita na seção "Seleção de provider no produto". Evidências: [`IMPLEMENTATION-AUDIT.md`](IMPLEMENTATION-AUDIT.md), `tests/adapter-sdk-smoke.mjs`, `tests/preflight-destinations-smoke.mjs`, `tests/host-integration-smoke.mjs`, [`T13-IMPLEMENTATION-EVIDENCE.md`](T13-IMPLEMENTATION-EVIDENCE.md).
 >
 > **Adendo 2D/2.5D (revisão documental; evidência upstream de 2026-11-09/2026-11-10 UTC):** dois providers externos foram registrados como **candidatos experimentais** da rota imagem 2D → PSD em camadas → rig 2.5D → animação → exportação (seção “Providers 2D/2.5D em avaliação”). Registro é documentação de planejamento: nada foi clonado, instalado, baixado, chamado, copiado ou integrado, e nenhum direito foi aceito. A especificação de contratos de domínio permanece em revisão humana, com seus 12 itens pendentes; **nenhum contrato novo foi criado aqui** — `capabilityId`s e campos abaixo são rótulos ilustrativos.
 
@@ -84,6 +84,28 @@ Separar:
 - **Blender adapter:** executa script headless com input de modelo já no workspace e valida PNG+JSON; não cria mesh/rig/animation.
 - **Manual registration:** abre aplicações/seletores e registra paths reais; `electron/external-tools.cjs` detecta/abre Blender e Krita, mas não integra todas as operações de cada aplicativo.
 - **MCP:** servidor opcional para assets/tarefas; não é catálogo de provider.
+
+## Seleção de provider no produto (implementado)
+
+O Hub escolhe por estado e classe; **quem decide onde executar é o usuário**, e a decisão fica gravada no projeto (`.lia-forge/providers.json`, escrita atômica, sem segredo — apenas `credentialRef` para o cofre do usuário):
+
+| Provider | Modos | Regra dura |
+|---|---|---|
+| ComfyUI | `local-loopback` (padrão) · `remote` · `disabled` | o adapter local recusa endpoint que não seja da própria máquina; o remoto só sai do estado `blocked` com autorização gravada (quem, quando, escopo `send_data+cost`) e teto de custo opcional |
+| Blender | `auto` (PATH + locais conhecidos) · `path` · `disabled` | caminho informado só conta como ferramenta se existir e for executável (`X_OK`); caso contrário o estado é `missing` com o motivo |
+
+Estados produzidos pelo Hub (`shared/hub/provider-hub.mjs`), com o motivo chegando inteiro ao plano e à interface:
+
+| Situação medida | Estado | Exemplo de mensagem |
+|---|---|---|
+| ferramenta respondeu e nenhum requisito medido a contraria | `ready` | "ComfyUI responde em http://127.0.0.1:8188 (versão X). Aviso (não medido nesta máquina): VRAM…" |
+| ferramenta respondeu, mas um requisito **medido** não é atendido | `blocked` | "…Bloqueio nesta máquina: RAM: precisa de 8192 MB e há 3940 MB." |
+| ferramenta não encontrada / caminho inválido | `missing` | "Blender não foi detectado nesta máquina. Ele não é instalado automaticamente…" |
+| backend remoto sem autorização | `blocked` | "Backend remoto não autorizado; nenhum endpoint foi contatado." |
+
+Requisito **não medido** (VRAM sem probe de GPU autorizado, por exemplo) é aviso, nunca veto: o produto não afirma hardware validado e também não impede o uso de uma ferramenta que respondeu. Requisito **medido e insuficiente** bloqueia com o número na mensagem.
+
+Executado em teste (`tests/host-integration-smoke.mjs`, com substitutos rotulados — não Blender/ComfyUI reais): descoberta por PATH, `spawn` com os argumentos do contrato, artefato 384×144 validado por conteúdo, HTTP loopback real com checkpoint e prompt do usuário no grafo, bloqueio por RAM medida sem nenhum envio, e todas as recusas acima.
 
 ## Integrações externas estudadas
 
