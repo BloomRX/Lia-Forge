@@ -149,13 +149,23 @@ export function createAdapter(dependencies = {}) {
           version: null,
         };
       }
+      // A descoberta verifica existência e permissão de execução — ela **não**
+      // executa o arquivo (rodar `--version` de um caminho indicado pelo usuário
+      // seria executar código arbitrário no pré-voo). Por isso a identidade como
+      // Blender não é afirmada: o que se sabe é dito, e o que não foi medido fica
+      // marcado como não confirmado.
+      const fromConfiguration = Boolean(configured);
       return {
         adapterId: ADAPTER_ID,
         status: 'available',
-        detail: redactSecrets(`Blender encontrado em ${executable}`),
+        detail: redactSecrets(fromConfiguration
+          ? `Caminho configurado por você (${executable}) existe e é executável. A identidade como Blender não foi confirmada: a descoberta não executa o arquivo (nenhum --version foi rodado).`
+          : `Blender encontrado no PATH em ${executable}. A versão não foi confirmada: a descoberta não executa o arquivo.`),
         executable,
+        executableSource: fromConfiguration ? 'user-configuration' : 'path',
         checkedAt: new Date().toISOString(),
         version: null,
+        versionConfirmed: false,
       };
     },
 

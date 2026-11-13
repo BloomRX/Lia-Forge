@@ -194,11 +194,21 @@ try {
   const configuredBlender = await service.configureProvider({ id: 'blender', mode: 'path', executable: rendererPath, frameSize: '48x48' });
   check(configuredBlender.providers.blender.available === true, 'com executável real no disco, o provider fica disponível');
   check(configuredBlender.providers.blender.executable === rendererPath, 'o caminho configurado é o usado');
+  check(configuredBlender.providers.blender.executableSource === 'user-configuration',
+    'a origem do executável é dita: caminho configurado pelo usuário (não "a ferramenta está instalada")');
+  check(configuredBlender.providers.blender.versionConfirmed === false,
+    'a identidade como Blender não é afirmada sem medição');
+  check(/identidade como Blender não foi confirmada/i.test(configuredBlender.providers.blender.detail),
+    'a mensagem do provider diz que a identidade não foi confirmada');
 
   const preflightWithBlender = await service.preflight();
   const blenderAdapter = preflightWithBlender.tools.find((item) => item.adapterId === 'blender-spritesheet');
   check(blenderAdapter.status === 'available', `adapter Blender disponível após configurar (${blenderAdapter.status})`);
   check(blenderAdapter.executable === rendererPath, 'o preflight reporta o executável configurado pelo usuário');
+  check(blenderAdapter.executableSource === 'user-configuration', 'o pré-voo diz de onde veio o executável aceito');
+  check(blenderAdapter.versionConfirmed === false, 'o pré-voo não afirma versão que não mediu');
+  check(/não executa o arquivo/i.test(blenderAdapter.detail),
+    'e explica por que a versão não foi confirmada: a descoberta não executa o arquivo');
 
   const objectRun = await service.run({
     workflowId: '3d-object-render',

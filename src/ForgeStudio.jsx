@@ -420,6 +420,21 @@ function ToolsPanel({ adapters, preflight }) {
               </p>
               {tool?.detail ? <p className="forge-tool-detail">{tool.detail}</p> : null}
               <Detail summary="requisitos, custo, licença e evidência">
+                <KeyValue label="Executável" value={tool?.executable} mono />
+                <KeyValue
+                  label="Origem do executável"
+                  value={tool?.executableSource === 'user-configuration'
+                    ? 'caminho configurado por você (Configurações → Providers)'
+                    : tool?.executableSource === 'path' ? 'PATH do sistema' : null}
+                />
+                <KeyValue
+                  label="Versão detectada"
+                  value={tool?.versionConfirmed
+                    ? tool?.detectedVersion ?? 'confirmada'
+                    : tool?.executable
+                      ? 'não confirmada — o pré-voo mede existência e permissão de execução, mas não executa o arquivo'
+                      : null}
+                />
                 <KeyValue label="RAM mínima" value={adapter.requirements?.ramMb ? `${adapter.requirements.ramMb} MB` : null} />
                 <KeyValue label="Rede" value={adapter.requirements?.network === undefined ? null : adapter.requirements.network ? 'precisa' : 'não precisa'} />
                 <KeyValue label="Executa offline" value={adapter.requirements?.offlineCapable ? 'sim' : 'não'} />

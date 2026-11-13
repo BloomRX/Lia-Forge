@@ -80,6 +80,8 @@ export function createProviderHub({ registry, adapters = [], discoveries = new M
           discoveryDetail: detail,
           detectedVersion: discovery?.version ?? null,
           executable: discovery?.executable ?? null,
+          executableSource: discovery?.executableSource ?? null,
+          versionConfirmed: discovery?.versionConfirmed === true,
           endpoint: discovery?.endpoint ?? null,
           compatibility,
           cost: adapter.manifest.cost,

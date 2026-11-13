@@ -243,10 +243,17 @@ export function createStudioService(options = {}) {
         frameSize: blender.frameSize,
         available: Boolean(executable),
         configuredExecutable: configured,
+        // De onde veio o executável aceito: caminho indicado pelo usuário ou PATH.
+        executableSource: executable ? (configured ? 'user-configuration' : 'path') : null,
+        // Existência + permissão de execução foram medidas; a identidade como
+        // Blender não foi (o pré-voo não executa o arquivo), então não é afirmada.
+        versionConfirmed: false,
         detail: blender.mode === 'disabled'
           ? 'Blender desativado por você: os passos 3D ficam bloqueados com esse motivo.'
           : executable
-            ? `Blender encontrado em ${executable}.`
+            ? (configured
+              ? `Caminho configurado por você (${executable}) existe e é executável; a identidade como Blender não foi confirmada (o pré-voo não executa o arquivo).`
+              : `Blender encontrado no PATH em ${executable}; versão não confirmada (o pré-voo não executa o arquivo).`)
             : configuredMissing
               ? `O caminho informado (${configured}) não existe ou não é executável. Confira a instalação do Blender.`
               : 'Blender não foi detectado nesta máquina. Ele não é instalado automaticamente: instale por conta própria ou informe o caminho do executável.',

@@ -61,6 +61,11 @@ export function buildPreflightReport({ registry, adapters = [], machine = {}, di
       detectedVersion: discovery?.version ?? null,
       detail: discovery?.detail ?? 'Não verificado nesta execução.',
       executable: discovery?.executable ?? null,
+      // De onde veio o executável aceito ('user-configuration' | 'path') e se a
+      // versão foi confirmada. O pré-voo mede existência e permissão de execução;
+      // ele não executa o arquivo, então a identidade da ferramenta não é afirmada.
+      executableSource: discovery?.executableSource ?? null,
+      versionConfirmed: discovery?.versionConfirmed === true,
       endpoint: discovery?.endpoint ?? null,
       checkedAt: discovery?.checkedAt ?? null,
       cost: manifest.cost,
