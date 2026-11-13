@@ -27,6 +27,7 @@ export function buildJourneySteps({
   preflight = null,
   run = null,
   liveRun = null,
+  runStale = false,
   comparison = null,
   exportResult = null,
   registeredVersion = null,
@@ -38,6 +39,10 @@ export function buildJourneySteps({
   const pendingInputs = plan?.pendingInputs ?? [];
   const needsPrompt = pendingInputs.some((item) => item.kind === 'prompt' || item.requiresParam === 'prompt');
   const finished = Boolean(run?.summary?.finished);
+  // Run gravado como em andamento sem execução neste processo (o aplicativo foi
+  // fechado, a máquina reiniciou): corrigir o estado ou retomar é decisão humana,
+  // e o roteiro não pode fingir que a execução continua.
+  const stale = Boolean(runStale && run && !finished);
   const storedAsset = (assets ?? []).some((asset) => (asset.versions?.length ?? 0) > 0 || (asset.provenance?.length ?? 0) > 0);
   const verifiedOnDestination = exportResult?.bundle?.verifiedOnDestination === true;
 
@@ -99,8 +104,10 @@ export function buildJourneySteps({
     {
       id: 'follow',
       title: 'Acompanhar (ou cancelar)',
-      state: liveRun ? 'now' : finished ? 'done' : run ? 'now' : 'todo',
-      detail: liveRun
+      state: stale ? 'human' : liveRun ? 'now' : finished ? 'done' : run ? 'now' : 'todo',
+      detail: stale
+        ? 'Este run consta como em andamento, mas não há execução neste processo (o aplicativo pode ter sido fechado). Corrigir o estado ou retomar pelos checkpoints é decisão sua.'
+        : liveRun
         ? 'Execução em andamento: o progresso é gravado a cada passo e pode ser cancelado.'
         : finished
           ? 'Run encerrado e gravado em .lia-forge/runs/.'

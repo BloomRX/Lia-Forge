@@ -775,10 +775,25 @@ export function JourneyChecklist(props) {
         </p>
       )}
       {human.length ? (
-        <p className="forge-note is-human">
-          <UserRound size={12} strokeWidth={2} />
-          {human.map((step) => `${step.index}. ${step.title}`).join(' · ')} — decisões suas; o produto não instala, não compra e não autoriza nada por conta própria.
-        </p>
+        <div className="forge-note is-human">
+          <p className="forge-journey-human-head">
+            <UserRound size={12} strokeWidth={2} />
+            <span>
+              {human.map((step) => `${step.index}. ${step.title}`).join(' · ')} — decisões suas; o produto não instala,
+              não compra e não autoriza nada por conta própria.
+            </span>
+          </p>
+          {/* O motivo de cada decisão aparece sem precisar abrir a lista: é o que
+              impede o usuário de achar que o produto vai resolver sozinho. */}
+          <ul className="forge-journey-human">
+            {human.map((step) => (
+              <li key={step.id}>
+                <strong>{step.index}. {step.title}</strong>
+                <em>{step.detail}</em>
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
       <Detail summary="ver os 12 passos">
         <ol className="forge-journey-steps">
@@ -1118,6 +1133,9 @@ export default function ForgeStudio({ onNotify = () => {} }) {
   const modelParam = needsInput.find((item) => item.param)?.param ?? null;
   // Só um run concluído serve de origem: rig revisado não existe em run falho.
   const priorRunCandidates = (runs ?? []).filter((item) => item.status === 'succeeded' || item.status === 'blocked');
+  // O run em foco consta como em andamento sem execução neste processo? O roteiro
+  // precisa saber para não apresentar como vivo o que foi interrompido.
+  const runStale = Boolean(run?.runId && (runs ?? []).some((item) => item.runId === run.runId && item.stale));
 
   const runAction = useCallback(async (label, action) => {
     setBusy(label);
@@ -1540,6 +1558,7 @@ export default function ForgeStudio({ onNotify = () => {} }) {
             preflight={overview.preflight}
             run={run}
             liveRun={busy === 'run' ? liveRun : null}
+            runStale={runStale}
             comparison={comparison}
             exportResult={exportResult}
             registeredVersion={registeredVersion}

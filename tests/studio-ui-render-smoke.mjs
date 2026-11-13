@@ -561,6 +561,25 @@ try {
   assert.ok(staleMarkup.includes('não há execução neste processo'), 'o item explica por que está interrompido');
   assert.ok(staleMarkup.includes('Corrigir estado') && staleMarkup.includes('Retomar'), 'as duas saídas são oferecidas no próprio item');
 
+  // Run interrompido no roteiro: não aparece como execução viva, e a recuperação
+  // entra como decisão humana (o produto não corrige o estado por conta própria).
+  const staleJourneyMarkup = renderToStaticMarkup(createElement(JourneyChecklist, {
+    project,
+    inputs: listedInputs.entries,
+    requiresInput: true,
+    workflowId: '2d-character-parts',
+    brief: 'herói neon',
+    destination: 'godot-4',
+    plan: characterRun.plan ?? null,
+    preflight: overview.preflight,
+    run: { runId: 'run-interrompido', status: 'running', summary: { finished: false, total: 2, progress: 50 } },
+    runStale: true,
+    assets: [],
+  }));
+  assert.ok(staleJourneyMarkup.includes('não há execução neste processo'), 'o roteiro diz que o run interrompido não está executando');
+  assert.ok(staleJourneyMarkup.includes('decisões suas'), 'e apresenta a recuperação como decisão do usuário');
+  assert.ok(!staleJourneyMarkup.includes('Execução em andamento: o progresso é gravado'), 'não apresenta o run interrompido como execução viva');
+
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 

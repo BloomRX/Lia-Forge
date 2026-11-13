@@ -272,6 +272,42 @@ try {
   check(finished.progress.next === null, 'e não sobra passo atual pendente');
   check(finished.progress.humanDecisions.length === 0, 'nada ficou marcado como decisão humana pendente neste fluxo');
 
+  // ---------------------------- 12.1 run interrompido entra no roteiro (§8)
+  // O aplicativo foi fechado no meio da execução: o arquivo diz "em andamento" e
+  // não há processo aqui. O roteiro não pode apresentar isso como execução viva.
+  const interruptedRun = { runId: 'run-interrompido', status: 'running', summary: { finished: false, total: 2, progress: 50 } };
+  const interrupted = journeyAt('run interrompido', {
+    project,
+    inputs: inputs.entries,
+    requiresInput: true,
+    workflowId: WORKFLOW,
+    brief,
+    destination: DESTINATION,
+    plan: planned.plan,
+    preflight: overview.preflight,
+    run: interruptedRun,
+    runStale: true,
+  }, { detour: true });
+  const followStep = interrupted.steps.find((step) => step.id === 'follow');
+  check(followStep.state === 'human', 'run interrompido vira decisão humana no passo de acompanhar');
+  check(/não há execução neste processo/.test(followStep.detail), 'e o passo diz que não há execução neste processo');
+  check(interrupted.progress.humanDecisions.some((item) => item.id === 'follow'), 'o resumo lista a recuperação como decisão pendente');
+  check(interrupted.steps.find((step) => step.id === 'review').state === 'todo', 'sem run encerrado, revisar não consta como feito');
+  const base = {
+    project,
+    inputs: inputs.entries,
+    requiresInput: true,
+    workflowId: WORKFLOW,
+    brief,
+    destination: DESTINATION,
+    plan: planned.plan,
+    preflight: overview.preflight,
+  };
+  const liveRunState = buildJourneySteps({ ...base, run: interruptedRun, runStale: false, liveRun: { runId: interruptedRun.runId } });
+  check(liveRunState.find((step) => step.id === 'follow').state === 'now', 'com a execução viva, o mesmo passo volta a ser o passo atual');
+  const finishedIgnored = buildJourneySteps({ ...base, run: snapshot, comparison, exportResult: exported, runStale: true });
+  check(finishedIgnored.find((step) => step.id === 'follow').state === 'done', 'run encerrado não vira interrompido só porque o sinal chegou');
+
   // ------------------------------------------------ honestidade do roteiro
   // Tirar a evidência tem que tirar o "concluído": o estado nunca é decorativo.
   const state = {
@@ -319,8 +355,9 @@ try {
   check(sequence.every((value, index) => index === 0 || value >= sequence[index - 1]),
     `o progresso só avançou com evidência (${sequence.join(' → ')})`);
   check(sequence.at(-1) === 12, 'a última parada da trilha é a jornada completa');
-  check(detours.length === 1 && detours[0].humanDecisions.length > 0,
-    'o cenário alternativo (objetivo sem provider aqui) é registrado como decisão humana, não como progresso');
+  check(detours.length === 2, `os dois cenários alternativos ficam fora da trilha (${detours.length})`);
+  check(detours.every((stop) => stop.humanDecisions.length > 0),
+    'cada cenário alternativo (objetivo sem provider aqui, run interrompido) é registrado como decisão humana, não como progresso');
   check(trail.every((stop) => stop.humanDecisions.length === 0),
     'nenhuma parada da jornada concluída deixou decisão humana pendente');
 
