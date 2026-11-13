@@ -104,6 +104,15 @@ try {
   check(whileRunning?.active === true, 'a lista de runs marca como ativo o run que está executando neste processo');
   check(whileRunning?.stale === false, 'run ativo não é marcado como interrompido');
 
+  // O processo externo tem que estar de pé antes do sinal: cancelar um filho que
+  // ainda nem gravou o PID deixaria o teste dependente de corrida (o node do
+  // substituto leva alguns milissegundos para iniciar e escrever o arquivo).
+  const childPid = await waitFor(async () => {
+    const pid = await fs.readFile(pidFile, 'utf8').catch(() => null);
+    return pid && (await isAlive(pid)) ? String(pid).trim() : null;
+  }, { label: 'o processo externo de teste iniciar e gravar o PID' });
+  check(childPid !== null, 'o processo externo de teste chegou a iniciar (PID gravado e processo vivo)');
+
   const cancelling = await service.cancelRun({ runId, reason: 'usuário desistiu desta geração' });
   check(cancelling.ok === true && cancelling.status === 'cancelling', 'cancelRun envia o sinal e diz que o run está parando');
   check(/ponto de verificação/.test(cancelling.note), 'a resposta explica que o cancelamento é cooperativo');
@@ -120,8 +129,6 @@ try {
   check(cancelled.snapshot.summary?.finished === true, 'o resumo diz que o run está encerrado');
   check((cancelled.snapshot.logs ?? []).some((entry) => /cancel/i.test(entry.message)), 'o cancelamento fica no log do run');
 
-  const childPid = await fs.readFile(pidFile, 'utf8').catch(() => null);
-  check(childPid !== null, 'o processo externo de teste chegou a iniciar (PID gravado)');
   await waitFor(async () => (!(await isAlive(childPid)) ? { dead: true } : null), { label: 'o processo filho encerrar' });
   check(!(await isAlive(childPid)), 'o processo externo foi encerrado de verdade — não ficou rodando sozinho');
 
