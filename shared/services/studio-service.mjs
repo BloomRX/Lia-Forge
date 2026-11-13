@@ -1,0 +1,538 @@
+/**
+ * Serviço de integração do Studio (F8 — requisito §11).
+ *
+ * Uma única fachada usada pelos dois hospedeiros reais do produto:
+ *   - Electron (`electron/main.cjs`, via IPC) — aplicação desktop;
+ *   - Vite (`vite.config.js`, via API HTTP same-origin) — navegador/preview.
+ *
+ * Isso evita dois sistemas paralelos: as mesmas funções de capability, hub,
+ * preflight, planejamento, execução, assets e exportação servem os dois.
+ *
+ * Regras preservadas: nenhum download/instalação/compra/envio; escritas
+ * confinadas a `<projectRoot>/.lia-forge/` com arquivo temporário + rename e
+ * recusa de symlink; segredos redigidos; nada é afirmado sem evidência.
+ */
+
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+
+import { createCapabilityRegistry } from '../capabilities/registry.mjs';
+import { createAdapterRegistry } from '../../electron/adapters/index.mjs';
+import { discoverHub } from '../hub/provider-hub.mjs';
+import { runPreflight } from '../qa/preflight.mjs';
+import { listWorkflows, planWorkflow, WORKFLOW_IDS } from '../orchestrator/planner.mjs';
+import { ExecutionManager } from '../engine/execution-manager.mjs';
+import { assertSafeWriteTarget, redactSecrets, sha256Hex } from '../engine/gates.mjs';
+import { createAssetManager, classifyRights } from '../assets/manager.mjs';
+import { decodePng, encodePngRgba, analyzePngContent } from '../qa/png-codec.mjs';
+import { generateVfxAtlas } from '../vfx/core.mjs';
+import { buildExportBundle, checkDestinationCompatibility, listDestinations } from '../destinations/profiles.mjs';
+
+export const STUDIO_SERVICE_SCHEMA_VERSION = 1;
+const RUNS_DIRECTORY = '.lia-forge/runs';
+const MAX_PREVIEW_BYTES = 6 * 1024 * 1024;
+
+async function pathExists(target) {
+  try {
+    await fs.access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * @param {object} options
+ * @param {string} options.projectRoot raiz do projeto (escrita confinada aqui)
+ * @param {Function} [options.findExternalTool] descoberta de ferramentas
+ * @param {object} [options.taskRegistry] registro de processos filhos
+ * @param {Function} [options.getWorkflowClient] cliente ComfyUI (Electron)
+ * @param {Function} [options.validateStageOutputs] validação de estágio legada
+ * @param {{maxConcurrent?:number, ramMb?:number}} [options.limits]
+ */
+export function createStudioService(options = {}) {
+  const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
+  const limits = { maxConcurrent: 1, ...(options.limits ?? {}) };
+  const registry = createCapabilityRegistry();
+
+  const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+
+  const adapterDependencies = {
+    findExternalTool: options.findExternalTool ?? (() => null),
+    taskRegistry: options.taskRegistry ?? { start: () => { throw new Error('Task registry indisponível neste hospedeiro.'); } },
+    assertPathInsideProject: options.assertPathInsideProject ?? (async (candidate) => {
+      const resolved = path.resolve(candidate);
+      const gate = await assertSafeWriteTarget({
+        root: projectRoot,
+        target: resolved,
+        resolve: async (value) => path.resolve(value),
+        lstat: async (value) => fs.lstat(value),
+        realpath: async (value) => fs.realpath(value),
+      });
+      if (!gate.ok) throw new Error(gate.reason);
+      return resolved;
+    }),
+    buildBlenderSpritesheetArgs: options.buildBlenderSpritesheetArgs ?? (() => { throw new Error('buildBlenderSpritesheetArgs indisponível neste hospedeiro.'); }),
+    runProcess: options.runProcess ?? (async () => { throw new Error('runProcess indisponível neste hospedeiro.'); }),
+    validateSpritesheetFiles: options.validateSpritesheetFiles ?? (() => { throw new Error('validateSpritesheetFiles indisponível neste hospedeiro.'); }),
+    validateStageOutputs: options.validateStageOutputs ?? (() => {}),
+    getWorkflowClient: options.getWorkflowClient ?? (async () => {
+      throw new Error('Cliente ComfyUI indisponível neste hospedeiro (somente Electron).');
+    }),
+    hash,
+  };
+
+  const adapters = createAdapterRegistry(adapterDependencies);
+
+  /** Informações reais da máquina. GPU nunca é afirmada sem probe autorizado. */
+  async function machineInfo() {
+    const totalRamMb = Math.round(os.totalmem() / (1024 * 1024));
+    const freeRamMb = Math.round(os.freemem() / (1024 * 1024));
+    let diskMb = null;
+    try {
+      const stats = await fs.statfs(projectRoot);
+      diskMb = Math.round((stats.bavail * stats.bsize) / (1024 * 1024));
+    } catch {
+      diskMb = null;
+    }
+    return Object.freeze({
+      os: process.platform,
+      release: os.release(),
+      arch: process.arch,
+      cpus: os.cpus().length,
+      cpuModel: os.cpus()[0]?.model ?? null,
+      ramMb: totalRamMb,
+      freeRamMb,
+      diskMb,
+      // Probe de GPU/Vulkan exige decisão humana (T12 D11): não executado.
+      gpu: null,
+      gpuNote: 'Nenhum probe de GPU/Vulkan foi executado: a verificação depende de autorização humana.',
+      vramMb: null,
+      node: process.version,
+      projectRoot,
+    });
+  }
+
+  async function discover() {
+    const machine = await machineInfo();
+    const { hub, discoveries } = await discoverHub({ registry, adapters: adapters.all(), machine });
+    return { hub, discoveries, machine };
+  }
+
+  async function emitFor(runDirectory, hashes = new Map()) {
+    await fs.mkdir(runDirectory, { recursive: true });
+    return async (relativePath, bytes) => {
+      const target = path.join(runDirectory, relativePath);
+      const gate = await assertSafeWriteTarget({
+        root: runDirectory,
+        target,
+        resolve: async (value) => path.resolve(value),
+        lstat: async (value) => fs.lstat(value).catch(() => null),
+        realpath: async (value) => fs.realpath(value).catch(() => null),
+      });
+      if (!gate.ok) throw Object.assign(new Error(gate.reason), { code: 'UNSAFE_WRITE_TARGET' });
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+      await fs.writeFile(temporary, bytes, { flag: 'wx' });
+      try {
+        await fs.rename(temporary, target);
+      } catch (error) {
+        await fs.rm(temporary, { force: true });
+        throw error;
+      }
+      const projectRelative = path.relative(projectRoot, target).split(path.sep).join('/');
+      const digest = hash(bytes);
+      // o hash fica registrado pelos dois caminhos usados nos relatórios
+      hashes.set(projectRelative, digest);
+      hashes.set(path.relative(runDirectory, target).split(path.sep).join('/'), digest);
+      return projectRelative;
+    };
+  }
+
+  const storeFile = path.join(projectRoot, '.spriteforge', 'assets.json');
+
+  async function readStore() {
+    if (!await pathExists(storeFile)) return null;
+    try {
+      return JSON.parse(await fs.readFile(storeFile, 'utf8'));
+    } catch {
+      return null;
+    }
+  }
+
+  async function writeStore(payload) {
+    const serialized = `${JSON.stringify(payload, null, 2)}\n`;
+    if (Buffer.byteLength(serialized) > 24 * 1024 * 1024) throw new Error('Asset store excede o limite de 24 MB');
+    await fs.mkdir(path.dirname(storeFile), { recursive: true });
+    const temporary = `${storeFile}.${process.pid}.${randomUUID()}.tmp`;
+    await fs.writeFile(temporary, serialized, { encoding: 'utf8', flag: 'wx' });
+    try {
+      await fs.rename(temporary, storeFile);
+    } catch (error) {
+      await fs.rm(temporary, { force: true });
+      throw error;
+    }
+  }
+
+  async function assets() {
+    return createAssetManager({ store: await readStore(), save: writeStore });
+  }
+
+  const managerCache = new Map();
+
+  function managerFor(runId) {
+    if (!managerCache.has(runId)) {
+      const runDirectory = path.join(projectRoot, RUNS_DIRECTORY, runId);
+      managerCache.set(runId, new ExecutionManager({
+        resolveAdapter: async (adapterId) => adapters.adapter(adapterId),
+        persist: async (snapshot) => {
+          await fs.mkdir(runDirectory, { recursive: true });
+          await fs.writeFile(path.join(runDirectory, 'run.json'), `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+        },
+        limits,
+      }));
+    }
+    return managerCache.get(runId);
+  }
+
+  return Object.freeze({
+    schemaVersion: STUDIO_SERVICE_SCHEMA_VERSION,
+    projectRoot,
+    workflowIds: WORKFLOW_IDS,
+
+    async overview() {
+      const { hub, machine } = await discover();
+      const [preflight, assetManager] = [await runPreflight({ registry, adapters: adapters.all(), machine }), await assets()];
+      return Object.freeze({
+        schemaVersion: STUDIO_SERVICE_SCHEMA_VERSION,
+        machine,
+        capabilities: registry.list().map((capability) => ({
+          id: capability.id,
+          family: capability.family,
+          title: capability.title,
+          status: capability.status,
+          description: capability.description,
+          requirements: capability.requirements,
+          evidence: capability.evidence,
+          limitations: capability.limitations,
+        })),
+        capabilityStates: hub.capabilityStates(),
+        adapters: adapters.describe(),
+        preflight: Object.freeze({ summary: preflight.summary, userActions: preflight.userActions, tools: preflight.tools }),
+        workflows: listWorkflows({ hub, registry }),
+        destinations: listDestinations(),
+        assets: assetManager.list().map((asset) => ({ id: asset.id, name: asset.name, type: asset.type, versions: asset.versions.length, rights: asset.rights.state })),
+        rights: assetManager.rightsReport(),
+        note: 'Nenhuma ferramenta foi instalada, baixada ou contatada; nenhum probe de GPU foi executado.',
+      });
+    },
+
+    async capabilities() {
+      return registry.list();
+    },
+
+    async adapterManifests() {
+      return adapters.manifests();
+    },
+
+    async preflight({ capabilityIds = null } = {}) {
+      const machine = await machineInfo();
+      return runPreflight({ registry, adapters: adapters.all(), machine, capabilityIds });
+    },
+
+    async workflows() {
+      const { hub } = await discover();
+      return listWorkflows({ hub, registry });
+    },
+
+    async plan({ workflowId, destination = null, options: planOptions = {}, brief = null, allowRemote = false }) {
+      const { hub, machine } = await discover();
+      const plan = planWorkflow({ workflowId, hub, registry, destination, options: planOptions, brief, allowRemote });
+      return Object.freeze({ plan, machine, hubStates: hub.capabilityStates() });
+    },
+
+    /**
+     * Executa um plano. Só adapters internos rodam sem ferramenta externa;
+     * passos bloqueados permanecem bloqueados e o run registra o motivo.
+     */
+    async run({ workflowId, destination = null, options: runOptions = {}, brief = null, params = {}, authorization = null, onEvent = null, signal = null, resume = null }) {
+      const runId = resume?.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const runDirectory = path.join(projectRoot, RUNS_DIRECTORY, runId);
+      let plan = null;
+      try {
+      const { hub, machine } = await discover();
+      plan = planWorkflow({ workflowId, hub, registry, destination, options: runOptions, brief });
+      const hashes = new Map();
+      const emit = await emitFor(runDirectory, hashes);
+      const manager = managerFor(runId);
+      await fs.mkdir(runDirectory, { recursive: true });
+      await fs.writeFile(path.join(runDirectory, 'plan.json'), `${JSON.stringify({ plan, destination, workflowId, brief }, null, 2)}\n`, 'utf8');
+
+      const context = {
+        projectRoot,
+        outputDirectory: runDirectory,
+        emit,
+        machine,
+        destination,
+        brief,
+        params,
+        reviews: params.reviews ?? {},
+        hashArtifact: async (relativePath) => hashes.get(relativePath) ?? hashes.get(path.relative(runDirectory, path.join(projectRoot, relativePath))) ?? null,
+        // bolsa de dados entre passos do mesmo run (partes → rig → animação)
+        state: {},
+        // leitura confinada ao projeto: aceita caminho relativo ao run ou ao
+        // projeto, e devolve null quando o arquivo não existe
+        readArtifact: async (relativePath) => {
+          const candidates = [path.join(runDirectory, relativePath), path.join(projectRoot, relativePath)];
+          for (const absolute of candidates) {
+            const resolved = path.resolve(absolute);
+            if (!resolved.startsWith(path.resolve(projectRoot))) return null;
+            try {
+              return await fs.readFile(resolved);
+            } catch {
+              /* tenta o próximo candidato */
+            }
+          }
+          return null;
+        },
+      };
+
+      // Imagem de entrada declarada pelo usuário (caminho relativo ao projeto).
+      const sourceImage = params.sourceImage ?? runOptions.sourceImage ?? null;
+      if (sourceImage) {
+        const bytes = await context.readArtifact(sourceImage);
+        if (!bytes) throw new Error(`run: imagem de entrada "${sourceImage}" não encontrada dentro do projeto`);
+        const decoded = decodePng(bytes);
+        context.image = decoded;
+        context.state.image = decoded;
+        context.state.partImages = null;
+      }
+
+      const snapshot = await manager.execute(plan, {
+        context,
+        authorization,
+        signal,
+        onEvent,
+        // o id do run é decidido aqui: é o nome da pasta em .lia-forge/runs/
+        runId,
+        resume: Boolean(resume),
+        checkpoints: resume?.checkpoints ?? null,
+      });
+      return Object.freeze({ runId, plan, snapshot, runDirectory: path.relative(projectRoot, runDirectory) });
+      } catch (error) {
+        // Falha antes de qualquer passo executar (entrada inexistente, plano
+        // inválido…): o run ainda assim existe, fica gravado e explica o motivo
+        // — com segredos redigidos, como em qualquer outro log.
+        const message = redactSecrets(error?.message ?? String(error));
+        const at = new Date().toISOString();
+        const failed = {
+          schemaVersion: STUDIO_SERVICE_SCHEMA_VERSION,
+          runId,
+          planId: plan?.id ?? workflowId,
+          planTitle: plan?.title ?? workflowId,
+          status: 'failed',
+          startedAt: at,
+          finishedAt: at,
+          steps: (plan?.steps ?? []).map((step) => ({ id: step.id, adapter: step.adapter, state: 'pending', outputs: [], error: null })),
+          gates: [],
+          logs: [{ at, level: 'error', message, details: { code: error?.code ?? null } }],
+          provenance: [],
+          cost: { status: 'unknown', entries: [], total: null, currency: null },
+          summary: { total: plan?.steps?.length ?? 0, progress: 0, finished: true, failed: [], blocked: [] },
+          error: { code: error?.code ?? 'WORKFLOW_FAILED', message },
+        };
+        await fs.mkdir(runDirectory, { recursive: true }).catch(() => {});
+        await fs.writeFile(path.join(runDirectory, 'run.json'), `${JSON.stringify(failed, null, 2)}\n`, 'utf8').catch(() => {});
+        return Object.freeze({ runId, plan, snapshot: failed, runDirectory: path.relative(projectRoot, runDirectory) });
+      }
+    },
+
+    /**
+     * Revisão humana de um passo (12 passos do produto: aprovar/rejeitar).
+     *
+     * Aprovar grava a decisão sobre o SHA-256 do artefato real e retoma o run a
+     * partir dos checkpoints válidos — o passo revisado não é reexecutado.
+     * Rejeitar marca o passo como reprovado e o run permanece bloqueado.
+     */
+    async reviewStep({ runId, stepId, approved, reviewer = 'usuario', note = null }) {
+      const snapshot = await this.readRun(runId);
+      if (!snapshot) throw new Error(`reviewStep: run "${runId}" não encontrado`);
+      const step = snapshot.steps.find((item) => item.id === stepId);
+      if (!step) throw new Error(`reviewStep: passo "${stepId}" não existe no run "${runId}"`);
+      const planFile = path.join(projectRoot, RUNS_DIRECTORY, runId, 'plan.json');
+      const stored = JSON.parse(await fs.readFile(planFile, 'utf8'));
+      const decision = {
+        approved: approved === true,
+        sha256: step.sha256 ?? null,
+        reviewer,
+        reviewedAt: new Date().toISOString(),
+        note: note ? redactSecrets(note) : null,
+      };
+      const reviewsFile = path.join(projectRoot, RUNS_DIRECTORY, runId, 'reviews.json');
+      const reviews = await fs.readFile(reviewsFile, 'utf8').then((text) => JSON.parse(text)).catch(() => ({}));
+      reviews[stepId] = decision;
+      await fs.writeFile(reviewsFile, `${JSON.stringify(reviews, null, 2)}\n`, 'utf8');
+      if (!approved) {
+        return Object.freeze({ runId, stepId, decision, resumed: false, reason: 'Passo rejeitado pelo revisor; o run permanece bloqueado.' });
+      }
+      if (!decision.sha256) {
+        return Object.freeze({ runId, stepId, decision, resumed: false, reason: 'O passo não produziu artefato com hash; nada a retomar.' });
+      }
+      const checkpoints = Object.fromEntries(snapshot.steps
+        .filter((item) => item.state === 'succeeded' || item.id === stepId)
+        .map((item) => [item.id, { stepId: item.id, adapter: item.adapter, outputs: item.outputs, sha256: item.sha256, finishedAt: item.finishedAt }]));
+      const resumed = await this.run({
+        workflowId: stored.workflowId,
+        destination: stored.destination,
+        brief: stored.brief,
+        params: { reviews },
+        resume: { runId, checkpoints },
+      });
+      return Object.freeze({ runId, stepId, decision, resumed: true, result: resumed.snapshot });
+    },
+
+    async listRuns() {
+      const root = path.join(projectRoot, RUNS_DIRECTORY);
+      if (!await pathExists(root)) return [];
+      const entries = await fs.readdir(root, { withFileTypes: true });
+      const runs = [];
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const file = path.join(root, entry.name, 'run.json');
+        if (!await pathExists(file)) continue;
+        try {
+          const snapshot = JSON.parse(await fs.readFile(file, 'utf8'));
+          runs.push({ runId: snapshot.runId, planId: snapshot.planId, planTitle: snapshot.planTitle, status: snapshot.status, startedAt: snapshot.startedAt, finishedAt: snapshot.finishedAt, summary: snapshot.summary });
+        } catch {
+          runs.push({ runId: entry.name, status: 'unreadable' });
+        }
+      }
+      return runs.sort((a, b) => String(b.startedAt ?? '').localeCompare(String(a.startedAt ?? '')));
+    },
+
+    async readRun(runId) {
+      const file = path.join(projectRoot, RUNS_DIRECTORY, String(runId), 'run.json');
+      if (!await pathExists(file)) return null;
+      return JSON.parse(await fs.readFile(file, 'utf8'));
+    },
+
+    /** Preview de VFX para a interface (PNG em base64, limitado a 6 MB). */
+    async vfxPreview({ preset = 'explosion', size = 96, frameCount = 8, seed = 'lia-forge', palette = null, columns = null } = {}) {
+      const generated = generateVfxAtlas({ preset, size, frameCount, seed, palette, columns });
+      const png = encodePngRgba(generated.atlas.image.rgba, generated.atlas.image.width, generated.atlas.image.height);
+      if (png.length > MAX_PREVIEW_BYTES) throw new Error('Preview excede o limite de 6 MB; reduza size ou frameCount.');
+      return Object.freeze({
+        preset,
+        seed: generated.seed,
+        frameCount: generated.frameCount,
+        grid: { columns: generated.atlas.columns, rows: generated.atlas.rows },
+        sheetWidth: generated.atlas.sheetWidth,
+        sheetHeight: generated.atlas.sheetHeight,
+        deterministic: generated.deterministic,
+        content: analyzePngContent(png),
+        pngBase64: png.toString('base64'),
+        sha256: hash(png),
+      });
+    },
+
+    /** Exporta artefatos de um run para um destino (perfil + SHA-256 + notas). */
+    async exportRun({ runId, destination, asset = null }) {
+      const snapshot = await this.readRun(runId);
+      if (!snapshot) throw new Error(`exportRun: run "${runId}" não encontrado`);
+      const runDirectory = path.join(projectRoot, RUNS_DIRECTORY, runId);
+      const artifacts = [];
+      for (const step of snapshot.steps) {
+        for (const relative of step.outputs ?? []) {
+          const absolute = path.isAbsolute(relative) ? relative : path.join(projectRoot, relative);
+          if (!absolute.startsWith(runDirectory) && !absolute.startsWith(projectRoot)) continue;
+          if (!await pathExists(absolute)) continue;
+          const bytes = await fs.readFile(absolute);
+          artifacts.push({
+            id: `${step.id}:${path.basename(absolute)}`,
+            format: path.extname(absolute).slice(1).toLowerCase(),
+            role: step.id,
+            relativePath: path.relative(runDirectory, absolute).split(path.sep).join('/'),
+            bytes,
+          });
+        }
+      }
+      if (!artifacts.length) throw new Error('exportRun: o run não produziu artefatos gravados');
+      const compatibility = checkDestinationCompatibility({ destinationId: destination, artifacts });
+      const bundle = buildExportBundle({ destinationId: destination, artifacts, hash, asset, workflowRunId: runId });
+      const target = path.join(runDirectory, 'export', destination, 'manifest.json');
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, `${JSON.stringify(bundle, null, 2)}\n`, 'utf8');
+      return Object.freeze({ bundle, compatibility, path: path.relative(projectRoot, target).split(path.sep).join('/') });
+    },
+
+    // ------------------------------------------------------------- assets
+    async listAssets() {
+      return (await assets()).list();
+    },
+
+    async upsertAsset(record) {
+      return (await assets()).upsert(record);
+    },
+
+    async addAssetVersion(id, version) {
+      return (await assets()).addVersion(id, version);
+    },
+
+    async declareAssetRights(id, declaration) {
+      return (await assets()).declareRights(id, declaration);
+    },
+
+    async rightsReport() {
+      return (await assets()).rightsReport();
+    },
+
+    /** Registra provenência de um run inteiro no asset (direitos recalculados). */
+    async attachRunToAsset({ assetId, runId }) {
+      const snapshot = await this.readRun(runId);
+      if (!snapshot) throw new Error(`attachRunToAsset: run "${runId}" não encontrado`);
+      const manager = await assets();
+      if (!manager.get(assetId)) throw new Error(`attachRunToAsset: asset "${assetId}" não encontrado`);
+      const artifacts = [];
+      for (const provenance of snapshot.provenance ?? []) {
+        const emitted = provenance.outputs ?? [];
+        for (const relative of emitted) {
+          const absolute = path.join(projectRoot, relative);
+          if (!await pathExists(absolute)) continue;
+          const bytes = await fs.readFile(absolute);
+          artifacts.push({
+            path: relative,
+            role: provenance.stepId,
+            format: path.extname(relative).slice(1).toLowerCase() || null,
+            bytes: bytes.length,
+            // o hash gravado pelo run vale para o artefato principal do passo;
+            // com mais de uma saída, cada arquivo é hasheado individualmente
+            sha256: emitted.length === 1 ? (provenance.sha256 ?? hash(bytes)) : hash(bytes),
+            validated: true,
+            contentMetrics: null,
+          });
+        }
+        await manager.addProvenance(assetId, {
+          adapter: provenance.adapter,
+          adapterVersion: provenance.adapterVersion,
+          tool: provenance.adapter,
+          license: provenance.license,
+          outputRights: provenance.outputRights,
+          runId,
+          at: provenance.at,
+        });
+      }
+      if (artifacts.length) {
+        await manager.addVersion(assetId, { runId, artifacts, note: `Artefatos do run ${runId}` });
+      }
+      return manager.get(assetId);
+    },
+
+    classifyRights,
+    redactSecrets,
+    sha256: hash,
+  });
+}
+
+export default createStudioService;

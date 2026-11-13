@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { WorkflowRunner, validatePlan, verifyArtifact } = require('../electron/workflow-runner.cjs');
 const { createHumanoidPipelinePlan, HUMANOID_PIPELINE_STAGES, providerAuthorization } = require('../electron/workflow-contracts.cjs');
-const { makePng } = require('./png-fixtures.cjs');
+const { makePng, makeContentPng } = require('./png-fixtures.cjs');
 const { resumableRunKind } = require('../electron/resume-workflow.cjs');
 
 function makeGlb(jsonText = '{"asset":{"version":"2.0"}}') {
@@ -67,14 +67,14 @@ async function main() {
     adapters: {
       prepare: async ({ reportProgress, projectRoot }) => {
         order.push('prepare');
-        await writeArtifact(projectRoot, 'refs/concept.png', makePng(8, 8));
+        await writeArtifact(projectRoot, 'refs/concept.png', makeContentPng(8, 8));
         await reportProgress({ progress: 50, message: 'Preparando insumos' });
         return { outputs: ['refs/concept.png'], note: 'Imagem real salva.' };
       },
       pack: async ({ run, projectRoot }) => {
         assert.equal(run.steps[0].status, 'validated');
         order.push('pack');
-        await writeArtifact(projectRoot, 'sprites/sheet.png', makePng(16, 8));
+        await writeArtifact(projectRoot, 'sprites/sheet.png', makeContentPng(16, 8));
         const manifest = {
           schemaVersion: 1,
           generator: 'Workflow smoke fixture',

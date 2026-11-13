@@ -71,11 +71,11 @@ export const MANIFEST = Object.freeze({
   ],
   health: { status: 'blocked', detail: 'Backend remoto não autorizado; nenhum endpoint foi contatado.' },
   evidence: {
-    tests: ['tests/adapter-sdk-smoke.mjs', 'tests/remote-backend-smoke.mjs'],
+    tests: ['tests/adapter-sdk-smoke.mjs', 'tests/orchestrator-engine-smoke.mjs', 'tests/studio-service-smoke.mjs'],
     validatedVersions: [],
     executedOn: null,
     state: 'code-present',
-    note: 'Testado com stub de transporte local; nenhuma chamada real a serviço remoto foi feita nem deve ser feita sem autorização.',
+    note: 'Os testes executam só os caminhos de recusa (sem autorização → ADAPTER_SEND_UNAUTHORIZED, endpoint loopback → blocked) e a reconciliação; o hub nunca o escolhe implicitamente. Nenhuma chamada real a serviço remoto foi feita, e nenhuma deve ser feita sem autorização humana.',
   },
   protectedActions: [...PROTECTED_ACTIONS],
 });

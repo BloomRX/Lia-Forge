@@ -18,6 +18,8 @@
  * `{ outputs, metrics, note }`.
  */
 
+import path from 'node:path';
+
 import { defineExecutionAdapter, adapterError } from './sdk.mjs';
 import {
   alphaBounds,
@@ -36,7 +38,7 @@ import { createModularRig, createPresetAnimation, createRig, estimateSkeleton, r
 import { generateVfxAtlas, generateVfxFrames, VFX_PRESETS } from '../vfx/core.mjs';
 import { inspectGlb, summarizeGlb } from '../model3d/glb.mjs';
 import { buildExportBundle, checkDestinationCompatibility, adaptSpritesheetManifestForDestination, listDestinations } from '../destinations/profiles.mjs';
-import { encodePngRgba } from '../qa/png-codec.mjs';
+import { decodePng, encodePngRgba } from '../qa/png-codec.mjs';
 import { validatePngContent } from '../qa/png-codec.mjs';
 import { runValidator } from '../qa/validators.mjs';
 
@@ -47,6 +49,91 @@ function requireEmit(context, adapterId) {
     throw adapterError('ADAPTER_MISCONFIGURED', `O adapter ${adapterId} precisa de emit(relativePath, bytes) injetado pelo processo principal.`, { adapterId });
   }
   return context.emit;
+}
+
+/**
+ * Recarrega dados intermediários dos artefatos gravados no run.
+ *
+ * Necessário na retomada: quando um passo é reutilizado do checkpoint (por
+ * exemplo após revisão humana aprovada), ele não reexecuta e a bolsa em memória
+ * (`context.state`) fica vazia. Os passos seguintes então leem do disco — que é
+ * a única fonte durável — em vez de exigir que tudo seja refeito.
+ */
+function upstreamOutputs(context, matcher) {
+  const found = [];
+  // dependências diretas primeiro, depois o restante do run (retomada)
+  const sources = [context.inputsById ?? {}, context.runOutputs ?? {}];
+  for (const source of sources) {
+    for (const [stepId, input] of Object.entries(source)) {
+      for (const relative of input.outputs ?? []) {
+        if (found.includes(relative)) continue;
+        if (matcher(relative, stepId)) found.push(relative);
+      }
+    }
+  }
+  return found;
+}
+
+async function readJsonArtifact(context, relativePath) {
+  if (typeof context.readArtifact !== 'function') return null;
+  const bytes = await context.readArtifact(relativePath);
+  if (!bytes) return null;
+  try {
+    return JSON.parse(bytes.toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+async function readImageArtifact(context, relativePath) {
+  if (typeof context.readArtifact !== 'function') return null;
+  const bytes = await context.readArtifact(relativePath);
+  if (!bytes) return null;
+  try {
+    return decodePng(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/** Lê `parts/layers.json` + os PNGs das partes gravados por `decompose-parts`. */
+async function loadPartsFromArtifacts(context) {
+  const manifestPath = upstreamOutputs(context, (relative) => /layers\.json$/i.test(relative))[0];
+  if (!manifestPath) return null;
+  const manifest = await readJsonArtifact(context, manifestPath);
+  if (!manifest?.layers?.length) return null;
+  const base = manifestPath.split('/').slice(0, -1).join('/');
+  const parts = [];
+  for (const layer of manifest.layers) {
+    const imagePath = layer.path ? (base ? `${base}/${layer.path.split('/').pop()}` : layer.path) : null;
+    const image = imagePath ? await readImageArtifact(context, imagePath) : null;
+    if (!image) continue;
+    parts.push({ ...layer, rgba: image.rgba, width: image.width, height: image.height });
+  }
+  return parts.length ? parts : null;
+}
+
+/** Lê o `rig.json` gravado por `build-rig`. */
+async function loadRigFromArtifacts(context) {
+  const rigPath = upstreamOutputs(context, (relative) => /(^|\/)rig[^/]*\.json$/i.test(relative))[0];
+  if (!rigPath) return null;
+  const rig = await readJsonArtifact(context, rigPath);
+  return rig?.bones?.length ? rig : null;
+}
+
+/** Lê o `animations.json` gravado por `animate`. */
+async function loadAnimationsFromArtifacts(context) {
+  const animationsPath = upstreamOutputs(context, (relative) => /animations?[^/]*\.json$/i.test(relative))[0];
+  if (!animationsPath) return null;
+  const document = await readJsonArtifact(context, animationsPath);
+  return document?.animations?.length ? document.animations : null;
+}
+
+/** Lê as imagens das partes gravadas, indexadas por id (para `render`). */
+async function loadPartImagesFromArtifacts(context) {
+  const parts = await loadPartsFromArtifacts(context);
+  if (!parts) return null;
+  return Object.fromEntries(parts.map((part) => [part.id, { width: part.width, height: part.height, rgba: part.rgba }]));
 }
 
 function internalDiscover(adapterId, detail) {
@@ -88,7 +175,7 @@ export const LOCAL_IMAGE_OPS_MANIFEST = Object.freeze({
   cost: { status: 'not-applicable', note: 'Código interno, sem custo externo.' },
   backends: [{ kind: 'local-process', validated: true, note: 'Validado por tests/imaging-smoke.mjs neste checkout.' }],
   health: { status: 'available', detail: 'Módulo interno presente no checkout.' },
-  evidence: { tests: ['tests/imaging-smoke.mjs', 'tests/adapter-sdk-smoke.mjs'], validatedVersions: [INTERNAL_VERSION], executedOn: 'ambiente de desenvolvimento', state: 'executed', note: 'Executado de verdade em testes: entrada e saída comparadas pixel a pixel.' },
+  evidence: { tests: ['tests/imaging-smoke.mjs', 'tests/adapter-sdk-smoke.mjs', 'tests/production-pipeline-smoke.mjs', 'tests/studio-service-smoke.mjs'], validatedVersions: [INTERNAL_VERSION], executedOn: 'ambiente de desenvolvimento', state: 'executed', note: 'Executado de verdade em testes: entrada e saída comparadas pixel a pixel.' },
   protectedActions: ['install_software', 'download_models_or_weights', 'cost', 'send_data'],
 });
 
@@ -97,7 +184,9 @@ export function createLocalImageOpsAdapter() {
     discover: async () => internalDiscover('local-image-ops', 'Módulo interno de operações de imagem presente no checkout.'),
     async execute(context = {}) {
       const emit = requireEmit(context, 'local-image-ops');
-      const { op = 'chroma-key', params = {}, image = null, layers = null, frames = null } = context;
+      const params = { ...(context.params ?? {}) };
+      const op = context.op ?? params.op ?? 'chroma-key';
+      const { image = null, layers = null, frames = null } = context;
       if (!image && !layers && !frames) throw adapterError('ADAPTER_MISCONFIGURED', 'local-image-ops precisa de image, layers ou frames no contexto.', { adapterId: 'local-image-ops' });
       context.signal?.throwIfAborted?.();
 
@@ -161,6 +250,12 @@ export function createLocalImageOpsAdapter() {
         metrics.parts = composed.length;
         metrics.needsReview = true;
         metrics.discardedNoise = decomposition.discardedNoise;
+        // Fluxo entre passos do mesmo run: o rig 2D lê as partes daqui.
+        if (context.state) {
+          context.state.parts = composed;
+          context.state.partImages = Object.fromEntries(composed.map((part) => [part.id, { width: part.width, height: part.height, rgba: part.rgba }]));
+          context.state.decomposition = { needsReview: true, discardedNoise: decomposition.discardedNoise };
+        }
       } else if (op === 'pack-atlas') {
         const atlas = packAtlas(frames, params);
         outputs.push(await emit(params.output ?? 'atlas.png', encodePngRgba(atlas.image.rgba, atlas.image.width, atlas.image.height)));
@@ -210,9 +305,9 @@ export const RIG2D_SOFTWARE_MANIFEST = Object.freeze({
   logs: { redacted: true, maxEntries: 1200 },
   provenance: { source: 'shared/rig2d/core.mjs + shared/vfx/core.mjs', tool: 'Lia Forge (interno)', version: INTERNAL_VERSION, license: 'mesma licença do repositório', outputRights: 'Derivado das partes fornecidas pelo usuário; VFX procedural é gerado pelo próprio produto' },
   cost: { status: 'not-applicable', note: 'Código interno, sem custo externo.' },
-  backends: [{ kind: 'local-process', validated: true, note: 'Validado por tests/rig2d-smoke.mjs e tests/vfx-smoke.mjs.' }],
+  backends: [{ kind: 'local-process', validated: true, note: 'Validado por tests/rig2d-vfx-smoke.mjs (rig, poses, frames) e executado em tests/production-pipeline-smoke.mjs e tests/studio-service-smoke.mjs.' }],
   health: { status: 'available', detail: 'Renderer interno presente no checkout.' },
-  evidence: { tests: ['tests/rig2d-smoke.mjs', 'tests/vfx-smoke.mjs', 'tests/adapter-sdk-smoke.mjs'], validatedVersions: [INTERNAL_VERSION], executedOn: 'ambiente de desenvolvimento', state: 'executed', note: 'Executado de verdade: rig, poses, frames e atlas produzidos e medidos em teste.' },
+  evidence: { tests: ['tests/rig2d-vfx-smoke.mjs', 'tests/adapter-sdk-smoke.mjs', 'tests/production-pipeline-smoke.mjs', 'tests/studio-service-smoke.mjs'], validatedVersions: [INTERNAL_VERSION], executedOn: 'ambiente de desenvolvimento', state: 'executed', note: 'Executado de verdade: rig, poses, frames e atlas produzidos e medidos em teste.' },
   protectedActions: ['install_software', 'download_models_or_weights', 'cost', 'send_data'],
 });
 
@@ -233,21 +328,28 @@ export function createRig2dSoftwareAdapter() {
     discover: async () => internalDiscover('rig2d-software', 'Renderer 2D interno presente no checkout (rig, animação, VFX, atlas).'),
     async execute(context = {}) {
       const emit = requireEmit(context, 'rig2d-software');
-      const { task, params = {}, parts = null, partImages = null, rig = null, animations = null } = context;
+      const params = { ...(context.params ?? {}) };
+      const task = context.task ?? params.task;
+      const { parts = null, partImages = null, rig = null, animations = null } = context;
       context.signal?.throwIfAborted?.();
       const outputs = [];
       const metrics = {};
 
       if (task === 'estimate-skeleton' || task === 'build-rig') {
-        if (!parts?.length) throw adapterError('ADAPTER_MISCONFIGURED', 'build-rig precisa das partes separadas (saída de local-image-ops decompose-parts).', { adapterId: 'rig2d-software' });
-        const skeleton = estimateSkeleton(parts, params.canvas ?? undefined);
-        const built = createRig({ parts, skeleton, id: params.rigId ?? 'rig-2d' });
+        const sourceParts = parts ?? context.state?.parts ?? await loadPartsFromArtifacts(context);
+        if (!sourceParts?.length) throw adapterError('ADAPTER_MISCONFIGURED', 'build-rig precisa das partes separadas (saída de local-image-ops decompose-parts).', { adapterId: 'rig2d-software' });
+        const skeleton = estimateSkeleton(sourceParts, params.canvas ?? undefined);
+        const built = createRig({ parts: sourceParts, skeleton, id: params.rigId ?? 'rig-2d' });
         outputs.push(await emit(params.output ?? 'rig.json', Buffer.from(`${JSON.stringify({ ...built, bones: built.bones, parts: built.parts }, null, 2)}\n`, 'utf8')));
         metrics.bones = built.bones.length;
         metrics.needsReview = true;
         const validation = runValidator('rig2d-structural', { rig: built });
         if (!validation.ok) throw adapterError('ADAPTER_OUTPUT_INVALID', `Rig produzido é inválido: ${validation.problems.join('; ')}`, { adapterId: 'rig2d-software' });
         metrics.validation = validation.metrics;
+        if (context.state) {
+          context.state.rig = built;
+          context.state.partImages = context.state.partImages ?? Object.fromEntries(sourceParts.map((part) => [part.id, { width: part.width, height: part.height, rgba: part.rgba }]));
+        }
         const note = task === 'estimate-skeleton'
           ? `Esqueleto estimado com ${built.bones.length} ossos. Revise as juntas antes de animar: a estimação é heurística.`
           : `Rig 2D construído com ${built.bones.length} ossos e ${built.parts.length} partes; juntas marcadas para revisão humana.`;
@@ -255,7 +357,7 @@ export function createRig2dSoftwareAdapter() {
       }
 
       if (task === 'animate') {
-        const targetRig = rig ?? context.builtRig;
+        const targetRig = rig ?? context.state?.rig ?? context.builtRig ?? await loadRigFromArtifacts(context);
         if (!targetRig?.bones) throw adapterError('ADAPTER_MISCONFIGURED', 'animate precisa de um rig (saída de build-rig).', { adapterId: 'rig2d-software' });
         const actions = (params.actions ?? context.actions ?? 'idle,walk').split(',').map((item) => item.trim()).filter(Boolean);
         const produced = actions.map((name) => createPresetAnimation(name, { bones: targetRig.bones, amplitudeScale: params.amplitudeScale ?? 1 }));
@@ -263,15 +365,16 @@ export function createRig2dSoftwareAdapter() {
         const validation = runValidator('animation-loop', { animations: produced });
         if (!validation.ok) throw adapterError('ADAPTER_OUTPUT_INVALID', `Animações inválidas: ${validation.problems.join('; ')}`, { adapterId: 'rig2d-software' });
         metrics.animations = produced.map((item) => ({ name: item.name, keyframes: item.keyframes.length, durationMs: item.durationMs }));
+        if (context.state) context.state.animations = produced;
         return { outputs, metrics, execution: { kind: 'process', provider: 'lia-forge-internal', task }, note: `${produced.length} ação(ões) gerada(s) por keyframes: ${produced.map((item) => item.name).join(', ')}. Edite os keyframes antes de exportar.` };
       }
 
       if (task === 'render') {
-        const targetRig = rig ?? context.builtRig;
-        const images = partImages ?? context.partImages;
+        const targetRig = rig ?? context.state?.rig ?? context.builtRig ?? await loadRigFromArtifacts(context);
+        const images = partImages ?? context.state?.partImages ?? context.partImages ?? await loadPartImagesFromArtifacts(context);
         if (!targetRig?.bones || !images) throw adapterError('ADAPTER_MISCONFIGURED', 'render precisa de rig e das imagens das partes.', { adapterId: 'rig2d-software' });
         const frameSize = parseFrameSize(params.frameSize ?? context.frameSize);
-        const list = animations ?? context.animations ?? [createPresetAnimation('idle', { bones: targetRig.bones })];
+        const list = animations ?? context.state?.animations ?? context.animations ?? await loadAnimationsFromArtifacts(context) ?? [createPresetAnimation('idle', { bones: targetRig.bones })];
         const framesPerAction = params.framesPerAction ?? 8;
         const width = frameSize?.width ?? targetRig.canvas.width;
         const height = frameSize?.height ?? targetRig.canvas.height;
@@ -350,7 +453,7 @@ export const GLB_INSPECT_MANIFEST = Object.freeze({
   cost: { status: 'not-applicable' },
   backends: [{ kind: 'local-process', validated: true, note: 'Validado por tests/glb-inspect-smoke.mjs.' }],
   health: { status: 'available', detail: 'Inspetor GLB interno presente no checkout.' },
-  evidence: { tests: ['tests/glb-inspect-smoke.mjs'], validatedVersions: [INTERNAL_VERSION], executedOn: 'ambiente de desenvolvimento', state: 'executed', note: 'Executado sobre GLB de fixture construído byte a byte no teste.' },
+  evidence: { tests: ['tests/glb-inspect-smoke.mjs', 'tests/orchestrator-engine-smoke.mjs'], validatedVersions: [INTERNAL_VERSION], executedOn: 'ambiente de desenvolvimento', state: 'executed', note: 'Executado sobre GLB de fixture construído byte a byte no teste.' },
   protectedActions: ['install_software', 'download_models_or_weights', 'cost', 'send_data'],
 });
 
@@ -359,9 +462,10 @@ export function createGlbInspectAdapter() {
     discover: async () => internalDiscover('glb-inspect', 'Inspetor GLB interno presente no checkout.'),
     async execute(context = {}) {
       const emit = requireEmit(context, 'glb-inspect');
+      const params = { ...(context.params ?? {}) };
       const bytes = context.bytes ?? context.model?.bytes;
       if (!bytes) throw adapterError('ADAPTER_MISCONFIGURED', 'glb-inspect precisa dos bytes do modelo.', { adapterId: 'glb-inspect' });
-      const maxBytes = context.params?.maxBytes ?? 256 * 1024 * 1024;
+      const maxBytes = params.maxBytes ?? 256 * 1024 * 1024;
       if (bytes.length > maxBytes) throw adapterError('ADAPTER_OUTPUT_INVALID', `GLB de ${(bytes.length / 1024 / 1024).toFixed(1)} MB excede o limite de inspeção de ${(maxBytes / 1024 / 1024).toFixed(0)} MB.`, { adapterId: 'glb-inspect' });
       let info;
       try {
@@ -369,7 +473,7 @@ export function createGlbInspectAdapter() {
       } catch (error) {
         throw adapterError('ADAPTER_OUTPUT_INVALID', error.message, { adapterId: 'glb-inspect' });
       }
-      const outputs = [await emit(context.params?.output ?? 'model-report.json', Buffer.from(`${JSON.stringify(info, null, 2)}\n`, 'utf8'))];
+      const outputs = [await emit(params.output ?? 'model-report.json', Buffer.from(`${JSON.stringify(info, null, 2)}\n`, 'utf8'))];
       return {
         outputs,
         metrics: { meshCount: info.meshCount, triangleCount: info.triangleCount, animations: info.animationCount, skinned: info.skinned, byteLength: info.byteLength },
@@ -403,9 +507,9 @@ export const EXPORT_PACKAGE_MANIFEST = Object.freeze({
   logs: { redacted: true, maxEntries: 1200 },
   provenance: { source: 'shared/destinations/profiles.mjs', tool: 'Lia Forge (interno)', version: INTERNAL_VERSION, license: 'mesma licença do repositório', outputRights: 'Direitos dos artefatos permanecem com o usuário; perfis de destino não transferem licença' },
   cost: { status: 'not-applicable' },
-  backends: [{ kind: 'local-process', validated: true, note: 'Validado por tests/destinations-smoke.mjs.' }],
+  backends: [{ kind: 'local-process', validated: true, note: 'Validado por tests/preflight-destinations-smoke.mjs (perfis) e executado em tests/production-pipeline-smoke.mjs e tests/studio-service-smoke.mjs (passo de entrega).' }],
   health: { status: 'available', detail: 'Perfis de destino presentes no checkout.' },
-  evidence: { tests: ['tests/destinations-smoke.mjs'], validatedVersions: [INTERNAL_VERSION], executedOn: 'ambiente de desenvolvimento', state: 'executed', note: 'Executado em teste; nenhum import em engine de terceiros foi feito (não verificado no destino).' },
+  evidence: { tests: ['tests/preflight-destinations-smoke.mjs', 'tests/production-pipeline-smoke.mjs', 'tests/studio-service-smoke.mjs'], validatedVersions: [INTERNAL_VERSION], executedOn: 'ambiente de desenvolvimento', state: 'executed', note: 'Executado em teste; nenhum import em engine de terceiros foi feito (não verificado no destino).' },
   protectedActions: ['install_software', 'download_models_or_weights', 'cost', 'send_data'],
 });
 
@@ -415,16 +519,47 @@ export function createExportPackageAdapter({ hash }) {
     discover: async () => internalDiscover('export-package', `Perfis de destino disponíveis: ${listDestinations().map((item) => item.id).join(', ')}.`),
     async execute(context = {}) {
       const emit = requireEmit(context, 'export-package');
-      const destinationId = context.destination ?? context.params?.destination;
-      const artifacts = context.artifacts ?? [];
+      const params = { ...(context.params ?? {}) };
+      const destinationId = context.destination ?? params.destination;
+      let artifacts = context.artifacts ?? [];
+      // Sem lista explícita, exporta o que os passos anteriores produziram no
+      // run (lido pelo `readArtifact` injetado, confinado à pasta do run).
+      if (!artifacts.length && typeof context.readArtifact === 'function') {
+        const seen = new Set();
+        const sources = { ...(context.runOutputs ?? {}), ...(context.inputsById ?? {}) };
+        for (const [stepId, input] of Object.entries(sources)) {
+          for (const relative of input.outputs ?? []) {
+            if (seen.has(relative)) continue;
+            seen.add(relative);
+            const bytes = await context.readArtifact(relative);
+            if (!bytes) continue;
+            artifacts.push({
+              id: `${stepId}:${path.basename(relative)}`,
+              format: path.extname(relative).slice(1).toLowerCase() || 'bin',
+              role: stepId,
+              relativePath: relative,
+              bytes,
+            });
+          }
+        }
+      }
       if (!destinationId) throw adapterError('ADAPTER_MISCONFIGURED', 'export-package precisa do destino.', { adapterId: 'export-package' });
-      const compatibility = checkDestinationCompatibility({ destinationId, artifacts });
+      let compatibility = checkDestinationCompatibility({ destinationId, artifacts });
+      // Coleta automática: se o destino não aceitar algum formato intermediário
+      // (ex.: JSON de camadas no Godot), exporta só os artefatos aceitos.
+      if (!compatibility.compatible && !(context.artifacts ?? []).length) {
+        const accepted = artifacts.filter((artifact) => checkDestinationCompatibility({ destinationId, artifacts: [artifact] }).compatible);
+        if (accepted.length) {
+          artifacts = accepted;
+          compatibility = checkDestinationCompatibility({ destinationId, artifacts });
+        }
+      }
       if (!compatibility.compatible) {
         throw adapterError('ADAPTER_OUTPUT_INVALID', `Exportação para ${compatibility.label} bloqueada: ${[...compatibility.blockers, ...compatibility.conversionsNeeded.map((item) => `converter ${item.from}→${item.to} (${item.reason})`)].join('; ')}`, { adapterId: 'export-package', compatibility });
       }
       const bundle = buildExportBundle({ destinationId, artifacts, hash, asset: context.asset ?? null, workflowRunId: context.workflowRunId ?? null });
-      const outputs = [await emit(context.params?.output ?? `export/${destinationId}/manifest.json`, Buffer.from(`${JSON.stringify(bundle, null, 2)}\n`, 'utf8'))];
-      if (context.params?.includeSequence && context.manifest?.frames) {
+      const outputs = [await emit(params.output ?? `export/${destinationId}/manifest.json`, Buffer.from(`${JSON.stringify(bundle, null, 2)}\n`, 'utf8'))];
+      if (params.includeSequence && context.manifest?.frames) {
         const adapted = adaptSpritesheetManifestForDestination({ manifest: context.manifest, destinationId });
         outputs.push(await emit(`export/${destinationId}/frames.json`, Buffer.from(`${JSON.stringify(adapted, null, 2)}\n`, 'utf8')));
       }

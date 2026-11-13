@@ -5,8 +5,11 @@
  * roda tanto no processo principal quanto no Studio. Não decodifica pixels:
  * confere assinatura, sequência de chunks, CRC, IHDR e presença de IDAT/IEND.
  *
- * Substitui a lógica duplicada de `electron/png-validation.cjs` como fonte
- * única de verdade; o arquivo CJS continua existindo e agora delega para cá.
+ * Fonte única de verdade da validação estrutural: `electron/png-validation.cjs`
+ * é uma casca que delega para cá (via `require` de módulo ES, Node >= 22.12, o
+ * mínimo declarado em `engines.node`), e `shared/qa/png-codec.mjs` usa
+ * `parsePng` para decodificar pixels. A cópia duplicada que existia no processo
+ * principal foi removida — mesma regra, um lugar só.
  */
 
 const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];

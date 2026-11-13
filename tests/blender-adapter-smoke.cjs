@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
-const { makePng } = require('./png-fixtures.cjs');
+const { makePng, makeSpritesheetFixture } = require('./png-fixtures.cjs');
 const {
   buildBlenderSpritesheetArgs,
   candidateModelPaths,
@@ -84,13 +84,38 @@ async function main() {
       height: 48,
     }))),
   };
+  const contractSheet = makeSpritesheetFixture();
   assert.deepEqual(validateSpritesheetFiles({
-    pngBuffer: makePng(384, 144),
+    pngBuffer: contractSheet,
     metadata: acceptanceMetadata,
     frameSize: { width: 48, height: 48 },
     assetType: 'character',
     animations: acceptanceAnimations,
   }), { sheetWidth: 384, sheetHeight: 144, frameCount: 24 });
+
+  // Guarda da lacuna G8 no caminho legado: validação de estrutura sozinha aceita
+  // um atlas 100% transparente; a validação de conteúdo (shared/qa/png-codec)
+  // recusa. As duas precisam existir na produção.
+  const { validatePngContent, analyzePngContent } = require('../shared/qa/png-codec.mjs');
+  const blankSheet = makePng(384, 144);
+  assert.deepEqual(validateSpritesheetFiles({
+    pngBuffer: blankSheet,
+    metadata: acceptanceMetadata,
+    frameSize: { width: 48, height: 48 },
+    assetType: 'character',
+    animations: acceptanceAnimations,
+  }), { sheetWidth: 384, sheetHeight: 144, frameCount: 24 }, 'A validação estrutural não vê conteúdo — por isso ela não basta.');
+  assert.equal(analyzePngContent(blankSheet).blank, true, 'O atlas transparente é medido como em branco.');
+  assert.throws(
+    () => validatePngContent(blankSheet, { grid: { columns: 8, rows: 3 }, label: 'Atlas transparente' }),
+    (error) => error.code === 'ADAPTER_OUTPUT_INVALID',
+    'A validação de conteúdo recusa o atlas em branco.',
+  );
+  const contractAnalysis = analyzePngContent(contractSheet, { grid: { columns: 8, rows: 3 } });
+  assert.equal(contractAnalysis.blank, false, 'A fixture do contrato tem conteúdo real.');
+  assert.equal(contractAnalysis.emptyCells, 0, 'Nenhuma célula do atlas 8×3 fica vazia.');
+  assert.ok(contractAnalysis.uniqueColors >= 2, `Atlas com várias cores (${contractAnalysis.uniqueColors}).`);
+  validatePngContent(contractSheet, { grid: { columns: 8, rows: 3 }, label: 'Atlas do contrato' });
   const itemMetadata = {
     ...metadata,
     asset: 'bronze-hammer',
