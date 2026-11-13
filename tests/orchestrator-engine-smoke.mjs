@@ -122,9 +122,42 @@ const objectPlan = planWorkflow({ workflowId: '3d-object-render', hub, registry,
 assert.equal(objectPlan.blocked, true);
 assert.equal(objectPlan.steps[0].adapter, 'glb-inspect', 'inspeção GLB é interna e funciona sem Blender');
 assert.equal(objectPlan.steps[1].adapter, null);
-assert.match(objectPlan.blockedSteps[0].reason, /render3d.frame|Nenhum candidato/);
+// Duas razões distintas de bloqueio, cada uma nomeada: falta o modelo do usuário
+// (nada é baixado) e falta o Blender para renderizar.
+const inspectBlock = objectPlan.blockedSteps.find((item) => item.id === 'inspect');
+const renderBlock = objectPlan.blockedSteps.find((item) => item.id === 'render');
+assert.match(inspectBlock.reason, /model/, 'o passo de inspeção pede o modelo do usuário');
+assert.match(renderBlock.reason, /render3d.frame|Nenhum candidato/);
+assert.deepEqual(
+  objectPlan.pendingInputs.map((item) => item.param),
+  ['model'],
+  'o plano declara a entrada pendente antes de executar',
+);
+assert.equal(objectPlan.steps[0].blockedReason !== null, true, 'passo bloqueado pelo plano carrega o motivo');
+// Com o modelo informado, o passo de inspeção deixa de estar bloqueado no plano.
+const withModel = planWorkflow({ workflowId: '3d-object-render', hub, registry, destination: 'godot-4', options: { model: 'input/modelo.glb' } });
+assert.equal(withModel.pendingInputs.length, 0, 'informar o modelo remove a pendência de entrada');
+assert.equal(withModel.steps[0].blockedReason, null);
+assert.equal(withModel.blocked, true, 'o render continua bloqueado: Blender não está instalado');
+assert.match(withModel.blockedSteps[0].reason, /render3d.frame|Nenhum candidato/);
 const conceptWorkflow = workflows.find((workflow) => workflow.id === '2d-art-concept');
 assert.equal(conceptWorkflow.executableNow, false, 'conceito 2D depende de ComfyUI, que não está rodando');
+// 2d-animation reutiliza um rig revisado: sem o run de origem o plano diz o que
+// falta, em vez de falhar no meio do pipeline.
+const animationWorkflow = workflows.find((workflow) => workflow.id === '2d-animation');
+assert.deepEqual(
+  animationWorkflow.needsInput.map((item) => item.kind),
+  ['priorRun'],
+  'a lista de workflows declara que 2d-animation precisa de um run de origem',
+);
+const animationPlan = planWorkflow({ workflowId: '2d-animation', hub, registry, destination: 'godot-4' });
+assert.equal(animationPlan.blocked, true);
+assert.match(animationPlan.blockedSteps[0].reason, /run de origem/);
+assert.equal(animationPlan.userActions[0].canBeAutomated, false, 'escolher o run de origem é decisão humana');
+const animationReady = planWorkflow({ workflowId: '2d-animation', hub, registry, destination: 'godot-4', options: { fromRun: 'run-origem' } });
+assert.equal(animationReady.blocked, false, 'com o run de origem informado, o plano fica executável');
+assert.deepEqual(animationReady.steps.map((step) => step.id), ['rig', 'animate', 'render', 'deliver']);
+
 const humanoid = workflows.find((workflow) => workflow.id === '3d-character-spritesheet');
 assert.equal(humanoid.executableNow, false);
 assert.ok(humanoid.blocked >= 2, 'geração 3D e auto-rig precisam aparecer bloqueados');

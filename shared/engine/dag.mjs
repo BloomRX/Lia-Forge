@@ -39,12 +39,17 @@ function assertStep(step, index) {
   if (typeof step.id !== 'string' || !ID_PATTERN.test(step.id)) {
     throw new DagError(`steps[${index}].id: deve ser um id estável ([a-z0-9][a-z0-9._-]*)`, { index });
   }
-  if (typeof step.adapter !== 'string' || !step.adapter.trim()) {
-    throw new DagError(`steps[${index}].adapter: adapter obrigatório`, { id: step.id });
+  // Passo que o Orchestrador bloqueou (ferramenta ausente, licença, custo não
+  // autorizado, entrada humana pendente) não tem adapter: nada pode executá-lo
+  // ainda. O DAG aceita e o engine o mantém `blocked` com o motivo declarado —
+  // transformar isso em erro de plano esconderia a razão real de quem usa.
+  const blockedByPlan = typeof step.blockedReason === 'string' && step.blockedReason.trim().length > 0;
+  if (!blockedByPlan && (typeof step.adapter !== 'string' || !step.adapter.trim())) {
+    throw new DagError(`steps[${index}].adapter: adapter obrigatório (ou declare blockedReason)`, { id: step.id });
   }
   const dependsOn = step.dependsOn ?? [];
   if (!Array.isArray(dependsOn)) throw new DagError(`steps[${index}].dependsOn: deve ser uma lista`, { id: step.id });
-  return { ...step, dependsOn: [...dependsOn] };
+  return { ...step, adapter: step.adapter ?? null, dependsOn: [...dependsOn] };
 }
 
 /**

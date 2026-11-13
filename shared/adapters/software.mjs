@@ -38,8 +38,7 @@ import { createModularRig, createPresetAnimation, createRig, estimateSkeleton, r
 import { generateVfxAtlas, generateVfxFrames, VFX_PRESETS } from '../vfx/core.mjs';
 import { inspectGlb, summarizeGlb } from '../model3d/glb.mjs';
 import { buildExportBundle, checkDestinationCompatibility, adaptSpritesheetManifestForDestination, listDestinations } from '../destinations/profiles.mjs';
-import { decodePng, encodePngRgba } from '../qa/png-codec.mjs';
-import { validatePngContent } from '../qa/png-codec.mjs';
+import { analyzePngContent, decodePng, encodePngRgba, validatePngContent } from '../qa/png-codec.mjs';
 import { runValidator } from '../qa/validators.mjs';
 
 const INTERNAL_VERSION = '1.0.0';
@@ -111,6 +110,13 @@ async function loadPartsFromArtifacts(context) {
     parts.push({ ...layer, rgba: image.rgba, width: image.width, height: image.height });
   }
   return parts.length ? parts : null;
+}
+
+/** Lê o primeiro PNG gravado por passos anteriores (entrada implícita). */
+async function loadImageFromArtifacts(context) {
+  const imagePath = upstreamOutputs(context, (relative) => /\.(png|jpe?g|webp)$/i.test(relative))[0];
+  if (!imagePath) return null;
+  return readImageArtifact(context, imagePath);
 }
 
 /** Lê o `rig.json` gravado por `build-rig`. */
@@ -186,12 +192,25 @@ export function createLocalImageOpsAdapter() {
       const emit = requireEmit(context, 'local-image-ops');
       const params = { ...(context.params ?? {}) };
       const op = context.op ?? params.op ?? 'chroma-key';
-      const { image = null, layers = null, frames = null } = context;
-      if (!image && !layers && !frames) throw adapterError('ADAPTER_MISCONFIGURED', 'local-image-ops precisa de image, layers ou frames no contexto.', { adapterId: 'local-image-ops' });
+      let { image = null, layers = null, frames = null } = context;
       context.signal?.throwIfAborted?.();
 
       const outputs = [];
       const metrics = {};
+      let layersPayload = null;
+      let manifestPayload = null;
+
+      // Dentro de um workflow a entrada normal é o artefato do passo anterior;
+      // exigir que o hospedeiro carregue tudo em memória tornaria o plano
+      // incapaz de retomar de um checkpoint (onde só existem arquivos).
+      const needsImage = !['pack-atlas', 'compose'].includes(op) || op === 'compose';
+      if (needsImage && !image && typeof context.readArtifact === 'function') {
+        image = await loadImageFromArtifacts(context);
+      }
+      if (!image && !layers && !frames && op !== 'pack-atlas') {
+        throw adapterError('ADAPTER_MISCONFIGURED', 'local-image-ops precisa de image, layers ou frames no contexto (ou de um PNG gravado por passo anterior).', { adapterId: 'local-image-ops' });
+      }
+
       if (op === 'crop') {
         const result = cropImage(image, params.x ?? 0, params.y ?? 0, params.width ?? image.width, params.height ?? image.height);
         outputs.push(await emit(params.output ?? 'image-crop.png', encodePngRgba(result.rgba, result.width, result.height)));
@@ -216,9 +235,22 @@ export function createLocalImageOpsAdapter() {
         const result = outlineImage(image, params);
         outputs.push(await emit(params.output ?? 'image-outlined.png', encodePngRgba(result.rgba, result.width, result.height)));
       } else if (op === 'compose') {
-        const result = composeLayers(layers ?? [image], params);
+        let sourceLayers = layers;
+        if (!sourceLayers?.length && typeof context.readArtifact === 'function') {
+          const images = [];
+          for (const relative of upstreamOutputs(context, (value) => /\.(png|jpe?g|webp)$/i.test(value))) {
+            const decoded = await readImageArtifact(context, relative);
+            if (decoded) images.push({ ...decoded, x: 0, y: 0, id: relative.split('/').pop() });
+          }
+          if (images.length) sourceLayers = images;
+        }
+        if (!sourceLayers?.length) sourceLayers = image ? [image] : null;
+        if (!sourceLayers?.length) {
+          throw adapterError('ADAPTER_MISCONFIGURED', 'compose precisa de camadas (no contexto, em image ou gravadas por passos anteriores).', { adapterId: 'local-image-ops' });
+        }
+        const result = composeLayers(sourceLayers, params);
         outputs.push(await emit(params.output ?? 'composed.png', encodePngRgba(result.rgba, result.width, result.height)));
-        metrics.layers = (layers ?? [image]).length;
+        metrics.layers = sourceLayers.length;
         metrics.bounds = alphaBounds(result);
       } else if (op === 'decompose-parts') {
         const decomposition = decomposeParts(image, params);
@@ -250,6 +282,15 @@ export function createLocalImageOpsAdapter() {
         metrics.parts = composed.length;
         metrics.needsReview = true;
         metrics.discardedNoise = decomposition.discardedNoise;
+        // payload do validador `layers-integrity`: referencia os PNGs gravados
+        layersPayload = composed.map((part) => ({
+          id: part.id,
+          path: `parts/${part.id}.png`,
+          width: part.width,
+          height: part.height,
+          x: part.x,
+          y: part.y,
+        }));
         // Fluxo entre passos do mesmo run: o rig 2D lê as partes daqui.
         if (context.state) {
           context.state.parts = composed;
@@ -257,9 +298,40 @@ export function createLocalImageOpsAdapter() {
           context.state.decomposition = { needsReview: true, discardedNoise: decomposition.discardedNoise };
         }
       } else if (op === 'pack-atlas') {
-        const atlas = packAtlas(frames, params);
+        let sourceFrames = frames;
+        if (!sourceFrames?.length && typeof context.readArtifact === 'function') {
+          const images = [];
+          for (const relative of upstreamOutputs(context, (value) => /\.(png|jpe?g|webp)$/i.test(value))) {
+            const decoded = await readImageArtifact(context, relative);
+            if (decoded) images.push({ ...decoded, id: relative.split('/').pop() });
+          }
+          if (images.length) sourceFrames = images;
+        }
+        if (!sourceFrames?.length) {
+          throw adapterError('ADAPTER_MISCONFIGURED', 'pack-atlas precisa de frames (no contexto ou gravados por passos anteriores).', { adapterId: 'local-image-ops' });
+        }
+        const atlas = packAtlas(sourceFrames, params);
         outputs.push(await emit(params.output ?? 'atlas.png', encodePngRgba(atlas.image.rgba, atlas.image.width, atlas.image.height)));
         metrics.grid = { columns: atlas.columns, rows: atlas.rows, frameWidth: atlas.frameWidth, frameHeight: atlas.frameHeight };
+        manifestPayload = {
+          schemaVersion: 1,
+          generator: 'local-image-ops/pack-atlas',
+          columns: atlas.columns,
+          rows: atlas.rows,
+          frameWidth: atlas.frameWidth,
+          frameHeight: atlas.frameHeight,
+          sheetWidth: atlas.sheetWidth,
+          sheetHeight: atlas.sheetHeight,
+          frames: sourceFrames.map((frame, index) => ({
+            filename: frame.id ?? `frame-${String(index).padStart(2, '0')}`,
+            frame: index,
+            x: (index % atlas.columns) * atlas.frameWidth,
+            y: Math.floor(index / atlas.columns) * atlas.frameHeight,
+            width: atlas.frameWidth,
+            height: atlas.frameHeight,
+          })),
+        };
+        outputs.push(await emit(params.manifestOutput ?? 'atlas-manifest.json', Buffer.from(`${JSON.stringify(manifestPayload, null, 2)}\n`, 'utf8')));
         metrics.emptyCells = atlas.emptyCells;
       } else {
         throw adapterError('ADAPTER_MISCONFIGURED', `Operação desconhecida "${op}" em local-image-ops.`, { adapterId: 'local-image-ops' });
@@ -337,7 +409,9 @@ export function createRig2dSoftwareAdapter() {
 
       if (task === 'estimate-skeleton' || task === 'build-rig') {
         const sourceParts = parts ?? context.state?.parts ?? await loadPartsFromArtifacts(context);
-        if (!sourceParts?.length) throw adapterError('ADAPTER_MISCONFIGURED', 'build-rig precisa das partes separadas (saída de local-image-ops decompose-parts).', { adapterId: 'rig2d-software' });
+        if (!sourceParts?.length) {
+          throw adapterError('WORKFLOW_BLOCKED', 'build-rig precisa das partes separadas: execute antes "2d-character-parts" (com revisão aprovada) e reaproveite aquele run como entrada, ou envie uma imagem e rode a separação de partes.', { adapterId: 'rig2d-software' });
+        }
         const skeleton = estimateSkeleton(sourceParts, params.canvas ?? undefined);
         const built = createRig({ parts: sourceParts, skeleton, id: params.rigId ?? 'rig-2d' });
         outputs.push(await emit(params.output ?? 'rig.json', Buffer.from(`${JSON.stringify({ ...built, bones: built.bones, parts: built.parts }, null, 2)}\n`, 'utf8')));
@@ -358,7 +432,9 @@ export function createRig2dSoftwareAdapter() {
 
       if (task === 'animate') {
         const targetRig = rig ?? context.state?.rig ?? context.builtRig ?? await loadRigFromArtifacts(context);
-        if (!targetRig?.bones) throw adapterError('ADAPTER_MISCONFIGURED', 'animate precisa de um rig (saída de build-rig).', { adapterId: 'rig2d-software' });
+        if (!targetRig?.bones) {
+          throw adapterError('WORKFLOW_BLOCKED', 'animate precisa de um rig revisado: escolha um run anterior que tenha produzido rig.json (workflow "2d-character-parts" aprovado) ou execute antes o passo de construção de rig.', { adapterId: 'rig2d-software' });
+        }
         const actions = (params.actions ?? context.actions ?? 'idle,walk').split(',').map((item) => item.trim()).filter(Boolean);
         const produced = actions.map((name) => createPresetAnimation(name, { bones: targetRig.bones, amplitudeScale: params.amplitudeScale ?? 1 }));
         outputs.push(await emit(params.output ?? 'animations.json', Buffer.from(`${JSON.stringify({ schemaVersion: 1, animations: produced }, null, 2)}\n`, 'utf8')));
@@ -391,12 +467,37 @@ export function createRig2dSoftwareAdapter() {
         const columns = Math.min(allFrames.length, params.columns ?? 8);
         const rows = Math.ceil(allFrames.length / columns);
         const atlas = packAtlas(allFrames, { columns, rows });
-        outputs.push(await emit(params.output ?? 'spritesheet.png', encodePngRgba(atlas.image.rgba, atlas.image.width, atlas.image.height)));
-        const validation = validatePngContent(encodePngRgba(atlas.image.rgba, atlas.image.width, atlas.image.height), { grid: { columns, rows }, label: 'O atlas do renderer 2D', minUniqueColors: 1 });
+        const sheetBytes = encodePngRgba(atlas.image.rgba, atlas.image.width, atlas.image.height);
+        outputs.push(await emit(params.output ?? 'spritesheet.png', sheetBytes));
+        // O plano declara o validador `spritesheet-manifest` neste passo: sem o
+        // manifesto gravado, a validação só poderia ser pulada — e um atlas sem
+        // grade declarada não é importável em engine nenhuma.
+        const manifest = {
+          schemaVersion: 1,
+          generator: 'rig2d-software/render',
+          columns,
+          rows,
+          frameWidth: atlas.frameWidth,
+          frameHeight: atlas.frameHeight,
+          sheetWidth: atlas.sheetWidth,
+          sheetHeight: atlas.sheetHeight,
+          frames: frameNames.map((item, index) => ({
+            filename: `${item.animation}-${String(item.frame).padStart(2, '0')}.png`,
+            animation: item.animation,
+            frame: index,
+            x: (index % columns) * atlas.frameWidth,
+            y: Math.floor(index / columns) * atlas.frameHeight,
+            width: atlas.frameWidth,
+            height: atlas.frameHeight,
+          })),
+        };
+        outputs.push(await emit(params.manifestOutput ?? 'spritesheet-manifest.json', Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8')));
+        const validation = validatePngContent(sheetBytes, { grid: { columns, rows }, label: 'O atlas do renderer 2D', minUniqueColors: 1 });
         metrics.grid = { columns, rows, frameWidth: atlas.frameWidth, frameHeight: atlas.frameHeight };
         metrics.coverage = validation.coverage;
         metrics.frames = frameNames.length;
-        return { outputs, metrics, execution: { kind: 'process', provider: 'lia-forge-internal', task }, note: `Renderer interno produziu ${frameNames.length} frames em atlas ${atlas.sheetWidth}×${atlas.sheetHeight}px com ${(validation.coverage * 100).toFixed(1)}% de cobertura.` };
+        metrics.manifestFrames = manifest.frames.length;
+        return { outputs, metrics, manifest, execution: { kind: 'process', provider: 'lia-forge-internal', task }, note: `Renderer interno produziu ${frameNames.length} frames em atlas ${atlas.sheetWidth}×${atlas.sheetHeight}px com ${(validation.coverage * 100).toFixed(1)}% de cobertura e manifesto de grade.` };
       }
 
       if (task === 'render-vfx') {
@@ -415,18 +516,78 @@ export function createRig2dSoftwareAdapter() {
         return { outputs, metrics, execution: { kind: 'process', provider: 'lia-forge-internal', task }, note: `VFX procedural "${preset}" gerado com semente ${generated.seed}: ${generated.frameCount} frames, reprodução idêntica na mesma semente.` };
       }
 
+      if (task === 'pack-atlas') {
+        // Empacota imagens produzidas por passos anteriores em atlas + manifesto.
+        // Não exige rig: é o caminho de variações/retexture e de qualquer passo
+        // que só precisa organizar PNGs numa grade declarada.
+        let sourceFrames = context.frames ?? params.frames ?? null;
+        if (!sourceFrames?.length && typeof context.readArtifact === 'function') {
+          const images = [];
+          for (const relative of upstreamOutputs(context, (value) => /\.(png|jpe?g|webp)$/i.test(value))) {
+            const decoded = await readImageArtifact(context, relative);
+            if (decoded) images.push({ ...decoded, id: relative.split('/').pop() });
+          }
+          if (images.length) sourceFrames = images;
+        }
+        if (!sourceFrames?.length) {
+          throw adapterError('WORKFLOW_BLOCKED', 'pack-atlas não encontrou imagens para empacotar: execute antes um passo que gere PNGs (variação, render ou VFX).', { adapterId: 'rig2d-software' });
+        }
+        const columns = Math.min(sourceFrames.length, params.columns ?? 4);
+        const rows = Math.ceil(sourceFrames.length / columns);
+        const atlas = packAtlas(sourceFrames, { columns, rows, frameWidth: params.frameWidth ?? null, frameHeight: params.frameHeight ?? null });
+        const atlasBytes = encodePngRgba(atlas.image.rgba, atlas.image.width, atlas.image.height);
+        outputs.push(await emit(params.output ?? 'atlas.png', atlasBytes));
+        const manifest = {
+          schemaVersion: 1,
+          generator: 'rig2d-software/pack-atlas',
+          columns: atlas.columns,
+          rows: atlas.rows,
+          frameWidth: atlas.frameWidth,
+          frameHeight: atlas.frameHeight,
+          sheetWidth: atlas.sheetWidth,
+          sheetHeight: atlas.sheetHeight,
+          frames: sourceFrames.map((frame, index) => ({
+            filename: frame.id ?? `frame-${String(index).padStart(2, '0')}`,
+            frame: index,
+            x: (index % atlas.columns) * atlas.frameWidth,
+            y: Math.floor(index / atlas.columns) * atlas.frameHeight,
+            width: atlas.frameWidth,
+            height: atlas.frameHeight,
+          })),
+        };
+        outputs.push(await emit(params.manifestOutput ?? 'atlas-manifest.json', Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8')));
+        metrics.grid = { columns: atlas.columns, rows: atlas.rows, frameWidth: atlas.frameWidth, frameHeight: atlas.frameHeight };
+        metrics.frames = sourceFrames.length;
+        metrics.coverage = analyzePngContent(atlasBytes, { grid: { columns: atlas.columns, rows: atlas.rows } }).coverage;
+        return { outputs, metrics, manifest, execution: { kind: 'process', provider: 'lia-forge-internal', task }, note: `${sourceFrames.length} imagem(ns) empacotada(s) em atlas ${atlas.sheetWidth}×${atlas.sheetHeight}px com manifesto.` };
+      }
+
       if (task === 'modular-variants') {
-        const template = context.template ?? rig;
-        const slots = params.slots ?? context.slots;
-        if (!template || !slots) throw adapterError('ADAPTER_MISCONFIGURED', 'modular-variants precisa de template e slots.', { adapterId: 'rig2d-software' });
+        const template = context.template ?? rig ?? context.state?.rig ?? await loadRigFromArtifacts(context);
+        if (!template?.bones) {
+          throw adapterError('WORKFLOW_BLOCKED', 'modular-variants precisa do rig-template construído no passo anterior (build-rig).', { adapterId: 'rig2d-software' });
+        }
+        // Slots declarados pelo usuário prevalecem. Sem eles, cada peça do
+        // template é um slot intercambiável e existe uma variante `default` com
+        // as peças originais: nada é inventado, e a nota diz o que falta para
+        // ter skins alternativas de verdade.
+        const declaredSlots = params.slots ?? context.slots ?? null;
+        const slots = declaredSlots ?? {
+          default: Object.fromEntries(template.parts.map((part) => [part.id, part.id])),
+        };
         const modular = createModularRig({ template, slots });
         outputs.push(await emit(params.output ?? 'modular-variants.json', Buffer.from(`${JSON.stringify(modular, null, 2)}\n`, 'utf8')));
         metrics.variants = Object.keys(modular.variants);
+        metrics.slots = modular.slots;
+        metrics.slotsDerived = declaredSlots === null;
         metrics.sharedAnimations = true;
-        return { outputs, metrics, execution: { kind: 'process', provider: 'lia-forge-internal', task }, note: `${metrics.variants.length} variante(s) sobre o mesmo rig: animações compartilhadas, sem pipeline por variante.` };
+        const note = metrics.slotsDerived
+          ? `${metrics.variants.length} variante(s) sobre o mesmo rig, com ${metrics.slots.length} peça(s) marcadas como intercambiáveis. Nenhuma skin alternativa foi declarada: informe params.slots ({ variante: { peça: arquivo } }) para trocar as peças. Animações são compartilhadas, sem pipeline por variante.`
+          : `${metrics.variants.length} variante(s) sobre o mesmo rig: animações compartilhadas, sem pipeline por variante.`;
+        return { outputs, metrics, execution: { kind: 'process', provider: 'lia-forge-internal', task }, note };
       }
 
-      throw adapterError('ADAPTER_MISCONFIGURED', `task desconhecida "${task}" em rig2d-software.`, { adapterId: 'rig2d-software' });
+      throw adapterError('ADAPTER_MISCONFIGURED', `task desconhecida "${task ?? '(ausente)'}" em rig2d-software. Tasks válidas: estimate-skeleton, build-rig, animate, render, render-vfx, pack-atlas, modular-variants. Params recebidos: ${JSON.stringify(Object.keys(params))}.`, { adapterId: 'rig2d-software' });
     },
   });
 }
@@ -463,8 +624,18 @@ export function createGlbInspectAdapter() {
     async execute(context = {}) {
       const emit = requireEmit(context, 'glb-inspect');
       const params = { ...(context.params ?? {}) };
-      const bytes = context.bytes ?? context.model?.bytes;
-      if (!bytes) throw adapterError('ADAPTER_MISCONFIGURED', 'glb-inspect precisa dos bytes do modelo.', { adapterId: 'glb-inspect' });
+      let bytes = context.bytes ?? context.model?.bytes ?? null;
+      // Caminho relativo ao projeto (params.model): o modelo é do usuário, nada
+      // é baixado aqui.
+      if (!bytes && params.model && typeof context.readArtifact === 'function') {
+        bytes = await context.readArtifact(params.model);
+        if (!bytes) {
+          throw adapterError('WORKFLOW_BLOCKED', `glb-inspect: o modelo "${params.model}" não foi encontrado dentro do projeto. Coloque o arquivo .glb na pasta do projeto e informe o caminho relativo.`, { adapterId: 'glb-inspect' });
+        }
+      }
+      if (!bytes) {
+        throw adapterError('WORKFLOW_BLOCKED', 'glb-inspect precisa de um modelo 3D do usuário: informe params.model com o caminho de um .glb dentro do projeto (nenhum modelo é baixado automaticamente).', { adapterId: 'glb-inspect' });
+      }
       const maxBytes = params.maxBytes ?? 256 * 1024 * 1024;
       if (bytes.length > maxBytes) throw adapterError('ADAPTER_OUTPUT_INVALID', `GLB de ${(bytes.length / 1024 / 1024).toFixed(1)} MB excede o limite de inspeção de ${(maxBytes / 1024 / 1024).toFixed(0)} MB.`, { adapterId: 'glb-inspect' });
       let info;

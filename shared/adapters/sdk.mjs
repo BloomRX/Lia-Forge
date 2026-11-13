@@ -387,8 +387,12 @@ export function describeAdapter(manifest) {
     requirements: manifest.requirements,
     protectedActions: manifest.protectedActions,
     canExecute: manifest.class !== 'manual-editing',
-    needsAuthorization: manifest.class === 'remote-service'
-      || manifest.protectedActions.length > 0
+    // `protectedActions` lista o que o adapter se recusa a fazer sem autorização
+    // humana (instalar, baixar pesos, gastar, enviar dados) — não é um pedido de
+    // autorização para executar. Exigir autorização de um renderer local que não
+    // envia nada criaria pendências falsas no plano e na UI.
+    needsAuthorization: manifest.requiresAuthorization === true
+      || manifest.class === 'remote-service'
       || manifest.backends.some((backend) => !BACKEND_KINDS.slice(0, 5).includes(backend.kind)),
   });
 }

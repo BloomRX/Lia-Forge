@@ -415,3 +415,19 @@
 .forge-assistant p{margin:0;color:#b3a1b8;font-size:10.2px;line-height:1.62}
 @media (max-width:1180px){.forge-columns{grid-template-columns:minmax(0,1fr)}.forge-side{position:static}}
 @media (max-width:760px){.forge-page{padding:16px 14px 24px}.forge-header{flex-direction:column;align-items:flex-start}}
+
+/* Validações executadas por passo: o que o plano declara, o Studio mostra. */
+.forge-validations{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 0;padding:0;list-style:none}
+.forge-validations li{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.04);font-size:11px;color:#e6dcf5;max-width:100%}
+.forge-validations li code{font-size:10.5px;opacity:.85}
+.forge-validations li em{font-style:normal;opacity:.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:34ch}
+.forge-validations li.is-passed{border-color:rgba(94,234,212,.4);background:rgba(20,184,166,.12);color:#a7f3e4}
+.forge-validations li.is-skipped{border-color:rgba(250,204,21,.34);background:rgba(202,138,4,.12);color:#fde68a}
+.forge-validations li.is-failed{border-color:rgba(244,63,94,.45);background:rgba(190,18,60,.16);color:#fecdd3}
+/* Entradas que só o usuário pode fornecer. */
+.forge-note.is-pending{border-left:2px solid rgba(250,204,21,.55);padding-left:8px;color:#fde68a}
+.forge-pending-inputs{display:flex;flex-direction:column;gap:8px;margin:0 0 10px;padding:0;list-style:none}
+.forge-pending-inputs li{display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border-radius:10px;border:1px solid rgba(250,204,21,.28);background:rgba(202,138,4,.09)}
+.forge-pending-inputs li strong{display:block;font-size:12px;color:#fde68a}
+.forge-pending-inputs li p{margin:2px 0 0;font-size:11.5px;line-height:1.45;color:#e6dcf5;opacity:.86}
+.forge-step-reason .forge-badge{margin-left:6px}

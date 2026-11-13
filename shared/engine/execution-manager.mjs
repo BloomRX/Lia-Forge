@@ -29,6 +29,18 @@ import {
 
 export const EXECUTION_SCHEMA_VERSION = 1;
 
+/**
+ * Códigos que significam "não posso seguir sem uma decisão ou recurso humano".
+ * O passo vira `blocked` (com motivo), nunca `failed`: falha é defeito nosso.
+ */
+export const BLOCKING_CODES = Object.freeze([
+  'WORKFLOW_BLOCKED',
+  'ADAPTER_UNAVAILABLE',
+  'ADAPTER_LICENSE_BLOCKED',
+  'ADAPTER_COST_UNAUTHORIZED',
+  'ADAPTER_SEND_UNAUTHORIZED',
+]);
+
 export const RUN_STATES = Object.freeze(['planned', 'running', 'succeeded', 'failed', 'cancelled', 'blocked', 'paused']);
 
 const MAX_LOG_ENTRIES = 1200;
@@ -47,15 +59,19 @@ export class ExecutionManager {
    * @param {() => Date} [options.now]
    * @param {(bytes:Uint8Array)=>string} [options.hash]
    * @param {{maxConcurrent?:number, ramMb?:number, vramMb?:number}} [options.limits]
+   * @param {(args:{validators:string[], result:object, outputs:string[], readArtifact?:Function, label?:string})=>Promise<{ok:boolean, validations:object[], problems:string[]}>} [options.validateStep]
+   *        QA injetada: executa os validadores que o plano declara por passo.
    */
-  constructor({ resolveAdapter, persist = async () => {}, onEvent = () => {}, now = () => new Date(), hash = sha256Hex, limits = {} } = {}) {
+  constructor({ resolveAdapter, persist = async () => {}, onEvent = () => {}, now = () => new Date(), hash = sha256Hex, limits = {}, validateStep = null } = {}) {
     if (typeof resolveAdapter !== 'function') throw new TypeError('ExecutionManager: resolveAdapter é obrigatório');
+    if (validateStep !== null && typeof validateStep !== 'function') throw new TypeError('ExecutionManager: validateStep precisa ser função ou null');
     this.resolveAdapter = resolveAdapter;
     this.persist = persist;
     this.onEvent = onEvent;
     this.now = now;
     this.hash = hash;
     this.limits = { maxConcurrent: 1, ...limits };
+    this.validateStep = validateStep;
   }
 
   emit(run, event) {
@@ -107,6 +123,7 @@ export class ExecutionManager {
         cost: null,
         error: null,
         review: null,
+        validations: [],
         reused: false,
         dependsOn: [...step.dependsOn],
         reviewRequired: step.reviewRequired === true,
@@ -233,6 +250,17 @@ export class ExecutionManager {
         Object.assign(current.inputs, gate.inputs);
       }
 
+      // O plano é a fonte de verdade: passo que o Orchestrator marcou como
+      // bloqueado (ferramenta ausente, entrada humana pendente) não executa.
+      if (step.blockedReason) {
+        stepRecord.state = 'blocked';
+        stepRecord.finishedAt = this.now().toISOString();
+        stepRecord.error = { code: 'WORKFLOW_BLOCKED', message: redactSecrets(step.blockedReason), requiresUserDecision: true };
+        this.log(current, 'warn', `Passo "${step.id}" bloqueado pelo plano: ${stepRecord.error.message}`, { code: 'WORKFLOW_BLOCKED' });
+        this.emit(current, { type: 'step-blocked', stepId: step.id, code: 'WORKFLOW_BLOCKED', message: stepRecord.error.message });
+        return;
+      }
+
       // Ações protegidas declaradas pelo passo exigem cobertura na autorização
       for (const action of step.protectedActions ?? []) {
         const gate = checkProtectedAction({ action, authorization: current.authorization, step: step.id });
@@ -270,9 +298,12 @@ export class ExecutionManager {
           // Artefatos de todo o run até aqui (não só das dependências diretas):
           // na retomada um passo pode precisar de algo produzido por um
           // antepassado que não é seu pai no DAG.
-          const runOutputs = Object.fromEntries(current.steps
+          const ownOutputs = Object.fromEntries(current.steps
             .filter((item) => item.outputs?.length)
             .map((item) => [item.id, { outputs: item.outputs, sha256: item.sha256 ?? null }]));
+          // Artefatos de um run anterior entram primeiro: permitem "animar um
+          // rig já revisado" sem repetir a separação de partes.
+          const runOutputs = { ...(context.priorOutputs ?? {}), ...ownOutputs };
           const result = await adapter.execute({
             ...context,
             stepId: step.id,
@@ -317,6 +348,36 @@ export class ExecutionManager {
           });
           this.emit(current, { type: 'step-succeeded', stepId: step.id, outputs, message: result?.note ?? `Passo "${step.id}" concluído.` });
 
+          // Validação declarada: o que o plano promete, o engine cobra — antes
+          // da revisão humana, para ninguém aprovar artefato inválido.
+          if (step.validators?.length && typeof this.validateStep === 'function') {
+            const validation = await this.validateStep({
+              validators: step.validators,
+              params: step.params ?? {},
+              result,
+              outputs,
+              readArtifact: typeof context.readArtifact === 'function' ? context.readArtifact : null,
+              label: step.title ?? step.id,
+            });
+            stepRecord.validations = validation.validations ?? [];
+            const passed = stepRecord.validations.filter((item) => item.status === 'passed').length;
+            const skipped = stepRecord.validations.filter((item) => item.status === 'skipped').length;
+            this.log(current, skipped ? 'warn' : 'info', `Validação de "${step.id}": ${passed} aprovada(s), ${skipped} pulada(s) por falta de entrada.`, {
+              validators: stepRecord.validations.map((item) => `${item.validator}=${item.status}`),
+            });
+            if (!validation.ok) {
+              stepRecord.state = 'failed';
+              stepRecord.finishedAt = this.now().toISOString();
+              stepRecord.error = {
+                code: 'ADAPTER_OUTPUT_INVALID',
+                message: redactSecrets(`Saída de "${step.id}" reprovada na validação declarada: ${(validation.problems ?? []).join('; ')}`),
+              };
+              this.log(current, 'error', stepRecord.error.message, { code: stepRecord.error.code });
+              this.emit(current, { type: 'step-failed', stepId: step.id, code: stepRecord.error.code, message: stepRecord.error.message });
+              return;
+            }
+          }
+
           // Gate de revisão: passo que exige aprovação humana não segue adiante
           if (stepRecord.reviewRequired) {
             const review = context.reviews?.[step.id] ?? null;
@@ -350,14 +411,25 @@ export class ExecutionManager {
       const cancelled = signal?.aborted || lastError?.code === 'WORKFLOW_CANCELLED';
       // Passo opcional que falha não derruba o run: vira skip com o motivo.
       const optional = step.optional === true;
-      stepRecord.state = cancelled ? 'cancelled' : optional ? 'skipped' : 'failed';
+      // Ferramenta ausente, licença, custo ou envio não autorizado NÃO são
+      // falha do produto: são bloqueio que exige decisão humana. Reportar isso
+      // como "failed" esconderia o motivo real de quem usa o Studio.
+      const blocking = !cancelled && BLOCKING_CODES.includes(lastError?.code);
+      stepRecord.state = cancelled ? 'cancelled' : blocking ? 'blocked' : optional ? 'skipped' : 'failed';
       stepRecord.finishedAt = this.now().toISOString();
       stepRecord.error = {
         code: lastError?.code ?? (cancelled ? 'WORKFLOW_CANCELLED' : 'WORKFLOW_FAILED'),
         message: redactSecrets(lastError?.message ?? 'Passo cancelado.'),
+        requiresUserDecision: blocking || undefined,
       };
       this.emit(current, {
-        type: cancelled ? 'step-cancelled' : stepRecord.state === 'skipped' ? 'step-skipped' : 'step-failed',
+        type: cancelled
+          ? 'step-cancelled'
+          : stepRecord.state === 'blocked'
+            ? 'step-blocked'
+            : stepRecord.state === 'skipped'
+              ? 'step-skipped'
+              : 'step-failed',
         stepId: step.id,
         code: stepRecord.error.code,
         optional: optional && !cancelled,

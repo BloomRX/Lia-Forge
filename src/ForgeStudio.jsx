@@ -61,6 +61,12 @@ const RUN_STATE_LABELS = {
   cancelled: 'Cancelado',
 };
 
+const VALIDATION_LABELS = {
+  passed: 'aprovado',
+  skipped: 'sem entrada para validar',
+  failed: 'reprovado',
+};
+
 const COST_LABELS = {
   'not-applicable': 'Sem custo externo',
   free: 'Gratuito',
@@ -322,7 +328,7 @@ function WorkflowCard({ workflow, selected, onSelect }) {
   );
 }
 
-function PlanStepRow({ step }) {
+export function PlanStepRow({ step }) {
   return (
     <li className={`forge-step ${step.adapter ? 'is-ready' : 'is-blocked'}`}>
       <header>
@@ -331,6 +337,8 @@ function PlanStepRow({ step }) {
           ? <span className="forge-badge is-ready"><code>{step.adapter}</code></span>
           : <span className="forge-badge is-blocked">sem adapter</span>}
         {step.reviewRequired ? <span className="forge-badge is-review"><Eye size={11} strokeWidth={2} /> revisão humana</span> : null}
+        {step.inputFrom === 'priorRun' ? <span className="forge-badge is-review"><WorkflowIcon size={11} strokeWidth={2} /> usa um run anterior</span> : null}
+        {step.requiresParam ? <span className="forge-badge is-review"><Box size={11} strokeWidth={2} /> precisa de <code>{step.requiresParam}</code></span> : null}
         {step.optional ? <span className="forge-badge is-unknown">opcional</span> : null}
       </header>
       {step.blockedReason ? <p className="forge-step-reason"><CircleAlert size={13} strokeWidth={1.9} />{step.blockedReason}</p> : null}
@@ -361,7 +369,7 @@ function PlanStepRow({ step }) {
   );
 }
 
-function RunStepRow({ step, onReview, reviewBusy, reviewNote, setReviewNote }) {
+export function RunStepRow({ step, onReview = () => {}, reviewBusy = false, reviewNote = '', setReviewNote = () => {} }) {
   const awaitingReview = step.state === 'blocked' && step.review?.status === 'review-missing';
   const artifactImages = (step.outputs ?? []).filter((output) => /\.(png|jpe?g|webp)$/i.test(output));
   return (
@@ -372,7 +380,27 @@ function RunStepRow({ step, onReview, reviewBusy, reviewNote, setReviewNote }) {
         {step.reused ? <span className="forge-badge is-unknown">reaproveitado do checkpoint</span> : null}
         {step.adapter ? <code className="forge-step-adapter">{step.adapter}</code> : null}
       </header>
-      {step.error ? <p className="forge-step-reason"><CircleAlert size={13} strokeWidth={1.9} />{step.error.message}</p> : null}
+      {step.error ? (
+        <p className="forge-step-reason">
+          <CircleAlert size={13} strokeWidth={1.9} />
+          {step.error.message}
+          {step.error.requiresUserDecision ? <span className="forge-badge is-review"><Lock size={11} strokeWidth={2} /> precisa de uma decisão sua</span> : null}
+        </p>
+      ) : null}
+      {step.validations?.length ? (
+        <ul className="forge-validations">
+          {step.validations.map((item, index) => (
+            <li key={`${item.validator}-${index}`} className={`is-${item.status}`}>
+              <ShieldCheck size={12} strokeWidth={1.9} />
+              <code>{item.validator}</code>
+              <span>{VALIDATION_LABELS[item.status] ?? item.status}</span>
+              {item.checked > 1 ? <em>{item.checked} itens</em> : null}
+              {item.status === 'skipped' && item.reason ? <em title={item.reason}>{item.reason}</em> : null}
+              {item.status === 'failed' ? <em>{(item.problems ?? []).join('; ')}</em> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
       {step.review && step.review.status !== 'approved' ? (
         <p className="forge-step-reason"><Eye size={13} strokeWidth={1.9} />{step.review.reason}</p>
       ) : null}
@@ -434,6 +462,8 @@ export default function ForgeStudio({ onNotify = () => {} }) {
   const [destination, setDestination] = useState('godot-4');
   const [brief, setBrief] = useState('');
   const [sourceImage, setSourceImage] = useState('');
+  const [fromRun, setFromRun] = useState('');
+  const [modelPath, setModelPath] = useState('');
   const [vfx, setVfx] = useState({ preset: 'impact', size: 64, frameCount: 8 });
   const [plan, setPlan] = useState(null);
   const [run, setRun] = useState(null);
@@ -479,6 +509,13 @@ export default function ForgeStudio({ onNotify = () => {} }) {
   );
   const needsSourceImage = workflowId === '2d-character-parts' || workflowId === '2d-modular-character' || workflowId === 'variation-retexture';
   const isVfxWorkflow = workflowId === 'ui-vfx-sheet';
+  // Entradas que só você pode fornecer, declaradas pelo catálogo (§3: o Studio
+  // pede antes de executar, em vez de falhar no meio do pipeline).
+  const needsInput = workflow?.needsInput ?? [];
+  const needsPriorRun = needsInput.some((item) => item.kind === 'priorRun');
+  const modelParam = needsInput.find((item) => item.param)?.param ?? null;
+  // Só um run concluído serve de origem: rig revisado não existe em run falho.
+  const priorRunCandidates = (runs ?? []).filter((item) => item.status === 'succeeded' || item.status === 'blocked');
 
   const runAction = useCallback(async (label, action) => {
     setBusy(label);
@@ -497,15 +534,19 @@ export default function ForgeStudio({ onNotify = () => {} }) {
   const buildOptions = useCallback(() => {
     const options = {};
     if (isVfxWorkflow) options.vfx = { preset: vfx.preset, size: Number(vfx.size), frameCount: Number(vfx.frameCount) };
+    if (needsPriorRun && fromRun) options.fromRun = fromRun;
+    if (modelParam && modelPath.trim()) options[modelParam] = modelPath.trim();
     return options;
-  }, [isVfxWorkflow, vfx]);
+  }, [isVfxWorkflow, vfx, needsPriorRun, fromRun, modelParam, modelPath]);
 
   const buildParams = useCallback(() => {
     const params = {};
     if (needsSourceImage && sourceImage.trim()) params.sourceImage = sourceImage.trim();
     if (isVfxWorkflow) params.vfx = { preset: vfx.preset, size: Number(vfx.size), frameCount: Number(vfx.frameCount) };
+    if (needsPriorRun && fromRun) params.fromRun = fromRun;
+    if (modelParam && modelPath.trim()) params[modelParam] = modelPath.trim();
     return params;
-  }, [needsSourceImage, sourceImage, isVfxWorkflow, vfx]);
+  }, [needsSourceImage, sourceImage, isVfxWorkflow, vfx, needsPriorRun, fromRun, modelParam, modelPath]);
 
   const handlePlan = () => runAction('plan', async () => {
     const result = await liaForgeApi.plan({ workflowId, destination, options: buildOptions(), brief: brief.trim() || null });
@@ -665,6 +706,25 @@ export default function ForgeStudio({ onNotify = () => {} }) {
                   <input value={sourceImage} onChange={(event) => setSourceImage(event.target.value)} placeholder="input/sprite.png" />
                 </label>
               ) : null}
+              {needsPriorRun ? (
+                <label>
+                  <span>Run de origem (rig já revisado)</span>
+                  <select value={fromRun} onChange={(event) => setFromRun(event.target.value)}>
+                    <option value="">— escolha um run concluído —</option>
+                    {priorRunCandidates.map((item) => (
+                      <option key={item.runId} value={item.runId}>
+                        {item.runId} · {item.planTitle ?? item.planId ?? 'run'} · {RUN_STATE_LABELS[item.status] ?? item.status}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              {modelParam ? (
+                <label>
+                  <span>Modelo 3D (caminho dentro do projeto)</span>
+                  <input value={modelPath} onChange={(event) => setModelPath(event.target.value)} placeholder={`input/modelo.glb (${modelParam})`} />
+                </label>
+              ) : null}
               {isVfxWorkflow ? (
                 <>
                   <label>
@@ -692,6 +752,19 @@ export default function ForgeStudio({ onNotify = () => {} }) {
                 </button>
               </div>
             </form>
+            {needsPriorRun && !fromRun ? (
+              <p className="forge-note is-pending">
+                <WorkflowIcon size={13} strokeWidth={1.9} />
+                Este workflow reutiliza um resultado já revisado. Escolha o run de origem acima — nada é refeito do zero e nenhuma peça é separada duas vezes.
+                {priorRunCandidates.length === 0 ? ' Ainda não há runs concluídos neste projeto: execute antes "Personagem 2D (partes + rig)".' : ''}
+              </p>
+            ) : null}
+            {modelParam && !modelPath.trim() ? (
+              <p className="forge-note is-pending">
+                <Box size={13} strokeWidth={1.9} />
+                Falta informar o modelo 3D (<code>{modelParam}</code>). Ele precisa estar dentro da pasta do projeto: nada é baixado automaticamente.
+              </p>
+            ) : null}
             {workflow && !workflow.executableNow ? (
               <p className="forge-note">
                 <Lock size={13} strokeWidth={1.9} />
@@ -707,8 +780,22 @@ export default function ForgeStudio({ onNotify = () => {} }) {
                 <h2>3 · Plano (o Orquestrador planeja, não executa)</h2>
                 <span className="forge-panel-tag">{plan.blocked ? 'bloqueado' : 'executável'}</span>
               </header>
+              {plan.pendingInputs?.length ? (
+                <ul className="forge-pending-inputs">
+                  {plan.pendingInputs.map((item) => (
+                    <li key={`${item.stepId}-${item.param ?? 'input'}`}>
+                      <CircleHelp size={13} strokeWidth={1.9} />
+                      <div>
+                        <strong>{item.title}</strong>
+                        <p>{item.detail}</p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
               <div className="forge-plan-meta">
                 <KeyValue label="Contrato preservado" value={plan.preservesContract} mono />
+                <KeyValue label="Entradas pendentes" value={plan.pendingInputs?.length ? `${plan.pendingInputs.length} (só você pode fornecer)` : 'nenhuma'} />
                 <KeyValue label="Paralelizável" value={plan.parallelizable ? 'sim' : 'não'} />
                 <KeyValue label="Custo" value={COST_LABELS[plan.cost?.status] ?? plan.cost?.status} />
                 <KeyValue label="Licenças" value={plan.licenses?.length ? plan.licenses.join(', ') : null} />

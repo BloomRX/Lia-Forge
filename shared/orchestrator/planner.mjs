@@ -78,11 +78,13 @@ export const WORKFLOW_RECIPES = Object.freeze({
     family: '2.5d',
     description: 'Reutiliza um rig já revisado para gerar novas ações e frames, sem repetir separação de partes.',
     destinationAware: true,
+    // A entrada deste workflow é um rig já revisado: ou vem de um run anterior
+    // (`fromRun`) ou é construído aqui a partir das partes separadas.
     steps: [
-      { id: 'animate', title: 'Gerar ações', capability: 'rig2d.animate', params: { task: 'animate', actions: 'idle,walk,run,attack' }, validators: ['animation-loop'], reviewRequired: true },
-      { id: 'render', title: 'Renderizar frames', capability: 'rig2d.deform', dependsOn: ['animate'], params: { task: 'render' }, validators: ['png-content'] },
-      { id: 'atlas', title: 'Empacotar atlas', capability: 'render.atlas', dependsOn: ['render'], validators: ['spritesheet-manifest'] },
-      { id: 'deliver', title: 'Empacotar para o destino', capability: 'export.engine', dependsOn: ['atlas'], validators: ['destination-profile'] },
+      { id: 'rig', title: 'Obter rig de origem', capability: 'rig2d.build', params: { task: 'build-rig' }, validators: ['rig2d-structural'], inputFrom: 'priorRun' },
+      { id: 'animate', title: 'Gerar ações', capability: 'rig2d.animate', dependsOn: ['rig'], params: { task: 'animate', actions: 'idle,walk,run,attack' }, validators: ['animation-loop'], reviewRequired: true },
+      { id: 'render', title: 'Renderizar frames e atlas', capability: 'render.atlas', dependsOn: ['animate'], params: { task: 'render', frameSize: '48x48', columns: 8 }, validators: ['png-content', 'spritesheet-manifest'] },
+      { id: 'deliver', title: 'Empacotar para o destino', capability: 'export.engine', dependsOn: ['render'], validators: ['destination-profile'] },
     ],
   },
   '3d-object-render': {
@@ -91,9 +93,9 @@ export const WORKFLOW_RECIPES = Object.freeze({
     description: 'Inspeciona o modelo, renderiza vistas/turntable e empacota o atlas. Requer Blender instalado pelo usuário.',
     destinationAware: true,
     steps: [
-      { id: 'inspect', title: 'Inspecionar modelo (GLB)', capability: 'model3d.inspect', validators: ['glb-structural'] },
+      { id: 'inspect', title: 'Inspecionar modelo (GLB)', capability: 'model3d.inspect', requiresParam: 'model', validators: ['glb-structural'] },
       { id: 'render', title: 'Renderizar vistas', capability: 'render3d.frame', dependsOn: ['inspect'], validators: ['png-structural', 'png-content'] },
-      { id: 'atlas', title: 'Empacotar atlas', capability: 'render.atlas', dependsOn: ['render'], validators: ['spritesheet-manifest'] },
+      { id: 'atlas', title: 'Empacotar atlas', capability: 'render.atlas', dependsOn: ['render'], params: { task: 'pack-atlas', columns: 4 }, validators: ['spritesheet-manifest'] },
       { id: 'deliver', title: 'Empacotar para o destino', capability: 'export.engine', dependsOn: ['atlas'], validators: ['destination-profile'] },
     ],
   },
@@ -119,7 +121,7 @@ export const WORKFLOW_RECIPES = Object.freeze({
     destinationAware: true,
     steps: [
       { id: 'vfx', title: 'Gerar VFX procedural', capability: 'vfx2d.generate', params: { task: 'render-vfx', preset: 'explosion', size: 64, frameCount: 8 }, validators: ['png-content'] },
-      { id: 'compose', title: 'Compor variações de cor', capability: 'image2d.compose', dependsOn: ['vfx'], params: { op: 'compose' }, validators: ['png-content'], optional: true },
+      { id: 'compose', title: 'Compor prévia sobre o fundo do produto', capability: 'image2d.compose', dependsOn: ['vfx'], params: { op: 'compose', background: [16, 0, 24, 255], output: 'vfx-preview-composed.png' }, validators: ['png-content'], optional: true },
       { id: 'deliver', title: 'Empacotar para o destino', capability: 'export.engine', dependsOn: ['vfx'], validators: ['destination-profile'] },
     ],
   },
@@ -131,7 +133,7 @@ export const WORKFLOW_RECIPES = Object.freeze({
     steps: [
       { id: 'variation', title: 'Gerar variação de cor', capability: 'image2d.transform', params: { op: 'recolor', hueShift: 40 }, validators: ['png-content'] },
       { id: 'outline', title: 'Aplicar contorno', capability: 'image2d.transform', dependsOn: ['variation'], params: { op: 'outline' }, validators: ['png-content'], optional: true },
-      { id: 'atlas', title: 'Empacotar variações em atlas', capability: 'render.atlas', dependsOn: ['variation'], params: { op: 'pack-atlas', columns: 4 }, validators: ['spritesheet-manifest'] },
+      { id: 'atlas', title: 'Empacotar variações em atlas', capability: 'render.atlas', dependsOn: ['variation', 'outline'], params: { task: 'pack-atlas', columns: 4 }, validators: ['spritesheet-manifest'] },
       { id: 'deliver', title: 'Empacotar para o destino', capability: 'export.engine', dependsOn: ['atlas'], validators: ['destination-profile'] },
     ],
   },
@@ -185,6 +187,12 @@ export function planWorkflow({ workflowId, hub, registry, destination = null, op
     const candidate = selection.selected;
     const capability = registry.get(recipeStep.capability);
     const params = { ...(recipeStep.params ?? {}), ...(options[recipeStep.id] ?? {}) };
+    // A entrada fornecida pelo usuário entra nos params do passo: é por eles que
+    // o engine alimenta o adapter (context.params é substituído por step.params).
+    if (recipeStep.requiresParam) {
+      const provided = options[recipeStep.requiresParam] ?? options[recipeStep.id]?.[recipeStep.requiresParam] ?? null;
+      if (provided !== null && provided !== undefined) params[recipeStep.requiresParam] = provided;
+    }
 
     const step = {
       id: recipeStep.id,
@@ -200,6 +208,11 @@ export function planWorkflow({ workflowId, hub, registry, destination = null, op
       validators: [...(recipeStep.validators ?? capability?.validators ?? [])],
       reviewRequired: recipeStep.reviewRequired === true,
       optional: recipeStep.optional === true,
+      // De onde vem a entrada deste passo: null = produzida no próprio run.
+      inputFrom: recipeStep.inputFrom ?? null,
+      // Parâmetro que só o usuário pode fornecer (ex.: caminho do modelo 3D).
+      requiresParam: recipeStep.requiresParam ?? null,
+      missingParam: null,
       protectedActions: Object.freeze([...(recipeStep.protectedActions ?? [])]),
       resources: Object.freeze({
         ramMb: capability?.requirements?.ramMb ?? null,
@@ -213,9 +226,48 @@ export function planWorkflow({ workflowId, hub, registry, destination = null, op
       candidates: Object.freeze((selection.candidates ?? []).map((item) => ({ adapterId: item.adapterId, state: item.state, detail: item.discoveryDetail }))),
     };
 
+    // Entrada que vem de fora do run (ex.: rig revisado de um run anterior):
+    // sem ela o passo é bloqueado no plano, com a ação que destrava — assim o
+    // Studio explica antes de executar, em vez de falhar no meio do pipeline.
+    // A entrada pode vir no topo das opções (`options.model`) ou no próprio
+    // passo (`options.inspect.model`); o que não pode é o plano fingir que ela
+    // existe quando não foi fornecida.
+    const providedInput = params[recipeStep.requiresParam ?? ''] ?? options[recipeStep.requiresParam ?? ''] ?? null;
+    if (recipeStep.requiresParam && !providedInput) {
+      step.blockedReason = `Este passo precisa de "${recipeStep.requiresParam}", que só você pode fornecer (nada é baixado automaticamente).`;
+      step.missingParam = recipeStep.requiresParam;
+      blockedSteps.push({ id: step.id, capability: step.capability, reason: step.blockedReason, fallback: null });
+      userActions.push({
+        kind: 'provide-input',
+        stepId: step.id,
+        capabilityId: step.capability,
+        title: `Informar "${recipeStep.requiresParam}"`,
+        detail: step.blockedReason,
+        param: recipeStep.requiresParam,
+        requiresUserDecision: true,
+        canBeAutomated: false,
+      });
+    }
+
+    if (recipeStep.inputFrom === 'priorRun' && !options.fromRun) {
+      step.blockedReason = 'Este passo reutiliza um resultado já revisado de outro run. Escolha o run de origem (ex.: "2d-character-parts" com o rig aprovado) e execute de novo.';
+      blockedSteps.push({ id: step.id, capability: step.capability, reason: step.blockedReason, fallback: '2d-character-parts' });
+      userActions.push({
+        kind: 'provide-input',
+        stepId: step.id,
+        capabilityId: step.capability,
+        title: 'Escolher o run de origem',
+        detail: step.blockedReason,
+        requiresUserDecision: true,
+        canBeAutomated: false,
+      });
+    }
+
     if (!candidate) {
-      step.blockedReason = selection.reason;
-      blockedSteps.push({ id: step.id, capability: step.capability, reason: selection.reason, fallback: recipeStep.blockedFallback ?? null });
+      step.blockedReason = step.blockedReason ?? selection.reason;
+      if (!step.blockedReason || step.blockedReason === selection.reason) {
+        blockedSteps.push({ id: step.id, capability: step.capability, reason: selection.reason, fallback: recipeStep.blockedFallback ?? null });
+      }
       userActions.push({
         kind: capability?.status === 'proposed' ? 'decision' : 'install',
         stepId: step.id,
@@ -281,6 +333,11 @@ export function planWorkflow({ workflowId, hub, registry, destination = null, op
     licenses: Object.freeze(licenses),
     protectedActions: Object.freeze(protectedActions),
     reviewGates: Object.freeze(steps.filter((step) => step.reviewRequired).map((step) => step.id)),
+    // Entradas que só o usuário pode fornecer (arquivo, run de origem, decisão).
+    // Aparecem aqui para o Studio pedir antes de executar, não depois de falhar.
+    pendingInputs: Object.freeze(userActions
+      .filter((action) => action.kind === 'provide-input')
+      .map((action) => ({ stepId: action.stepId, title: action.title, detail: action.detail, param: action.param ?? null }))),
     validators: Object.freeze([...new Set(steps.flatMap((step) => step.validators))]),
     parallelizable: Object.freeze(steps.filter((step) => !step.dependsOn.length).map((step) => step.id)),
     note: 'Plano produzido pelo Orchestrator: nada foi executado, instalado, baixado nem enviado.',
@@ -302,6 +359,11 @@ export function listWorkflows({ hub, registry }) {
       description: recipe.description,
       steps: states.length,
       ready: states.filter((state) => state.state === 'ready').length,
+      // Entradas que só o usuário fornece: o workflow tem adapters prontos, mas
+      // precisa que a pessoa escolha o arquivo/run de origem.
+      needsInput: Object.freeze(recipe.steps
+        .filter((step) => step.requiresParam || step.inputFrom)
+        .map((step) => ({ stepId: step.id, param: step.requiresParam ?? null, kind: step.inputFrom ?? null }))),
       blocked: states.filter((state) => state.state === 'blocked').length,
       executableNow: states.every((state) => state.state === 'ready'),
       states: Object.freeze(states),

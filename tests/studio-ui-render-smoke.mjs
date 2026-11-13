@@ -159,6 +159,55 @@ try {
   const runs = await liaForgeApi.runs();
   assert.ok(runs.some((item) => item.runId === runId), 'run aparece na listagem');
 
+  // ------------------------- 4.1 entradas que só o usuário pode fornecer (§3)
+  const catalog = await liaForgeApi.workflows();
+  const animationWorkflow = catalog.find((item) => item.id === '2d-animation');
+  assert.deepEqual(
+    animationWorkflow.needsInput.map((item) => item.kind),
+    ['priorRun'],
+    'o catálogo declara que 2d-animation reutiliza um run anterior',
+  );
+  const objectWorkflow = catalog.find((item) => item.id === '3d-object-render');
+  assert.deepEqual(objectWorkflow.needsInput.map((item) => item.param), ['model'], 'o catálogo declara o modelo 3D como entrada do usuário');
+
+  // Sem o run de origem: o plano avisa antes, e o run bloqueia com motivo.
+  const animationPending = await liaForgeApi.plan({ workflowId: '2d-animation', destination: 'godot-4' });
+  assert.equal(animationPending.plan.blocked, true, '2d-animation sem origem não é oferecido como pronto');
+  assert.match(animationPending.plan.pendingInputs[0].detail, /run de origem/i);
+  assert.equal(animationPending.plan.userActions[0].canBeAutomated, false, 'escolher a origem é decisão humana');
+
+  const animationBlocked = await liaForgeApi.run({ workflowId: '2d-animation', destination: 'godot-4' });
+  assert.equal(animationBlocked.snapshot.status, 'blocked', 'sem origem o run bloqueia (não falha)');
+  const blockedStep = animationBlocked.snapshot.steps.find((step) => step.id === 'rig');
+  assert.equal(blockedStep.error.code, 'WORKFLOW_BLOCKED', 'motivo nomeado no passo bloqueado');
+  assert.equal(blockedStep.error.requiresUserDecision, true, 'a UI pode marcar como decisão pendente');
+
+  // Com o run de origem (o 2D aprovado acima): o fluxo completa pela API.
+  const animation = await liaForgeApi.run({ workflowId: '2d-animation', destination: 'godot-4', options: { fromRun: runId } });
+  let animationSnapshot = animation.snapshot;
+  for (let iteration = 0; iteration < 6; iteration += 1) {
+    const pending = animationSnapshot.steps.find((step) => step.state === 'blocked' && step.review?.status === 'review-missing');
+    if (!pending) break;
+    const reviewed = await liaForgeApi.reviewStep(animation.runId, { stepId: pending.id, approved: true, reviewer: 'smoke-ui', note: 'ações conferidas' });
+    assert.equal(reviewed.resumed, true, 'aprovar as ações retoma o run de animação');
+    animationSnapshot = reviewed.result;
+  }
+  assert.equal(animationSnapshot.status, 'succeeded', `rig revisado reaproveitado entre runs (${animationSnapshot.status})`);
+
+  // Ferramenta ausente continua bloqueada, nunca "disponível".
+  const objectRun = await liaForgeApi.run({ workflowId: '3d-object-render', destination: 'godot-4', params: { model: 'input/modelo.glb' } });
+  assert.equal(objectRun.snapshot.status, 'blocked', '3d-object-render bloqueia sem Blender');
+  assert.ok(objectRun.snapshot.steps.every((step) => step.state !== 'failed'), 'falta de ferramenta não vira falha do produto');
+  const objectPlan = await liaForgeApi.plan({ workflowId: '3d-object-render', destination: 'godot-4' });
+  assert.equal(objectPlan.plan.pendingInputs[0].param, 'model', 'sem o caminho do modelo o plano pede a entrada');
+
+  // ------------------------------------------- 4.2 validações declaradas (§5/G8)
+  const validatedSteps = snapshot.steps.filter((step) => (step.validations ?? []).length > 0);
+  assert.ok(validatedSteps.length >= 3, `passos com validação executada (${validatedSteps.length})`);
+  for (const step of validatedSteps) {
+    assert.ok(step.validations.every((item) => item.status === 'passed'), `validadores de "${step.id}" passaram: ${JSON.stringify(step.validations)}`);
+  }
+
   // ------------------------------------------------------ 5. assets/direitos
   const created = await liaForgeApi.upsertAsset({ id: 'aiko', type: 'character', name: 'Aiko' });
   assert.equal(created.rights.state, 'unknown', 'asset novo começa unknown');
@@ -186,10 +235,31 @@ try {
   assert.ok(markup.includes('forge-page'), 'o componente renderiza a página do Forge');
   assert.ok(/Lendo o estado real|forge-loading/.test(markup), 'o estado inicial é o de carregamento (efeitos não rodam em SSR)');
 
+  // Componentes de passo renderizados com dados reais vindos do serviço: é o que
+  // garante que validação executada, bloqueio nomeado e entrada pendente
+  // aparecem de fato na tela (e não só no JSON).
+  const { PlanStepRow, RunStepRow } = await vite.ssrLoadModule('/src/ForgeStudio.jsx');
+  const stepMarkup = renderToStaticMarkup(createElement(RunStepRow, { step: renderStep }));
+  assert.ok(stepMarkup.includes('forge-validations'), 'a linha do passo mostra as validações');
+  assert.ok(stepMarkup.includes('png-content') && stepMarkup.includes('aprovado'), 'validador e resultado aparecem por extenso');
+
+  const blockedMarkup = renderToStaticMarkup(createElement(RunStepRow, { step: blockedStep }));
+  assert.ok(blockedMarkup.includes('precisa de uma decisão sua'), 'bloqueio que exige decisão humana é sinalizado');
+  assert.ok(blockedMarkup.includes('run de origem') || blockedMarkup.includes('run anterior'), 'o motivo do bloqueio é exibido');
+
+  const animationPlanStep = animationPending.plan.steps.find((step) => step.id === 'rig');
+  const planMarkup = renderToStaticMarkup(createElement(PlanStepRow, { step: animationPlanStep }));
+  assert.ok(planMarkup.includes('usa um run anterior'), 'o plano avisa que o passo reutiliza outro run');
+
+  const modelStep = objectPlan.plan.steps.find((step) => step.id === 'inspect');
+  const modelMarkup = renderToStaticMarkup(createElement(PlanStepRow, { step: modelStep }));
+  assert.ok(modelMarkup.includes('precisa de'), 'o plano avisa a entrada que falta');
+  assert.ok(modelMarkup.includes('model'), 'o nome do parâmetro aparece para o usuário avançado');
+
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 
-  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, ForgeStudio renderiza; transporte ${liaForgeApi.transport}).`);
+  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes e validações na UI; transporte ${liaForgeApi.transport}).`);
 } finally {
   globalThis.fetch = nativeFetch;
   await vite.close();

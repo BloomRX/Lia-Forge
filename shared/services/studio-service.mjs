@@ -27,6 +27,7 @@ import { ExecutionManager } from '../engine/execution-manager.mjs';
 import { assertSafeWriteTarget, redactSecrets, sha256Hex } from '../engine/gates.mjs';
 import { createAssetManager, classifyRights } from '../assets/manager.mjs';
 import { decodePng, encodePngRgba, analyzePngContent } from '../qa/png-codec.mjs';
+import { validateStepOutputs } from '../qa/validators.mjs';
 import { generateVfxAtlas } from '../vfx/core.mjs';
 import { buildExportBundle, checkDestinationCompatibility, listDestinations } from '../destinations/profiles.mjs';
 
@@ -192,6 +193,7 @@ export function createStudioService(options = {}) {
           await fs.writeFile(path.join(runDirectory, 'run.json'), `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
         },
         limits,
+        validateStep: validateStepOutputs,
       }));
     }
     return managerCache.get(runId);
@@ -260,15 +262,46 @@ export function createStudioService(options = {}) {
     async run({ workflowId, destination = null, options: runOptions = {}, brief = null, params = {}, authorization = null, onEvent = null, signal = null, resume = null }) {
       const runId = resume?.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       const runDirectory = path.join(projectRoot, RUNS_DIRECTORY, runId);
+      // Run anterior reaproveitado como entrada (rig/partes já revisados).
+      const fromRun = params.fromRun ?? runOptions.fromRun ?? null;
+      if (fromRun !== null) {
+        // Id de run é nome de pasta: recusar separadores e ".." aqui impede que
+        // uma entrada digitada na UI vire leitura fora de .lia-forge/runs/.
+        const value = String(fromRun);
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) || value.includes('..')) {
+          throw new Error('run: fromRun inválido — use o id de um run existente em .lia-forge/runs/ (sem caminhos).');
+        }
+      }
+      const priorRunDirectory = fromRun ? path.join(projectRoot, RUNS_DIRECTORY, String(fromRun)) : null;
       let plan = null;
       try {
       const { hub, machine } = await discover();
-      plan = planWorkflow({ workflowId, hub, registry, destination, options: runOptions, brief });
+      // Entradas fornecidas pelo usuário (`params.model`, `params.fromRun`…) são
+      // promovidas a opções do plano: é por elas que o Orquestrador decide se um
+      // passo tem o que precisa, e é por elas que o valor chega ao adapter — o
+      // engine substitui `context.params` pelos params do passo planejado.
+      const RESERVED_PARAMS = new Set(['reviews', 'sourceImage']);
+      const userInputOptions = Object.fromEntries(Object.entries(params)
+        .filter(([key, value]) => !RESERVED_PARAMS.has(key) && ['string', 'number', 'boolean'].includes(typeof value)));
+      const planOptions = { ...userInputOptions, ...runOptions, ...(fromRun ? { fromRun } : {}) };
+      plan = planWorkflow({ workflowId, hub, registry, destination, options: planOptions, brief });
       const hashes = new Map();
       const emit = await emitFor(runDirectory, hashes);
       const manager = managerFor(runId);
       await fs.mkdir(runDirectory, { recursive: true });
-      await fs.writeFile(path.join(runDirectory, 'plan.json'), `${JSON.stringify({ plan, destination, workflowId, brief }, null, 2)}\n`, 'utf8');
+      // O que originou este run fica gravado: a retomada precisa das mesmas
+      // entradas (run de origem, imagem de entrada) para não perder o contexto
+      // que só existia na primeira execução. Segredos são redigidos.
+      const origin = {
+        workflowId,
+        destination,
+        brief,
+        options: fromRun ? { ...runOptions, fromRun } : { ...runOptions },
+        params: Object.fromEntries(Object.entries(params)
+          .filter(([key]) => key !== 'reviews')
+          .map(([key, value]) => [key, typeof value === 'string' ? redactSecrets(value) : value])),
+      };
+      await fs.writeFile(path.join(runDirectory, 'plan.json'), `${JSON.stringify({ ...origin, plan }, null, 2)}\n`, 'utf8');
 
       const context = {
         projectRoot,
@@ -285,7 +318,10 @@ export function createStudioService(options = {}) {
         // leitura confinada ao projeto: aceita caminho relativo ao run ou ao
         // projeto, e devolve null quando o arquivo não existe
         readArtifact: async (relativePath) => {
-          const candidates = [path.join(runDirectory, relativePath), path.join(projectRoot, relativePath)];
+          const candidates = [path.join(runDirectory, relativePath)];
+          // artefatos do run de origem, quando este run reaproveita um resultado
+          if (priorRunDirectory) candidates.push(path.join(priorRunDirectory, relativePath));
+          candidates.push(path.join(projectRoot, relativePath));
           for (const absolute of candidates) {
             const resolved = path.resolve(absolute);
             if (!resolved.startsWith(path.resolve(projectRoot))) return null;
@@ -298,6 +334,14 @@ export function createStudioService(options = {}) {
           return null;
         },
       };
+
+      if (fromRun) {
+        const previous = await this.readRun(fromRun);
+        if (!previous) throw new Error(`run: o run anterior "${fromRun}" não foi encontrado em .lia-forge/runs/`);
+        context.priorOutputs = Object.fromEntries((previous.steps ?? [])
+          .filter((step) => step.outputs?.length)
+          .map((step) => [step.id, { outputs: step.outputs, sha256: step.sha256 ?? null }]));
+      }
 
       // Imagem de entrada declarada pelo usuário (caminho relativo ao projeto).
       const sourceImage = params.sourceImage ?? runOptions.sourceImage ?? null;
@@ -387,7 +431,10 @@ export function createStudioService(options = {}) {
         workflowId: stored.workflowId,
         destination: stored.destination,
         brief: stored.brief,
-        params: { reviews },
+        options: stored.options ?? {},
+        // entradas originais + revisões: sem isso a retomada perde o run de
+        // origem (rig já revisado) e a imagem de entrada declarada pelo usuário
+        params: { ...(stored.params ?? {}), reviews },
         resume: { runId, checkpoints },
       });
       return Object.freeze({ runId, stepId, decision, resumed: true, result: resumed.snapshot });

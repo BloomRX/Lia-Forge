@@ -317,6 +317,137 @@ export function runValidator(validatorId, artifact) {
   return { ...result, validator: validatorId };
 }
 
+/**
+ * Executa os validadores declarados por um passo do plano (F3 + §5/G8).
+ *
+ * Quem conhece o formato de cada payload é a QA — o engine só chama e registra.
+ * Regra de honestidade: quando a entrada de um validador não existe (o adapter
+ * não devolveu o manifesto, por exemplo), o resultado é `skipped` com o motivo,
+ * nunca um "ok" silencioso. Quando o validador roda e reprova, o passo falha.
+ *
+ * @param {object} args
+ * @param {string[]} args.validators ids declarados no plano
+ * @param {object} [args.params] params do passo (traz entradas declaradas pelo usuário)
+ * @param {object} [args.result] retorno do adapter (pode trazer manifest/rig/layers/…)
+ * @param {string[]} args.outputs caminhos gravados, relativos ao projeto
+ * @param {Function} [args.readArtifact] lê bytes de um caminho relativo
+ * @param {string} [args.label] rótulo usado nas mensagens
+ * @returns {Promise<{ok: boolean, validations: object[], problems: string[]}>}
+ */
+export async function validateStepOutputs({ validators = [], params = {}, result = null, outputs = [], readArtifact = null, label = 'saída do passo' }) {
+  const validations = [];
+  const problems = [];
+
+  const bytesOf = async (predicate) => {
+    if (typeof readArtifact !== 'function') return null;
+    const match = outputs.find(predicate);
+    if (!match) return null;
+    try {
+      return await readArtifact(match);
+    } catch {
+      return null;
+    }
+  };
+  const jsonOf = async (predicate) => {
+    const bytes = await bytesOf(predicate);
+    if (!bytes) return null;
+    try {
+      return JSON.parse(bytes.toString('utf8'));
+    } catch {
+      return null;
+    }
+  };
+  const isImage = (value) => /\.(png|jpe?g|webp)$/i.test(value);
+  const isModel = (value) => /\.(glb|gltf)$/i.test(value);
+  // Entrada declarada pelo usuário (ex.: params.model, params.sourceImage): um
+  // passo que só inspeciona um arquivo não o reemite como saída, e ainda assim a
+  // validação declarada precisa rodar sobre o que foi lido.
+  const declaredInput = [params.model, params.sourceImage, params.input].find((value) => typeof value === 'string' && value.trim());
+  const adapterMetrics = result?.metrics ?? {};
+
+  for (const validatorId of validators) {
+    let artifact = null;
+    let missing = null;
+
+    if (validatorId === 'png-structural' || validatorId === 'png' || validatorId === 'png-rgba8') {
+      const bytes = await bytesOf(isImage) ?? (declaredInput && isImage(declaredInput) && readArtifact ? await readArtifact(declaredInput) : null);
+      if (bytes) artifact = { bytes };
+      else missing = 'nenhum PNG gravado ou declarado neste passo';
+    } else if (validatorId === 'png-content') {
+      const bytes = await bytesOf(isImage) ?? (declaredInput && isImage(declaredInput) && readArtifact ? await readArtifact(declaredInput) : null);
+      if (bytes) artifact = { bytes, grid: adapterMetrics.grid ?? null, label, minUniqueColors: adapterMetrics.grid ? 1 : 2 };
+      else missing = 'nenhum PNG gravado ou declarado neste passo';
+    } else if (validatorId === 'spritesheet-manifest') {
+      const bytes = await bytesOf(isImage);
+      const manifest = result?.manifest ?? await jsonOf((value) => /manifest[^/]*\.json$/i.test(value) || /frames\.json$/i.test(value));
+      if (bytes && manifest) artifact = { bytes, manifest, label };
+      else missing = !bytes ? 'nenhum PNG gravado neste passo' : 'o passo não devolveu um manifesto de spritesheet';
+    } else if (validatorId === 'glb-structural' || validatorId === 'glb') {
+      const bytes = await bytesOf(isModel) ?? (declaredInput && isModel(declaredInput) && readArtifact ? await readArtifact(declaredInput) : null);
+      if (bytes) artifact = { bytes };
+      else missing = 'nenhum GLB/glTF gravado ou declarado neste passo';
+    } else if (validatorId === 'model-extension') {
+      const model = outputs.find(isModel);
+      if (model) artifact = { path: model };
+      else missing = 'nenhum arquivo de modelo 3D neste passo';
+    } else if (validatorId === 'layers-integrity') {
+      const layers = result?.layers ?? (await jsonOf((value) => /layers[^/]*\.json$/i.test(value)))?.layers;
+      if (layers) artifact = { layers };
+      else missing = 'o passo não devolveu camadas';
+    } else if (validatorId === 'rig2d-structural') {
+      // Um passo de modularização não devolve "um rig": devolve um template e
+      // variantes. Cada variante é estruturalmente um rig (ossos + peças), então
+      // todas são validadas — pular aqui deixaria o validador decorativo.
+      const modular = result?.modular ?? await jsonOf((value) => /modular[^/]*\.json$/i.test(value));
+      const variants = modular?.variants ? Object.values(modular.variants) : [];
+      const rig = result?.rig ?? await jsonOf((value) => /rig[^/]*\.json$/i.test(value));
+      if (variants.length) artifact = variants.map((variant) => ({ rig: variant }));
+      else if (rig) artifact = { rig };
+      else missing = 'o passo não devolveu um rig nem variantes modulares';
+    } else if (validatorId === 'animation-loop') {
+      const animations = result?.animations ?? (await jsonOf((value) => /animations?[^/]*\.json$/i.test(value)))?.animations;
+      if (animations) artifact = { animations };
+      else missing = 'o passo não devolveu animações';
+    } else if (validatorId === 'destination-profile') {
+      const bundle = result?.bundle ?? await jsonOf((value) => /manifest\.json$/i.test(value));
+      if (bundle) artifact = { bundle };
+      else missing = 'o passo não devolveu um pacote de destino';
+    } else if (validatorId === 'format-allowlist') {
+      const format = result?.format ?? adapterMetrics.format ?? null;
+      if (format) artifact = { format, allowed: result?.allowed ?? undefined };
+      else missing = 'o passo não declarou formato';
+    } else if (validatorId === 'non-empty-text') {
+      const value = result?.text ?? result?.value ?? null;
+      if (typeof value === 'string') artifact = { value };
+      else missing = 'o passo não devolveu texto';
+    } else {
+      missing = `validador "${validatorId}" não tem regra de montagem de entrada aqui`;
+    }
+
+    if (!artifact) {
+      validations.push({ validator: validatorId, status: 'skipped', reason: missing });
+      continue;
+    }
+    // `artifact` pode ser uma lista: todos os itens precisam passar.
+    const targets = Array.isArray(artifact) ? artifact : [artifact];
+    const failures = [];
+    let aggregated = null;
+    for (const [targetIndex, target] of targets.entries()) {
+      const outcome = runValidator(validatorId, target);
+      if (outcome.ok) aggregated = aggregated ? { ...aggregated, ...outcome.metrics } : outcome.metrics ?? null;
+      else failures.push(...(outcome.problems ?? []).map((problem) => (targets.length > 1 ? `[${targetIndex}] ${problem}` : problem)));
+    }
+    if (failures.length === 0) {
+      validations.push({ validator: validatorId, status: 'passed', checked: targets.length, metrics: aggregated });
+    } else {
+      validations.push({ validator: validatorId, status: 'failed', checked: targets.length, problems: failures });
+      problems.push(...failures.map((problem) => `${validatorId}: ${problem}`));
+    }
+  }
+
+  return { ok: problems.length === 0, validations, problems };
+}
+
 export function listValidators() {
   return Object.freeze(Object.keys(VALIDATORS));
 }

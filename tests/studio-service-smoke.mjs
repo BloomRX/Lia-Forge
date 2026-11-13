@@ -137,8 +137,28 @@ try {
   check(vfxAnalysis.coverage > 0.0005, `cobertura real medida: ${(vfxAnalysis.coverage * 100).toFixed(2)}%`);
   check(vfxAnalysis.uniqueColors >= 2, `cores únicas medidas: ${vfxAnalysis.uniqueColors}`);
 
+  // O passo opcional compõe a prévia sobre o fundo do produto usando o atlas
+  // gravado pelo passo anterior: entrada implícita por artefato, não por memória.
   const composeStep = vfxRun.snapshot.steps.find((step) => step.id === 'compose');
-  check(composeStep.state === 'skipped', 'passo opcional sem entrada necessária vira skip, não falha');
+  check(composeStep.state === 'succeeded', `passo opcional compõe a prévia com o artefato anterior (${composeStep.state})`);
+  check(composeStep.outputs.length === 1, 'a prévia composta foi gravada');
+  check(
+    composeStep.validations.some((item) => item.validator === 'png-content' && item.status === 'passed'),
+    'a validação declarada no plano foi executada de verdade na prévia composta',
+  );
+  const composedBytes = await fs.readFile(path.join(projectRoot, composeStep.outputs[0]));
+  check(analyzePngContent(composedBytes).blank === false, 'a prévia composta tem conteúdo real');
+
+  // Passo opcional que falha não derruba o run: vira skip com o motivo (§8).
+  const optionalFailure = await service.run({
+    workflowId: 'ui-vfx-sheet',
+    destination: 'godot-4',
+    options: { vfx: { preset: 'spark', size: 48, frameCount: 6 }, compose: { op: 'operacao-inexistente' } },
+  });
+  check(optionalFailure.snapshot.status === 'succeeded', `run segue apesar da falha do passo opcional (${optionalFailure.snapshot.status})`);
+  const skippedCompose = optionalFailure.snapshot.steps.find((step) => step.id === 'compose');
+  check(skippedCompose.state === 'skipped', 'passo opcional com erro vira skip, não falha');
+  check(/não concluído/i.test(optionalFailure.snapshot.events.find((event) => event.type === 'step-skipped' && event.stepId === 'compose')?.message ?? ''), 'o evento explica que o passo opcional não foi concluído');
 
   const runDirectory = path.join(projectRoot, '.lia-forge', 'runs', vfxRun.runId);
   check(await fs.stat(path.join(runDirectory, 'run.json')).then((stats) => stats.isFile()), 'run.json persistido');
