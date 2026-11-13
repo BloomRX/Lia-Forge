@@ -139,7 +139,7 @@ O que passou a existir (mesmo serviço, mesmos gates, dois transportes):
 | Entrada enviada → workflow completo | `POST /run` com `params.sourceImage = 'input/Referencia-Heroi.PNG'` → `blocked` → 2 revisões aprovadas (retomada real) → **`succeeded`** em 5 passos; validações `animation-loop`, `png-content`, `spritesheet-manifest` e `destination-profile` = `passed`; 7 artefatos; export Godot 4.x com 7 arquivos, 60 fps, pivô `bottom-center`, `verifiedOnDestination: false` |
 | Artefato final medido | folha **384×144** servida por `/artifact` com **21 cores** — as mesmas 21 cores da referência enviada pelo usuário, ou seja, o pipeline consumiu a entrada de verdade |
 
-O envio de arquivos para **serviços externos** continua fora: nada sai da máquina, e a pendência de upload segue em §13.
+O envio de arquivos para **serviços externos** continua fora: nada sai da máquina, e a pendência de upload segue em §14.
 
 ## 8. Ciclo de vida do run: progresso, cancelamento e retomada
 
@@ -174,7 +174,7 @@ Cancelamento tem três casos e os três são ditos com clareza, porque confundir
 
 O mesmo caminho foi exercitado **por HTTP no dev-server** (projeto real em disco, executável de teste): `GET /runs/active` devolveu o run com `render: running`; `POST /runs/{id}/cancel` devolveu `cancelling` e o estado final gravado foi `cancelled` com `cancellation.reason = "usuário desistiu desta geração"` e `cancelledBy = "validação HTTP"`; o processo de teste (PID 2708) não estava mais vivo; `POST /runs/{id}/resume` reaproveitou 1 checkpoint e terminou `succeeded` com `png-structural`, `png-content` e `destination-profile` aprovados e 6 artefatos; `POST /runs/run-inexistente/cancel` devolveu `404`.
 
-O que **não** foi executado aqui: cancelamento/reconciliação de uma chamada remota já enviada (ComfyUI remoto segue não autorizado — ver §12) e o comportamento após queda abrupta do processo do produto (o run órfão é corrigido pelo caminho acima, mas a reconciliação de requisições de API duplicadas continua como alvo em `WORKFLOW-ENGINE.md`).
+O que **não** foi executado aqui: cancelamento/reconciliação de uma chamada remota já enviada (ComfyUI remoto segue não autorizado — ver §14) e o comportamento após queda abrupta do processo do produto (o run órfão é corrigido pelo caminho acima, mas a reconciliação de requisições de API duplicadas continua como alvo em `WORKFLOW-ENGINE.md`).
 
 ## 9. Projeto: a pasta de trabalho existe como passo 1
 
@@ -200,7 +200,39 @@ A jornada do produto começa em "criar projeto" e termina em "exportar", mas a p
 
 O que **não** foi executado aqui: o seletor de pasta e o `shell.openPath` são código do processo principal do Electron e exigem o aplicativo rodando em uma máquina com interface gráfica — neste ambiente (sem display) eles foram verificados por código, contrato de canais e pelos mesmos caminhos de serviço/estrutura exercitados nos testes.
 
-## 10. Testes que provam o acima
+## 10. Roteiro de produção: os 12 passos visíveis
+
+A experiência pedida é "criar projeto → exportar" em 12 passos, mas a interface tinha cinco seções numeradas e nenhuma visão do caminho inteiro: quem não conhece Blender nem ComfyUI não sabia o que vem depois, nem o que já estava feito. O painel **Roteiro de produção** (`JourneyChecklist`, no topo da coluna principal) resolve isso com uma regra que vale para os 12 itens: **o estado é derivado de dados reais** — nada é decorativo e nada é marcado como concluído sem a evidência correspondente.
+
+| # | Passo | Vira "concluído" quando | Vira "decisão sua" quando |
+|---|---|---|---|
+| 1 | Abrir a pasta do projeto | `projectInfo()` diz que a pasta existe e é gravável | — |
+| 2 | Enviar referências e modelos | há entradas listadas em `input/` | — |
+| 3 | Escolher o objetivo | existe plano ou run para o workflow escolhido | — |
+| 4 | Descrever em uma frase | o brief tem texto (e o plano não pede `prompt` pendente) | — |
+| 5 | Conferir requisitos e ferramentas | o plano não tem passos bloqueados | `plan.blockedSteps` existe: instalar, autorizar ou escolher provider é humano |
+| 6 | Ler o plano antes de executar | `plan` está na tela | — |
+| 7 | Executar | existe run | — |
+| 8 | Acompanhar (ou cancelar) | o run está encerrado (`summary.finished`) | — |
+| 9 | Revisar os artefatos | run encerrado sem revisão pendente | run `blocked`: a aprovação é humana e fica amarrada ao SHA-256 |
+| 10 | Comparar variações | há comparação medida no Comparison Lab (passo opcional) | — |
+| 11 | Exportar para o destino | existe pacote exportado, com "verificado no destino: não" dito no próprio passo | — |
+| 12 | Guardar no projeto | há versão registrada no asset ou asset com versões/proveniência | — |
+
+Importar na engine **não é passo do produto** e não aparece como concluído: quando o pacote existe e `verifiedOnDestination` é `false`, o roteiro diz que o pacote confere com o perfil publicado do destino e que importar e conferir lá é com o usuário. Da mesma forma, passos que exigem instalação ou autorização aparecem com o ícone de decisão humana e o texto do que só o usuário pode fazer — o produto não instala, não compra e não autoriza nada por conta própria.
+
+### O que foi executado de verdade
+
+`tests/studio-ui-render-smoke.mjs` deriva o roteiro três vezes, com dados reais vindos da API (projeto, entradas, plano com passos bloqueados, run `succeeded`, pacote exportado, versão de asset):
+
+| Cenário | Resultado medido |
+|---|---|
+| Início (projeto aberto + 1 entrada, sem plano) | 12 passos numerados; **2 de 12** concluídos; passo atual = "3 · Escolher o objetivo"; nada além do que tem evidência |
+| Plano com passo sem provider | `plan` e `brief` concluídos; **requisitos = decisão humana** com o texto "Instalar ou autorizar é decisão sua"; passo atual = "7 · Executar" |
+| Jornada completa (run `succeeded` + export + versão gravada) | 11 passos concluídos, nenhum passo atual pendente, exportação dizendo "verificado no destino: não" |
+| Render | o painel aparece com "Roteiro de produção", "2 de 12 passos", "Passo 3 — Escolher o objetivo" e a lista completa a um clique |
+
+## 11. Testes que provam o acima
 
 | Comando | Resultado |
 |---|---|
@@ -208,11 +240,20 @@ O que **não** foi executado aqui: o seletor de pasta e o `shell.openPath` são 
 | `npm run test:python` | **30 testes OK** |
 | `npx vite build` | build de produção sem erro |
 
-Nesta rodada, `tests/project-structure-smoke.mjs` é novo (leitura que não escreve, criação mínima, preservação byte a byte de `.spriteforge/` e `.lia.json`, `projectInfo()` do serviço e raízes inválidas recusadas), `tests/studio-ui-render-smoke.mjs` passou a cobrir `GET /project` (`405` em `POST`) e o `ProjectPanel` nos dois transportes, e `tests/run-lifecycle-smoke.mjs` é novo (ciclo de vida do run: progresso por passo, cancelamento com processo externo encerrado, falha intermediária, retomada por checkpoint, run órfão e recusas — ver §8), os substitutos de ferramenta externa foram reunidos em `tests/tool-stubs.mjs` (usados pelo smoke de ciclo de vida e pelo de integração, sem duplicar código), `tests/studio-ui-render-smoke.mjs` passou a cobrir `GET /runs/active` e `POST /runs/{id}/cancel|resume` e `tests/studio-service-smoke.mjs` ganhou a seção 11 (medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada e Comparison Lab com caminho recusado) e `tests/studio-ui-render-smoke.mjs` passou a enviar um arquivo por HTTP, conferir `400`/`403`, servir a prévia, comparar artefatos, gravar a escolha como versão do asset e renderizar `InputPicker` e `ComparisonLab`.
+O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 
-Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: integração real com processo externo e ComfyUI em loopback, providers, recusas e gates — ver §6), `tests/workflow-coverage-smoke.mjs` (novo: 11 casos sobre os 8 workflows, com matriz de evidência impressa), `tests/studio-service-smoke.mjs` (passo opcional que produz prévia e passo opcional com erro que vira skip), `tests/orchestrator-engine-smoke.mjs` (entradas pendentes, `pendingInputs`, bloqueio nomeado por passo), `tests/studio-ui-render-smoke.mjs` (rig entre runs pela API, entradas pendentes, validações e o painel de providers renderizados na UI), `tests/preflight-destinations-smoke.mjs` (conformidade do pacote com o perfil publicado do destino), `tests/adapter-sdk-smoke.mjs` (caminho de executável inválido não vira ferramenta disponível), `tests/studio-service-smoke.mjs` (brief como entrada de texto do passo de conceito).
+- `tests/project-structure-smoke.mjs` (**novo**): leitura que não escreve, criação limitada a `input/` e `.lia-forge/runs/`, `.spriteforge/assets.json`, `.lia.json` e um arquivo do usuário preservados byte a byte, `projectInfo()` coerente com o disco e raízes inválidas (arquivo, symlink, caminho vazio) recusadas — com verificação de que nada foi criado fora do caminho informado (§9).
+- `tests/run-lifecycle-smoke.mjs` (**novo**): progresso gravado antes do fim do run, cancelamento com o processo externo encerrado de verdade, cancelar duas vezes sem reescrever nada, retomada por checkpoint sem reexecutar passo concluído, falha intermediária com código de saída e stderr preservados, retomada depois da falha, run órfão corrigido sem fingir execução e recusas nomeadas (§8).
+- `tests/tool-stubs.mjs` (**novo**): os substitutos de ferramenta externa (renderizador, lento e falho) reunidos num módulo só, usados pelo smoke de ciclo de vida e pelo de integração — sem duplicar código e sempre rotulados como substitutos.
+- `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em três cenários reais e renderizado (§10); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
+- `tests/studio-service-smoke.mjs` (estendido): seção 11 com medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada a `input/` e Comparison Lab com caminho recusado (§7); passo opcional que produz prévia, passo opcional com erro que vira skip e brief como entrada de texto do passo de conceito.
+- `tests/host-integration-smoke.mjs` (**novo** nesta fase): integração real com processo externo e ComfyUI em loopback, providers, recusas e gates (§6).
+- `tests/workflow-coverage-smoke.mjs` (**novo** nesta fase): 11 casos sobre os 8 workflows, com a matriz de evidência impressa (§3).
+- `tests/orchestrator-engine-smoke.mjs` (estendido): entradas pendentes, `pendingInputs` e bloqueio nomeado por passo.
+- `tests/preflight-destinations-smoke.mjs` (estendido): conformidade do pacote com o perfil publicado do destino.
+- `tests/adapter-sdk-smoke.mjs` (estendido): caminho de executável inválido não vira ferramenta disponível.
 
-## 11. O que **não** foi executado (e o que seria necessário)
+## 12. O que **não** foi executado (e o que seria necessário)
 
 | Item | Estado | O que falta |
 |---|---|---|
@@ -225,7 +266,7 @@ Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: in
 | Direitos das artes da Biblioteca | pendente | 6 itens `RIGHTS_PENDING` em `LIBRARY-VISUAL-REFERENCE-INVENTORY.md` |
 | Envio de referências do usuário para serviço externo | não autorizado | o upload copia apenas para `input/` do projeto; enviar para fora exige decisão humana (serviço, escopo e custo) |
 
-## 12. Commits da fase T13 (branch `arena/649f88bd-3dspritesheet`)
+## 13. Commits da fase T13 (branch `arena/649f88bd-3dspritesheet`)
 
 | Commit | Conteúdo |
 |---|---|
@@ -243,8 +284,10 @@ Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: in
 | `ea6a9f0` | ciclo de vida do run: snapshot gravado a cada passo, `cancelRun`/`resumeRun`/`activeRuns` nos dois transportes, botões de cancelar e retomar e smoke de cancelamento/falha/retomada |
 | `d650e09` | documentação de execução do ciclo de vida do run (§8) e reconciliação do cabeçalho de `WORKFLOW-ENGINE.md` |
 | `c739c46` | projeto como passo 1: `project-structure.mjs`, `projectInfo()`, `GET /project`, canais IPC de abrir/criar/revelar, painel Projeto e smoke de preservação |
+| `3cf7aa5` | documentação de execução do projeto como passo 1 (§9) |
+| `59dbe81` | roteiro de produção na interface: 12 passos derivados do estado real, decisões humanas marcadas como tais e smoke nos três cenários |
 
-## 13. Pendências que exigem decisão humana
+## 14. Pendências que exigem decisão humana
 
 Adoção de Spine ou de qualquer provider comercial/de IA · alternativa A de identidade Studio × Forge · licenças incertas (`2DAutoRigger`, `see-through`, MotionBricks) · backend remoto pago e teto de custo · upload de arquivos · instalação/download de ferramentas de terceiros · execução dos scripts de diagnóstico na máquina alvo (Windows + RX 580) · direitos das 6 artes `RIGHTS_PENDING`.
 
