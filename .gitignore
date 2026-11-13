@@ -3,6 +3,7 @@ dist/
 release/
 .vite/
 .spriteforge/
+.lia-forge/
 .DS_Store
 *.log
 __pycache__/

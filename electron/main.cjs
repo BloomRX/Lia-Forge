@@ -80,6 +80,45 @@ function loadAdapterRegistry() {
   return adapterRegistryPromise;
 }
 
+let studioServicePromise = null;
+let studioServiceRoot = null;
+
+/**
+ * Fachada do Studio (F8 — §11): o mesmo `createStudioService` que o plugin Vite
+ * expõe por HTTP, aqui com as dependências reais do Electron (descoberta de
+ * ferramentas, registro de processos filhos, cliente ComfyUI e validadores
+ * legados). Um sistema só, dois transportes.
+ */
+function getStudioService() {
+  if (!projectRoot) {
+    throw new Error('O projeto ainda não foi carregado: não há raiz para o Studio operar.');
+  }
+  if (!studioServicePromise || studioServiceRoot !== projectRoot) {
+    studioServiceRoot = projectRoot;
+    studioServicePromise = import('../shared/services/studio-service.mjs')
+      .then(({ createStudioService }) => createStudioService({ projectRoot, ...adapterDependencies() }))
+      .catch((error) => {
+        studioServicePromise = null;
+        studioServiceRoot = null;
+        throw error;
+      });
+  }
+  return studioServicePromise;
+}
+
+function forwardStudioEvent(event) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lia-forge:workflow:event', event);
+}
+
+const RUN_ID_PATTERN = /^[A-Za-z0-9._-]{1,120}$/;
+
+function requireText(value, field, maxLength = 120) {
+  if (typeof value !== 'string' || !value.trim() || value.length > maxLength) {
+    throw new Error(`${field} inválido: esperava texto de até ${maxLength} caracteres.`);
+  }
+  return value.trim();
+}
+
 async function resolveAdapter(adapterId) {
   const registry = await loadAdapterRegistry();
   if (!registry.has(adapterId)) {
@@ -972,6 +1011,131 @@ function registerIpcHandlers() {
       outputs: [],
       executed: false,
     };
+  });
+  // ---- Studio (F8): planejamento, execução, revisão, exportação e direitos ----
+  ipcMain.handle('lia-forge:studio:overview', async (event) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).overview();
+  });
+  ipcMain.handle('lia-forge:studio:workflows', async (event) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).workflows();
+  });
+  ipcMain.handle('lia-forge:studio:preflight', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    const capabilityIds = Array.isArray(payload?.capabilityIds)
+      ? payload.capabilityIds.filter((id) => typeof id === 'string' && id.length <= 120)
+      : null;
+    return (await getStudioService()).preflight({ capabilityIds });
+  });
+  ipcMain.handle('lia-forge:studio:plan', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).plan({
+      workflowId: requireText(payload?.workflowId, 'workflowId', 80),
+      destination: payload?.destination ? requireText(payload.destination, 'destination', 40) : null,
+      options: payload?.options ?? {},
+      brief: payload?.brief ? requireText(payload.brief, 'brief', 2000) : null,
+    });
+  });
+  ipcMain.handle('lia-forge:studio:run', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).run({
+      workflowId: requireText(payload?.workflowId, 'workflowId', 80),
+      destination: payload?.destination ? requireText(payload.destination, 'destination', 40) : null,
+      options: payload?.options ?? {},
+      brief: payload?.brief ? requireText(payload.brief, 'brief', 2000) : null,
+      params: payload?.params ?? {},
+      onEvent: forwardStudioEvent,
+    });
+  });
+  ipcMain.handle('lia-forge:studio:runs:list', async (event) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).listRuns();
+  });
+  ipcMain.handle('lia-forge:studio:runs:read', async (event, runId) => {
+    assertTrustedIpcSender(event);
+    if (!RUN_ID_PATTERN.test(String(runId ?? ''))) throw new Error('runId inválido.');
+    return (await getStudioService()).readRun(String(runId));
+  });
+  ipcMain.handle('lia-forge:studio:runs:review', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).reviewStep({
+      runId: requireText(payload?.runId, 'runId', 120),
+      stepId: requireText(payload?.stepId, 'stepId', 120),
+      approved: payload?.approved === true,
+      reviewer: payload?.reviewer ? requireText(payload.reviewer, 'reviewer', 120) : 'usuário do Studio',
+      note: payload?.note ? requireText(payload.note, 'note', 2000) : null,
+    });
+  });
+  ipcMain.handle('lia-forge:studio:runs:export', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).exportRun({
+      runId: requireText(payload?.runId, 'runId', 120),
+      destination: requireText(payload?.destination, 'destination', 40),
+      asset: payload?.asset ?? null,
+    });
+  });
+  ipcMain.handle('lia-forge:studio:vfx-preview', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).vfxPreview({
+      preset: payload?.preset ? requireText(payload.preset, 'preset', 40) : 'explosion',
+      size: Number(payload?.size ?? 96),
+      frameCount: Number(payload?.frameCount ?? 8),
+      seed: payload?.seed ? requireText(payload.seed, 'seed', 120) : 'lia-forge',
+    });
+  });
+  ipcMain.handle('lia-forge:studio:assets:rights', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).declareAssetRights(
+      requireText(payload?.assetId, 'assetId', 160),
+      {
+        license: payload?.license ? requireText(payload.license, 'license', 160) : null,
+        declaredBy: payload?.declaredBy ? requireText(payload.declaredBy, 'declaredBy', 160) : null,
+        note: payload?.note ? requireText(payload.note, 'note', 2000) : null,
+        blocked: payload?.blocked === true,
+      },
+    );
+  });
+  ipcMain.handle('lia-forge:studio:assets:attach-run', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).attachRunToAsset({
+      assetId: requireText(payload?.assetId, 'assetId', 160),
+      runId: requireText(payload?.runId, 'runId', 120),
+    });
+  });
+  ipcMain.handle('lia-forge:studio:assets:list', async (event) => {
+    assertTrustedIpcSender(event);
+    const service = await getStudioService();
+    return { assets: await service.listAssets(), rights: await service.rightsReport() };
+  });
+  ipcMain.handle('lia-forge:studio:assets:upsert', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    if (!payload || typeof payload !== 'object') throw new Error('Registro de asset inválido.');
+    return (await getStudioService()).upsertAsset(payload);
+  });
+  ipcMain.handle('lia-forge:studio:rights', async (event) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).rightsReport();
+  });
+  // Artefato de run em base64: no desktop não há servidor HTTP, e o caminho é
+  // confinado a <projeto>/.lia-forge/runs/ sem seguir symlink (teto de 6 MB).
+  ipcMain.handle('lia-forge:studio:artifact', async (event, relativePath) => {
+    assertTrustedIpcSender(event);
+    const relative = requireText(relativePath, 'path', 600);
+    const runsRoot = path.join(projectRoot, '.lia-forge', 'runs');
+    const absolute = path.resolve(projectRoot, relative);
+    if (!inside(runsRoot, absolute)) throw new Error('Só artefatos dentro de .lia-forge/runs/ podem ser lidos.');
+    const stats = await fs.lstat(absolute).catch(() => null);
+    if (!stats || stats.isSymbolicLink() || !stats.isFile()) throw new Error('Artefato não encontrado.');
+    if (stats.size > 6 * 1024 * 1024) throw new Error('Artefato maior que 6 MB; abra no explorador de arquivos.');
+    const bytes = await fs.readFile(absolute);
+    const extension = path.extname(absolute).toLowerCase();
+    const contentType = extension === '.png' ? 'image/png'
+      : extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg'
+        : extension === '.webp' ? 'image/webp'
+          : extension === '.json' ? 'application/json'
+            : 'application/octet-stream';
+    return { path: relative, contentType, base64: bytes.toString('base64'), bytes: bytes.length };
   });
   ipcMain.handle('lia-forge:tools:status', (event) => {
     assertTrustedIpcSender(event);

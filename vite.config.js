@@ -213,8 +213,253 @@ function comfyUiApi() {
   };
 }
 
+const LIA_FORGE_STUDIO_PREFIX = '/api/lia-forge/studio';
+const MAX_ARTIFACT_BYTES = 6 * 1024 * 1024;
+const MAX_BODY_BYTES = 1024 * 1024;
+const ARTIFACT_CONTENT_TYPES = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.json': 'application/json; charset=utf-8',
+  '.glb': 'model/gltf-binary',
+  '.gltf': 'model/gltf+json',
+};
+
+/** Mesma proteção de origem usada pelos outros plugins (o preview usa proxy). */
+function isSameOriginRequest(request) {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  try {
+    const originHost = new URL(origin).host;
+    const forwardedHost = String(request.headers['x-forwarded-host'] || '').split(',')[0].trim();
+    const requestHost = forwardedHost || request.headers.host;
+    return Boolean(requestHost) && originHost.toLowerCase() === String(requestHost).toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+function readJsonBody(request) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    request.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        request.destroy();
+        reject(new Error('Corpo da requisição excede 1 MB.'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on('end', () => {
+      if (!chunks.length) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      } catch {
+        reject(new Error('JSON inválido no corpo da requisição.'));
+      }
+    });
+    request.on('error', reject);
+  });
+}
+
+/**
+ * API HTTP do Studio (F8 — §11): expõe o mesmo `createStudioService` que o
+ * Electron usa, só que por rotas same-origin para o navegador/preview.
+ *
+ * Não é um segundo sistema: é a fachada única acessada por outro transporte.
+ * Nada aqui instala, baixa, compra ou envia dados; artefatos só são servidos de
+ * dentro de `<projeto>/.lia-forge/runs/`, sem seguir symlink.
+ */
+function liaForgeStudioApi() {
+  const projectRoot = path.resolve(process.env.SPRITEFORGE_PROJECT_ROOT || process.cwd());
+  const runsRoot = path.join(projectRoot, '.lia-forge', 'runs');
+  let servicePromise = null;
+
+  function studio() {
+    if (!servicePromise) {
+      servicePromise = import('./shared/services/studio-service.mjs')
+        .then((module) => module.createStudioService({ projectRoot }));
+    }
+    return servicePromise;
+  }
+
+  return {
+    name: 'lia-forge-studio-api',
+    configureServer(server) {
+      server.middlewares.use(async (request, response, next) => {
+        let url;
+        try {
+          url = new URL(request.url || '/', 'http://vite.local');
+        } catch {
+          return next();
+        }
+        const pathname = url.pathname;
+        if (!pathname.startsWith(LIA_FORGE_STUDIO_PREFIX)) return next();
+
+        const method = request.method || 'GET';
+        if (!isSameOriginRequest(request)) {
+          response.statusCode = 403;
+          response.end('Cross-origin access is not allowed');
+          return;
+        }
+        response.setHeader('Cache-Control', 'no-store');
+
+        const json = (status, payload) => {
+          response.statusCode = status;
+          response.setHeader('Content-Type', 'application/json; charset=utf-8');
+          response.end(JSON.stringify(payload));
+        };
+
+        const route = pathname.slice(LIA_FORGE_STUDIO_PREFIX.length) || '/';
+        try {
+          const service = await studio();
+
+          // ------------------------------------------------ artefato (imagem)
+          if (route === '/artifact') {
+            if (method !== 'GET') return json(405, { error: 'Method not allowed' });
+            const relative = url.searchParams.get('path') || '';
+            const absolute = path.resolve(projectRoot, relative);
+            if (!isInside(runsRoot, absolute)) return json(403, { error: 'Só artefatos dentro de .lia-forge/runs/ podem ser servidos.' });
+            const stats = await fs.lstat(absolute).catch(() => null);
+            if (!stats || !stats.isFile() || stats.isSymbolicLink()) return json(404, { error: 'Artefato não encontrado.' });
+            if (stats.size > MAX_ARTIFACT_BYTES) return json(413, { error: 'Artefato maior que 6 MB; abra no explorador de arquivos.' });
+            const bytes = await fs.readFile(absolute);
+            response.statusCode = 200;
+            response.setHeader('Content-Type', ARTIFACT_CONTENT_TYPES[path.extname(absolute).toLowerCase()] ?? 'application/octet-stream');
+            response.setHeader('Content-Length', String(bytes.length));
+            response.end(bytes);
+            return undefined;
+          }
+
+          if (route === '/overview') {
+            if (method !== 'GET') return json(405, { error: 'Method not allowed' });
+            return json(200, await service.overview());
+          }
+
+          if (route === '/workflows') {
+            if (method !== 'GET') return json(405, { error: 'Method not allowed' });
+            return json(200, { workflows: await service.workflows() });
+          }
+
+          if (route === '/preflight') {
+            if (method !== 'GET') return json(405, { error: 'Method not allowed' });
+            const raw = url.searchParams.get('capabilities');
+            const capabilityIds = raw ? raw.split(',').map((item) => item.trim()).filter(Boolean) : null;
+            return json(200, await service.preflight({ capabilityIds }));
+          }
+
+          if (route === '/plan') {
+            if (method !== 'POST') return json(405, { error: 'Method not allowed' });
+            const body = await readJsonBody(request);
+            if (!body.workflowId) return json(400, { error: 'workflowId é obrigatório.' });
+            return json(200, await service.plan({
+              workflowId: String(body.workflowId),
+              destination: body.destination ? String(body.destination) : null,
+              options: body.options ?? {},
+              brief: body.brief ? String(body.brief) : null,
+            }));
+          }
+
+          if (route === '/run') {
+            if (method !== 'POST') return json(405, { error: 'Method not allowed' });
+            const body = await readJsonBody(request);
+            if (!body.workflowId) return json(400, { error: 'workflowId é obrigatório.' });
+            const result = await service.run({
+              workflowId: String(body.workflowId),
+              destination: body.destination ? String(body.destination) : null,
+              options: body.options ?? {},
+              brief: body.brief ? String(body.brief) : null,
+              params: body.params ?? {},
+            });
+            return json(200, result);
+          }
+
+          if (route === '/vfx-preview') {
+            if (method !== 'GET') return json(405, { error: 'Method not allowed' });
+            return json(200, await service.vfxPreview({
+              preset: url.searchParams.get('preset') || 'explosion',
+              size: Number(url.searchParams.get('size') || 96),
+              frameCount: Number(url.searchParams.get('frameCount') || 8),
+              seed: url.searchParams.get('seed') || 'lia-forge',
+            }));
+          }
+
+          if (route === '/runs') {
+            if (method !== 'GET') return json(405, { error: 'Method not allowed' });
+            return json(200, { runs: await service.listRuns() });
+          }
+
+          const runMatch = route.match(/^\/runs\/([A-Za-z0-9._-]+)(?:\/(review|export))?$/);
+          if (runMatch) {
+            const [, runId, action] = runMatch;
+            if (!action) {
+              if (method !== 'GET') return json(405, { error: 'Method not allowed' });
+              const snapshot = await service.readRun(runId);
+              if (!snapshot) return json(404, { error: `Run "${runId}" não encontrado.` });
+              return json(200, snapshot);
+            }
+            if (method !== 'POST') return json(405, { error: 'Method not allowed' });
+            const body = await readJsonBody(request);
+            if (action === 'review') {
+              if (!body.stepId) return json(400, { error: 'stepId é obrigatório.' });
+              return json(200, await service.reviewStep({
+                runId,
+                stepId: String(body.stepId),
+                approved: body.approved === true,
+                reviewer: body.reviewer ? String(body.reviewer) : 'usuário do Studio',
+                note: body.note ? String(body.note) : null,
+              }));
+            }
+            if (!body.destination) return json(400, { error: 'destination é obrigatório.' });
+            return json(200, await service.exportRun({
+              runId,
+              destination: String(body.destination),
+              asset: body.asset ?? null,
+            }));
+          }
+
+          if (route === '/assets') {
+            if (method === 'GET') return json(200, { assets: await service.listAssets(), rights: await service.rightsReport() });
+            if (method === 'POST') {
+              const body = await readJsonBody(request);
+              if (!body.id) return json(400, { error: 'id é obrigatório.' });
+              return json(200, await service.upsertAsset(body));
+            }
+            return json(405, { error: 'Method not allowed' });
+          }
+
+          if (route === '/rights') {
+            if (method !== 'GET') return json(405, { error: 'Method not allowed' });
+            return json(200, await service.rightsReport());
+          }
+
+          const assetMatch = route.match(/^\/assets\/([A-Za-z0-9._-]+)\/(rights|attach-run)$/);
+          if (assetMatch) {
+            if (method !== 'POST') return json(405, { error: 'Method not allowed' });
+            const [, assetId, action] = assetMatch;
+            const body = await readJsonBody(request);
+            if (action === 'rights') return json(200, await service.declareAssetRights(assetId, body));
+            if (!body.runId) return json(400, { error: 'runId é obrigatório.' });
+            return json(200, await service.attachRunToAsset({ assetId, runId: String(body.runId) }));
+          }
+
+          return json(404, { error: 'Rota desconhecida da API do Studio Lia Forge.' });
+        } catch (error) {
+          return json(error?.statusCode === 404 ? 404 : 500, { error: error?.message || 'Falha na API do Studio.' });
+        }
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), projectAssetStore(), comfyUiApi()],
+  plugins: [react(), projectAssetStore(), comfyUiApi(), liaForgeStudioApi()],
   server: {
     host: '0.0.0.0',
     // The Arena preview uses a per-session proxy hostname rather than localhost.

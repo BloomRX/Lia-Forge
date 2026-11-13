@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { assetCompletionFlags, isLegacyIncompleteReferenceCompletion } from './asset-progress.js';
+import ForgeStudio from './ForgeStudio.jsx';
 import {
   Activity,
   ArrowRight,
@@ -864,6 +865,7 @@ function App() {
             <button onClick={() => chooseKind('character')}><Sparkles size={17} /> Personagens</button>
             <button onClick={() => chooseKind('item')}><Package size={17} /> Itens & props</button>
             <button onClick={() => navigate('handoff')}><Bot size={17} /> Agent handoff</button>
+            <button onClick={() => navigate('forge')}><Cpu size={17} /> Pipeline de produção</button>
             <button onClick={() => navigate('exports')}><Layers3 size={17} /> Exports</button>
             <button onClick={() => navigate('activity')}><Activity size={17} /> Atividade & ComfyUI</button>
           </div>
@@ -911,6 +913,7 @@ function App() {
             onNotify={notify}
           />
         )}
+        {page === 'forge' && <ForgeStudio onNotify={notify} onOpenExports={() => navigate('exports')} />}
         {page === 'exports' && <ExportsPage assets={assets} onBuildTask={() => navigate('handoff')} onOpenAssetFolder={(asset) => openManualStageFolder(asset, 4)} onNotify={notify} />}
         {page === 'activity' && (
           <ActivityPage
@@ -972,6 +975,9 @@ function Sidebar({ page, kind, characterCount, itemCount, activityCount, onNavig
 
       <div className="nav-group-label nav-group-production">PRODUÇÃO</div>
       <nav className="side-nav">
+        <button className={`nav-link ${page === 'forge' ? 'is-active' : ''}`} onClick={() => onNavigate('forge')}>
+          <Cpu size={17} strokeWidth={1.8} /><span>Pipeline de produção</span><span className="new-nav-tag">REAL</span>
+        </button>
         <button className={`nav-link ${page === 'exports' ? 'is-active' : ''}`} onClick={() => onNavigate('exports')}>
           <Layers3 size={17} strokeWidth={1.8} /><span>Exports</span><span className="nav-count">—</span>
         </button>
