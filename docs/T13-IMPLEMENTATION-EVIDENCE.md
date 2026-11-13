@@ -139,7 +139,7 @@ O que passou a existir (mesmo serviço, mesmos gates, dois transportes):
 | Entrada enviada → workflow completo | `POST /run` com `params.sourceImage = 'input/Referencia-Heroi.PNG'` → `blocked` → 2 revisões aprovadas (retomada real) → **`succeeded`** em 5 passos; validações `animation-loop`, `png-content`, `spritesheet-manifest` e `destination-profile` = `passed`; 7 artefatos; export Godot 4.x com 7 arquivos, 60 fps, pivô `bottom-center`, `verifiedOnDestination: false` |
 | Artefato final medido | folha **384×144** servida por `/artifact` com **21 cores** — as mesmas 21 cores da referência enviada pelo usuário, ou seja, o pipeline consumiu a entrada de verdade |
 
-O envio de arquivos para **serviços externos** continua fora: nada sai da máquina, e a pendência de upload segue em §12.
+O envio de arquivos para **serviços externos** continua fora: nada sai da máquina, e a pendência de upload segue em §13.
 
 ## 8. Ciclo de vida do run: progresso, cancelamento e retomada
 
@@ -176,19 +176,43 @@ O mesmo caminho foi exercitado **por HTTP no dev-server** (projeto real em disco
 
 O que **não** foi executado aqui: cancelamento/reconciliação de uma chamada remota já enviada (ComfyUI remoto segue não autorizado — ver §12) e o comportamento após queda abrupta do processo do produto (o run órfão é corrigido pelo caminho acima, mas a reconciliação de requisições de API duplicadas continua como alvo em `WORKFLOW-ENGINE.md`).
 
-## 9. Testes que provam o acima
+## 9. Projeto: a pasta de trabalho existe como passo 1
+
+A jornada do produto começa em "criar projeto" e termina em "exportar", mas a pasta de trabalho não aparecia em lugar nenhum da interface: ela era decidida pelo ambiente (dev-server) ou pelo boot do Electron, e o usuário não tinha como saber onde os arquivos estavam, quanto havia de coisa lá, nem abrir outro projeto. Também não havia garantia escrita de que abrir um projeto não mexeria no que já existia.
+
+- `shared/integrations/project-structure.mjs` (novo) é a única fonte desse conhecimento: um projeto é uma pasta com `input/` (referências e modelos) e `.lia-forge/` (estado produzido: runs, providers, exports). `inspectProjectStructure()` lê sem escrever (existência, permissão de escrita, contagens, o que será preservado); `ensureProjectStructure()` cria **apenas** `input/` e `.lia-forge/runs/` quando faltam e devolve a lista do que criou, do que já existia e do que é preservado. Raiz vazia é recusada antes de `path.resolve` — sem isso o diretório de trabalho atual viraria projeto; arquivo e symlink como raiz também são recusados.
+- `.spriteforge/` (store de versões anteriores) e `.lia.json` (formato de importação do destino Lia Desktop, gravado por asset) são detectados, listados como preservados e **nunca** movidos, convertidos, renomeados ou reescritos. Nenhum `.lia.json` de projeto é criado: aquele nome já tem dono no contrato de destino.
+- Serviço: `projectInfo()` combina a estrutura com o que o produto tem lá dentro (entradas, runs, assets, execuções em andamento) e diz explicitamente se há conteúdo legado preservado.
+- Transportes: `GET /api/lia-forge/studio/project` (somente leitura — `POST` devolve `405`, porque trocar de projeto por HTTP significaria escrever fora da raiz servida) e os canais IPC `lia-forge:studio:project:info|choose|reveal`. No desktop, `choose` abre o seletor de pasta, cria a estrutura mínima, troca a raiz do serviço (que já invalida o cache quando a raiz muda), grava o último projeto em `userData/last-project.json` e recusa a troca se houver execução em andamento; `reveal` abre a pasta no gerenciador de arquivos. No boot, o último projeto só é usado se a pasta ainda existir — caminho que sumiu volta ao padrão em vez de ser recriado.
+- Interface: painel **Projeto** no topo da coluna lateral com a pasta, as contagens, o aviso de conteúdo legado preservado, o aviso quando não há permissão de escrita e os botões de abrir/criar/revelar (só no desktop; no navegador a origem da pasta é dita em vez de oferecer ação que não existe). Trocar de projeto limpa o run, a exportação e a comparação exibidos, para ninguém ver artefato de outro projeto.
+
+### O que foi executado de verdade
+
+| Verificação | Resultado medido |
+|---|---|
+| Leitura sem escrita | `inspectProjectStructure` de pasta inexistente devolve `exists:false, writable:false` e a pasta **não** é criada |
+| Criação mínima | `ensureProjectStructure` cria exatamente `input/` e `.lia-forge/runs/`; a chamada seguinte não cria nada e diz que a estrutura já existia |
+| Preservação | `.spriteforge/assets.json`, `.lia.json` e um arquivo de usuário (`brief-do-usuario.md`) sobrevivem **byte a byte** à abertura do projeto e aparecem em `preserved` |
+| Serviço | `projectInfo()` informa a mesma raiz, as contagens (1 entrada, 0 runs), `legacy.spriteforge/liaManifest` e a nota de preservação |
+| Recusas | arquivo como raiz, symlink como raiz e raiz vazia (com verificação de que nada foi criado fora do caminho informado) |
+| HTTP no dev-server | `GET /project` devolve `root=/home/user/lia-preview-project`, `writable:true`, `counts {inputs:2, runs:1, assets:0}`, `preserved [input, .lia-forge, .lia-forge/runs, .lia-forge/providers.json]`, `managedHere:false` com a nota sobre `SPRITEFORGE_PROJECT_ROOT`; `POST /project` → `405` |
+| Interface | `ProjectPanel` renderizado nos dois transportes: no navegador mostra a pasta e a origem dela sem oferecer troca; no desktop oferece abrir, criar e revelar, e mostra o conteúdo legado como preservado |
+
+O que **não** foi executado aqui: o seletor de pasta e o `shell.openPath` são código do processo principal do Electron e exigem o aplicativo rodando em uma máquina com interface gráfica — neste ambiente (sem display) eles foram verificados por código, contrato de canais e pelos mesmos caminhos de serviço/estrutura exercitados nos testes.
+
+## 10. Testes que provam o acima
 
 | Comando | Resultado |
 |---|---|
-| `npm test` | **30 smokes verdes** (Node 22, sem rede; o smoke de integração usa processo e HTTP loopback reais, sem ferramenta externa instalada) |
+| `npm test` | **31 smokes verdes** (Node 22, sem rede; o smoke de integração usa processo e HTTP loopback reais, sem ferramenta externa instalada) |
 | `npm run test:python` | **30 testes OK** |
 | `npx vite build` | build de produção sem erro |
 
-Nesta rodada, `tests/run-lifecycle-smoke.mjs` é novo (ciclo de vida do run: progresso por passo, cancelamento com processo externo encerrado, falha intermediária, retomada por checkpoint, run órfão e recusas — ver §8), os substitutos de ferramenta externa foram reunidos em `tests/tool-stubs.mjs` (usados pelo smoke de ciclo de vida e pelo de integração, sem duplicar código), `tests/studio-ui-render-smoke.mjs` passou a cobrir `GET /runs/active` e `POST /runs/{id}/cancel|resume` e `tests/studio-service-smoke.mjs` ganhou a seção 11 (medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada e Comparison Lab com caminho recusado) e `tests/studio-ui-render-smoke.mjs` passou a enviar um arquivo por HTTP, conferir `400`/`403`, servir a prévia, comparar artefatos, gravar a escolha como versão do asset e renderizar `InputPicker` e `ComparisonLab`.
+Nesta rodada, `tests/project-structure-smoke.mjs` é novo (leitura que não escreve, criação mínima, preservação byte a byte de `.spriteforge/` e `.lia.json`, `projectInfo()` do serviço e raízes inválidas recusadas), `tests/studio-ui-render-smoke.mjs` passou a cobrir `GET /project` (`405` em `POST`) e o `ProjectPanel` nos dois transportes, e `tests/run-lifecycle-smoke.mjs` é novo (ciclo de vida do run: progresso por passo, cancelamento com processo externo encerrado, falha intermediária, retomada por checkpoint, run órfão e recusas — ver §8), os substitutos de ferramenta externa foram reunidos em `tests/tool-stubs.mjs` (usados pelo smoke de ciclo de vida e pelo de integração, sem duplicar código), `tests/studio-ui-render-smoke.mjs` passou a cobrir `GET /runs/active` e `POST /runs/{id}/cancel|resume` e `tests/studio-service-smoke.mjs` ganhou a seção 11 (medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada e Comparison Lab com caminho recusado) e `tests/studio-ui-render-smoke.mjs` passou a enviar um arquivo por HTTP, conferir `400`/`403`, servir a prévia, comparar artefatos, gravar a escolha como versão do asset e renderizar `InputPicker` e `ComparisonLab`.
 
 Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: integração real com processo externo e ComfyUI em loopback, providers, recusas e gates — ver §6), `tests/workflow-coverage-smoke.mjs` (novo: 11 casos sobre os 8 workflows, com matriz de evidência impressa), `tests/studio-service-smoke.mjs` (passo opcional que produz prévia e passo opcional com erro que vira skip), `tests/orchestrator-engine-smoke.mjs` (entradas pendentes, `pendingInputs`, bloqueio nomeado por passo), `tests/studio-ui-render-smoke.mjs` (rig entre runs pela API, entradas pendentes, validações e o painel de providers renderizados na UI), `tests/preflight-destinations-smoke.mjs` (conformidade do pacote com o perfil publicado do destino), `tests/adapter-sdk-smoke.mjs` (caminho de executável inválido não vira ferramenta disponível), `tests/studio-service-smoke.mjs` (brief como entrada de texto do passo de conceito).
 
-## 10. O que **não** foi executado (e o que seria necessário)
+## 11. O que **não** foi executado (e o que seria necessário)
 
 | Item | Estado | O que falta |
 |---|---|---|
@@ -196,11 +220,12 @@ Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: in
 | Geração 2D por difusão (ComfyUI) | não executada na ferramenta real | servidor ComfyUI instalado pelo usuário e checkpoint já presente nele. O caminho completo (HTTP loopback, grafo com checkpoint e prompt, download do PNG, validação de conteúdo) foi executado com um **servidor de teste rotulado** — ver §6 |
 | Importação em engine de destino (Godot/Unity/Unreal) | não executada | nenhuma engine está instalada aqui. O que é executado: conformidade do pacote com o perfil publicado do destino (formatos, fps, eixos, SHA-256) — `verifiedOnDestination` continua `false` |
 | Backend remoto / GPU alugada / hosted | não autorizado | decisão humana sobre envio de dados e teto de custo; arquitetura pronta, execução pendente |
+| Seletor de pasta e "ver no sistema" (Electron) | não executado aqui | exigem o aplicativo com interface gráfica; o serviço, a estrutura de projeto e os canais foram executados por teste e por HTTP — ver §9 |
 | GPU/Vulkan (RX 580, gfx803) | não medido aqui | máquina alvo com driver; nada é afirmado sem evidência |
 | Direitos das artes da Biblioteca | pendente | 6 itens `RIGHTS_PENDING` em `LIBRARY-VISUAL-REFERENCE-INVENTORY.md` |
 | Envio de referências do usuário para serviço externo | não autorizado | o upload copia apenas para `input/` do projeto; enviar para fora exige decisão humana (serviço, escopo e custo) |
 
-## 11. Commits da fase T13 (branch `arena/649f88bd-3dspritesheet`)
+## 12. Commits da fase T13 (branch `arena/649f88bd-3dspritesheet`)
 
 | Commit | Conteúdo |
 |---|---|
@@ -216,8 +241,10 @@ Smokes novos/estendidos nesta fase: `tests/host-integration-smoke.mjs` (novo: in
 | `c087602` | entradas do usuário em `input/` (upload, verificação de conteúdo, leitura confinada) e Comparison Lab com registro da escolha como versão do asset |
 | `bedcdae` | documentação de execução das entradas e do Comparison Lab (§7) |
 | `ea6a9f0` | ciclo de vida do run: snapshot gravado a cada passo, `cancelRun`/`resumeRun`/`activeRuns` nos dois transportes, botões de cancelar e retomar e smoke de cancelamento/falha/retomada |
+| `d650e09` | documentação de execução do ciclo de vida do run (§8) e reconciliação do cabeçalho de `WORKFLOW-ENGINE.md` |
+| `c739c46` | projeto como passo 1: `project-structure.mjs`, `projectInfo()`, `GET /project`, canais IPC de abrir/criar/revelar, painel Projeto e smoke de preservação |
 
-## 12. Pendências que exigem decisão humana
+## 13. Pendências que exigem decisão humana
 
 Adoção de Spine ou de qualquer provider comercial/de IA · alternativa A de identidade Studio × Forge · licenças incertas (`2DAutoRigger`, `see-through`, MotionBricks) · backend remoto pago e teto de custo · upload de arquivos · instalação/download de ferramentas de terceiros · execução dos scripts de diagnóstico na máquina alvo (Windows + RX 580) · direitos das 6 artes `RIGHTS_PENDING`.
 
