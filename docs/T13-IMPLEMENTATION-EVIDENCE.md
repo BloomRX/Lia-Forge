@@ -157,6 +157,8 @@ Cancelamento tem três casos e os três são ditos com clareza, porque confundir
 | Run já encerrado (`succeeded`, `failed`, `blocked`…) | `ok: false` com o estado real no motivo e **nenhuma reescrita** em disco |
 | Run marcado `running` sem execução aqui (o aplicativo foi fechado) | o estado gravado é corrigido para `cancelled` com `cancelled.executionPresent: false` e nota dizendo que não havia processo para parar; checkpoints de passos concluídos seguem válidos para retomada |
 
+Um run interrompido não podia ficar com cara de ocupado para sempre: `listRuns()` agora devolve `active` (está executando **neste processo**) e `stale` (o arquivo diz que está em andamento e não há execução aqui). A lista lateral mostra o item como **Interrompido**, explica o motivo e oferece as duas saídas no próprio item — *Corrigir estado* (grava `cancelled` com `executionPresent: false`) e *Retomar* (reaproveita os checkpoints que existem). Run `unreadable` continua `unreadable`, sem ser promovido a nenhum estado.
+
 ### O que foi executado de verdade
 
 `tests/run-lifecycle-smoke.mjs` (novo) usa um **executável de teste** no lugar do Blender — que não está instalado aqui — e percorre o caminho real (`spawn` com os argumentos do contrato, signal até o processo filho, leitura de saída, validação, checkpoints):
@@ -170,9 +172,13 @@ Cancelamento tem três casos e os três são ditos com clareza, porque confundir
 | Retomada | `resumeRun` com 1 checkpoint reaproveitado, `finishedAt` do passo concluído idêntico (não reexecutou), evento `step-reused` no histórico, run termina `succeeded` com o processo externo real |
 | Falha intermediária | executável que sai com código 3 → run `failed`, mensagem com o código de saída e o stderr preservado, dependentes `skipped`; após trocar o executável, `resumeRun` sai do `failed` e conclui |
 | Run órfão | `run.json` escrito à mão como `running` → `cancelRun` devolve `stale: true`, grava `cancelled` com `executionPresent: false`, mantém o passo concluído e marca o que estava em andamento como cancelado; `resumeRun` sem `plan.json` é recusado com motivo claro |
+| Lista de runs durante a execução | `active: true` e `stale: false` enquanto o processo externo trabalha; depois do cancelamento, `active: false`, `stale: false`, `status: cancelled` |
+| Run interrompido na lista | `run.json` gravado como `running` sem execução aqui → `stale: true`, `active: false`; após corrigir, `status: cancelled` e `stale: false` |
 | Recusas | `cancelRun`/`resumeRun` com caminho como `runId`, run inexistente, run concluído, run ainda em execução |
 
-O mesmo caminho foi exercitado **por HTTP no dev-server** (projeto real em disco, executável de teste): `GET /runs/active` devolveu o run com `render: running`; `POST /runs/{id}/cancel` devolveu `cancelling` e o estado final gravado foi `cancelled` com `cancellation.reason = "usuário desistiu desta geração"` e `cancelledBy = "validação HTTP"`; o processo de teste (PID 2708) não estava mais vivo; `POST /runs/{id}/resume` reaproveitou 1 checkpoint e terminou `succeeded` com `png-structural`, `png-content` e `destination-profile` aprovados e 6 artefatos; `POST /runs/run-inexistente/cancel` devolveu `404`.
+Na interface, o item da lista (`SavedRunItem`) foi renderizado nos dois estados: run encerrado não oferece recuperação; run `stale` mostra "Interrompido", a explicação "não há execução neste processo" e os dois botões.
+
+O mesmo caminho foi exercitado **por HTTP no dev-server** (projeto real em disco, executável de teste): `GET /runs/active` devolveu o run com `render: running`; `POST /runs/{id}/cancel` devolveu `cancelling` e o estado final gravado foi `cancelled` com `cancellation.reason = "usuário desistiu desta geração"` e `cancelledBy = "validação HTTP"`; o processo de teste (PID 2708) não estava mais vivo; `POST /runs/{id}/resume` reaproveitou 1 checkpoint e terminou `succeeded` com `png-structural`, `png-content` e `destination-profile` aprovados e 6 artefatos; `POST /runs/run-inexistente/cancel` devolveu `404`. Um run gravado à mão como `running` no projeto de preview apareceu em `GET /runs` com `stale: true, active: false`; `POST /runs/{id}/cancel` devolveu `ok: true, status: 'cancelled', stale: true` com a nota de que não havia execução neste processo, e a listagem seguinte passou a mostrar `status: cancelled, stale: false`.
 
 O que **não** foi executado aqui: cancelamento/reconciliação de uma chamada remota já enviada (ComfyUI remoto segue não autorizado — ver §14) e o comportamento após queda abrupta do processo do produto (o run órfão é corrigido pelo caminho acima, mas a reconciliação de requisições de API duplicadas continua como alvo em `WORKFLOW-ENGINE.md`).
 
