@@ -71,6 +71,25 @@ Reforços desta fase:
 - `reviewStep` repassa a origem do run gravada em `plan.json` (`fromRun`, `sourceImage`, opções): retomar não perde mais o contexto que só existia na primeira execução;
 - `needsAuthorization` deixou de ser derivado de `protectedActions` (que lista o que o adapter **se recusa** a fazer): adapters locais não geram mais pendências falsas de autorização no plano.
 
+### Transporte IPC: coerência entre os três lados e guard por canal
+
+O Studio fala com o **mesmo** `createStudioService` por dois transportes (HTTP no navegador/preview, IPC no desktop), e o transporte IPC depende de três arquivos combinarem: `src/lia-forge-api.js` (quem chama), `electron/preload.cjs` (o que é exposto) e `electron/main.cjs` (o que responde). Um método esquecido em um deles não aparece em nenhum teste de serviço — só quebraria no aplicativo empacotado, que é justamente o que não se executa aqui. `tests/ipc-coherence-smoke.cjs` (**novo**, 58 checagens por análise estática, sem abrir janela nem exigir Electron instalado) fecha essa lacuna:
+
+| Verificação | Resultado medido |
+|---|---|
+| Cliente → preload | os **30** métodos que `liaForgeApi` chama no bridge existem no bloco `studio` do preload |
+| Preload → main | os **30** canais `lia-forge:studio:*` têm `ipcMain.handle`; nenhum botão morto no desktop |
+| Main → preload | nenhum handler do Studio ficou sem exposição (superfície igual dos dois lados) |
+| Guard por canal | **todos** os 30 handlers chamam `assertTrustedIpcSender(event)` antes de tocar no serviço, e o guard delega para `electron/ipc-guard.cjs` com a janela e a navegação confiável |
+| Paridade de transporte | cada método alcança o mesmo método de serviço pela rota HTTP do dev-server — nenhum é só do desktop nem só do navegador |
+| Exceções documentadas | `chooseProject`, `revealProject` e `pickInput` são diálogos nativos: existem só no IPC e o cliente devolve `null` no navegador, em vez de fingir que abriu um diálogo |
+| Disciplina de canais | namespace `lia-forge:` em todos; `invoke`↔`handle`, `send`↔`on`, `on` do renderer↔`webContents.send` do main; preload não expõe `ipcRenderer` cru; assinatura de eventos devolve como cancelar a escuta |
+| Janela endurecida | `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, `webSecurity: true`, preload do repositório, abertura de janela negada e `will-navigate`/`will-redirect` bloqueando origem não confiável |
+
+Isso é verificação estática de coerência, **não** execução do aplicativo empacotado: continua em §12 que o app com interface gráfica não foi executado neste ambiente.
+
+Correção de teste desta rodada: `tests/run-lifecycle-smoke.mjs` enviava o cancelamento assim que o snapshot mostrava o passo em andamento, o que podia chegar **antes** de o substituto de teste gravar o PID (o Node leva alguns milissegundos para iniciar). O teste dependia de corrida e falhou de forma intermitente com a máquina ocupada; agora ele espera o PID gravado e o processo vivo antes do sinal, e passou três vezes seguidas.
+
 ## 6. Ferramentas externas: integração real em qualquer hospedeiro + providers
 
 Até esta rodada, as implementações reais (`electron/blender-adapter.cjs`, `external-tools.cjs`, `manual-artifacts.cjs`, `task-manager.cjs`, `scripts/comfyui-client.mjs`) só eram injetadas pelo `electron/main.cjs`. Fora do Electron, os defaults do serviço lançavam erro ou eram no-op: **um Blender ou ComfyUI instalado pelo usuário era invisível** no dev-server, nos testes e em qualquer processo Node. Isso foi corrigido sem criar um segundo sistema:
@@ -264,12 +283,13 @@ Trilha medida: `0 → 1 → 2 → 6 → 8 → 9 → 10 → 11 → 12`, com a che
 
 | Comando | Resultado |
 |---|---|
-| `npm test` | **32 smokes verdes** (Node 22, sem rede; o smoke de integração usa processo e HTTP loopback reais, sem ferramenta externa instalada) |
+| `npm test` | **33 smokes verdes** (Node 22, sem rede; o smoke de integração usa processo e HTTP loopback reais, sem ferramenta externa instalada) |
 | `npm run test:python` | **30 testes OK** |
 | `npx vite build` | build de produção sem erro |
 
 O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 
+- `tests/ipc-coherence-smoke.cjs` (**novo**): coerência estática entre cliente, preload e processo principal (30 métodos/30 canais), guard de IPC em todos os handlers do Studio, paridade de transporte com o HTTP e janela endurecida (§5).
 - `tests/journey-smoke.mjs` (**novo**): a jornada de 12 passos percorrida de ponta a ponta com o serviço real, com o roteiro derivado a cada parada e a honestidade verificada removendo uma evidência por vez (§10).
 - `tests/project-structure-smoke.mjs` (**novo**): leitura que não escreve, criação limitada a `input/` e `.lia-forge/runs/`, `.spriteforge/assets.json`, `.lia.json` e um arquivo do usuário preservados byte a byte, `projectInfo()` coerente com o disco e raízes inválidas (arquivo, symlink, caminho vazio) recusadas — com verificação de que nada foi criado fora do caminho informado (§9).
 - `tests/run-lifecycle-smoke.mjs` (**novo**): progresso gravado antes do fim do run, cancelamento com o processo externo encerrado de verdade, cancelar duas vezes sem reescrever nada, retomada por checkpoint sem reexecutar passo concluído, falha intermediária com código de saída e stderr preservados, retomada depois da falha, run órfão corrigido sem fingir execução e recusas nomeadas (§8).
@@ -321,6 +341,8 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 | `ce0eca0` | derivação do roteiro em `shared/ui/journey.mjs`, resumo compartilhado e `tests/journey-smoke.mjs` (32 smokes) |
 | `7578539` | documentação da jornada medida parada a parada (§10) |
 | `522740a` | descoberta honesta do Blender: origem do executável, `versionConfirmed: false` e o pré-voo que não executa o arquivo |
+| `0b4e867` | documentação da descoberta honesta do executável (§6) |
+| `f9a01c6` | smoke de coerência IPC/HTTP (33 smokes) e fim da corrida no teste de cancelamento |
 
 ## 14. Pendências que exigem decisão humana
 
