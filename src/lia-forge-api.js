@@ -88,6 +88,28 @@ export const liaForgeApi = {
     return request(`/preflight${query({ capabilities: capabilities?.length ? capabilities.join(',') : null })}`);
   },
 
+  /** Passo 1: a pasta do projeto, o que há nela e o que é preservado. */
+  async projectInfo() {
+    const ipc = bridge();
+    if (ipc) return ipc.projectInfo();
+    return request('/project');
+  },
+
+  /**
+   * Abre (ou cria) a pasta do projeto — só no aplicativo desktop, onde existe
+   * seletor de pasta. No navegador devolve null: a raiz vem do servidor.
+   */
+  async chooseProject({ create = false } = {}) {
+    const ipc = bridge();
+    return ipc ? ipc.chooseProject({ create }) : null;
+  },
+
+  /** Mostra a pasta do projeto no gerenciador de arquivos (só no desktop). */
+  async revealProject() {
+    const ipc = bridge();
+    return ipc ? ipc.revealProject() : null;
+  },
+
   /** Entradas disponíveis em `<projeto>/input/` (referências e modelos). */
   async listInputs() {
     const ipc = bridge();

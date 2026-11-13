@@ -44,6 +44,7 @@ import {
   Upload,
   FolderOpen,
   RotateCcw,
+  FolderTree,
   GitCompareArrows,
   Workflow as WorkflowIcon,
 } from 'lucide-react';
@@ -684,6 +685,64 @@ export function ArtifactThumb({ path: relativePath, kind = 'image', alt = null }
   return <img className="forge-thumb" src={source} alt={alt ?? relativePath} loading="lazy" />;
 }
 
+/**
+ * Passo 1 da jornada: a pasta do projeto. Mostra o que existe (entradas, runs,
+ * assets), avisa quando algo de versões anteriores está lá e é preservado, e no
+ * desktop permite abrir/criar outra pasta — criando só `input/` e
+ * `.lia-forge/runs/`, sem mover nem apagar o que já existe.
+ */
+export function ProjectPanel({ project, busy, transport, onChoose, onReveal, onRefresh }) {
+  if (!project) return null;
+  return (
+    <section className="panel forge-panel forge-project">
+      <header className="forge-panel-head">
+        <FolderTree size={15} strokeWidth={1.8} />
+        <h2>Projeto</h2>
+        <span className="forge-panel-tag">{project.name}</span>
+      </header>
+      <p className="forge-note is-mono" title={project.root}>{project.root}</p>
+      <div className="forge-project-counts">
+        <span>{project.counts.inputs} entrada(s)</span>
+        <span>{project.counts.runs} run(s)</span>
+        <span>{project.counts.assets} asset(s)</span>
+        {project.activeRuns ? <span className="is-live">{project.activeRuns} em execução</span> : null}
+      </div>
+      {project.writable === false ? (
+        <div className="forge-banner is-error">
+          <CircleAlert size={14} />
+          <span>Sem permissão de escrita nesta pasta: o produto não vai conseguir gravar artefatos. Abra outra pasta.</span>
+        </div>
+      ) : null}
+      {project.legacy?.spriteforge || project.legacy?.liaManifest ? (
+        <p className="forge-note">{project.legacy.note}</p>
+      ) : null}
+      <div className="forge-panel-actions">
+        {transport === 'ipc' ? (
+          <>
+            <button type="button" className="button button-quiet" onClick={() => onChoose({ create: false })} disabled={busy !== null}>
+              {busy === 'project' ? <span className="spin" /> : <FolderOpen size={13} strokeWidth={1.9} />} Abrir outra pasta
+            </button>
+            <button type="button" className="button button-quiet" onClick={() => onChoose({ create: true })} disabled={busy !== null}>
+              <FolderTree size={13} strokeWidth={1.9} /> Novo projeto
+            </button>
+            <button type="button" className="button button-quiet" onClick={onReveal} disabled={busy !== null}>
+              <Download size={13} strokeWidth={1.9} /> Ver no sistema
+            </button>
+          </>
+        ) : (
+          <p className="forge-note">
+            Nesta página a pasta vem do servidor ({project.managedHere === false ? 'SPRITEFORGE_PROJECT_ROOT' : 'definida aqui'}).
+            Criar ou trocar de projeto é feito no aplicativo desktop.
+          </p>
+        )}
+        <button type="button" className="button button-quiet" onClick={onRefresh} disabled={busy !== null}>
+          {busy === 'project-refresh' ? <span className="spin" /> : <RotateCcw size={13} strokeWidth={1.9} />} Atualizar
+        </button>
+      </div>
+    </section>
+  );
+}
+
 const INPUT_ACCEPT = {
   image: '.png,.jpg,.jpeg,.webp',
   model: '.glb,.gltf,.fbx,.obj,.stl,.blend',
@@ -887,6 +946,7 @@ export default function ForgeStudio({ onNotify = () => {} }) {
   const [comparison, setComparison] = useState(null);
   const [registeredVersion, setRegisteredVersion] = useState(null);
   const [liveRun, setLiveRun] = useState(null);
+  const [project, setProject] = useState(null);
 
   const notify = useCallback((message, tone = 'info') => {
     if (typeof onNotify === 'function') onNotify(message, tone);
@@ -913,6 +973,11 @@ export default function ForgeStudio({ onNotify = () => {} }) {
         setInputs(listed?.entries ?? []);
       } catch {
         setInputs([]);
+      }
+      try {
+        setProject(await liaForgeApi.projectInfo());
+      } catch {
+        setProject(null);
       }
       if (!workflowId) {
         const firstExecutable = data.workflows.find((workflow) => workflow.executableNow) ?? data.workflows[0];
@@ -1149,6 +1214,38 @@ export default function ForgeStudio({ onNotify = () => {} }) {
       notify(result?.reason ?? 'Nada a retomar.', 'info');
     }
     return result;
+  });
+
+  const handleChooseProject = ({ create = false } = {}) => runAction('project', async () => {
+    const result = await liaForgeApi.chooseProject({ create });
+    if (!result) {
+      notify('Nenhuma pasta foi escolhida.', 'info');
+      return null;
+    }
+    setProject(result.project);
+    setRun(null);
+    setExportResult(null);
+    setComparison(null);
+    setCompareCandidates([]);
+    setRegisteredVersion(null);
+    await refreshInputs();
+    setRuns(await liaForgeApi.runs().catch(() => []));
+    setOverview(await liaForgeApi.overview());
+    notify(`Projeto em ${result.project.root}: ${result.created.length ? `pastas criadas (${result.created.join(', ')})` : 'a estrutura já existia'}. Nada do que estava lá foi alterado.`, 'success');
+    return result;
+  });
+
+  const handleRevealProject = () => runAction('project', async () => {
+    const result = await liaForgeApi.revealProject();
+    if (result?.ok) notify('Pasta do projeto aberta no gerenciador de arquivos.', 'info');
+    return result;
+  });
+
+  const handleRefreshProject = () => runAction('project-refresh', async () => {
+    const info = await liaForgeApi.projectInfo();
+    setProject(info);
+    await refreshInputs();
+    return info;
   });
 
   const handleConfigureProvider = (payload) => runAction('provider', async () => {
@@ -1673,6 +1770,14 @@ export default function ForgeStudio({ onNotify = () => {} }) {
         </div>
 
         <aside className="forge-side">
+          <ProjectPanel
+            project={project}
+            busy={busy}
+            transport={liaForgeApi.transport}
+            onChoose={handleChooseProject}
+            onReveal={handleRevealProject}
+            onRefresh={handleRefreshProject}
+          />
           <MachinePanel machine={overview.machine} note={overview.note} />
           <ProvidersPanel providers={providers ?? overview.providers} busy={busy} onConfigure={handleConfigureProvider} />
           <ToolsPanel adapters={overview.adapters} preflight={overview.preflight} />

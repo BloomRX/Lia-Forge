@@ -84,6 +84,37 @@ let studioServicePromise = null;
 let studioServiceRoot = null;
 
 /**
+ * Último projeto aberto. Fica em `userData` (fora do projeto) e só é usado se a
+ * pasta ainda existir: o produto não força ninguém a voltar para a pasta padrão
+ * a cada abertura, e também não abre caminho que sumiu.
+ */
+function lastProjectFile() {
+  return path.join(app.getPath('userData'), 'last-project.json');
+}
+
+async function readLastProject() {
+  try {
+    const stored = JSON.parse(await fs.readFile(lastProjectFile(), 'utf8'));
+    const root = typeof stored?.root === 'string' && stored.root.trim() ? path.resolve(stored.root) : null;
+    if (!root) return null;
+    const stats = await fs.stat(root).catch(() => null);
+    return stats?.isDirectory() ? root : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeLastProject(root) {
+  try {
+    await fs.mkdir(path.dirname(lastProjectFile()), { recursive: true });
+    const payload = { schemaVersion: 1, root: path.resolve(root), savedAt: new Date().toISOString() };
+    await fs.writeFile(lastProjectFile(), `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  } catch {
+    /* não conseguir lembrar o último projeto não impede o produto de funcionar */
+  }
+}
+
+/**
  * Fachada do Studio (F8 — §11): o mesmo `createStudioService` que o plugin Vite
  * expõe por HTTP, aqui com as dependências reais do Electron (descoberta de
  * ferramentas, registro de processos filhos, cliente ComfyUI e validadores
@@ -1202,6 +1233,44 @@ function registerIpcHandlers() {
   // Entradas do usuário (referências e modelos): listar, gravar, escolher no
   // sistema de arquivos e ler — sempre confinado a <projeto>/input/, sem
   // sobrescrever o que já existe e sem aceitar formato não verificado.
+  // Projeto (§3, passo 1): informar, abrir/criar a pasta e revelá-la no sistema.
+  ipcMain.handle('lia-forge:studio:project:info', async (event) => {
+    assertTrustedIpcSender(event);
+    return (await getStudioService()).projectInfo();
+  });
+  ipcMain.handle('lia-forge:studio:project:choose', async (event, payload) => {
+    assertTrustedIpcSender(event);
+    const current = await getStudioService();
+    const active = current.activeRuns();
+    if (active.length) {
+      throw new Error(`Há ${active.length} execução(ões) em andamento (${active.map((item) => item.runId).join(', ')}). Cancele ou aguarde terminar antes de trocar de projeto.`);
+    }
+    const create = payload?.create === true;
+    const picker = BrowserWindow.fromWebContents(event.sender);
+    const choice = await dialog.showOpenDialog(picker, {
+      title: create ? 'Crie a pasta do projeto' : 'Abra a pasta do projeto',
+      buttonLabel: create ? 'Criar projeto aqui' : 'Abrir este projeto',
+      message: create ? 'Escolha onde a pasta do projeto será criada.' : 'Escolha a pasta do projeto que você quer usar.',
+      detail: 'Serão criadas apenas as pastas input/ e .lia-forge/runs/, se não existirem. Nada do que já está na pasta é movido, renomeado, convertido ou apagado — inclusive .spriteforge/ e .lia.json.',
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: projectRoot ?? undefined,
+    });
+    if (choice.canceled || !choice.filePaths.length) return null;
+    const root = choice.filePaths[0];
+    const { ensureProjectStructure } = await import('../shared/integrations/project-structure.mjs');
+    const ensured = await ensureProjectStructure(root);
+    projectRoot = ensured.root;
+    await writeLastProject(ensured.root);
+    const service = await getStudioService();
+    return { project: await service.projectInfo(), created: ensured.created, existing: ensured.existing, note: ensured.note };
+  });
+  ipcMain.handle('lia-forge:studio:project:reveal', async (event) => {
+    assertTrustedIpcSender(event);
+    if (!projectRoot) throw new Error('Nenhum projeto carregado.');
+    const failure = await shell.openPath(projectRoot);
+    if (failure) throw new Error(`Não foi possível abrir a pasta do projeto: ${failure}`);
+    return { ok: true, root: projectRoot };
+  });
   ipcMain.handle('lia-forge:studio:inputs:list', async (event) => {
     assertTrustedIpcSender(event);
     return (await getStudioService()).listInputs();
@@ -1318,6 +1387,12 @@ app.whenReady().then(async () => {
       if (choice.response === 0) projectRoot = paths.legacyWorkspaceRoot;
     }
   }
+
+  // O último projeto escolhido pelo usuário vence a pasta padrão; se ele não
+  // existir mais, o padrão continua valendo e nada é criado no lugar.
+  const rememberedProject = await readLastProject();
+  if (rememberedProject) projectRoot = rememberedProject;
+  else await writeLastProject(projectRoot);
 
   await fs.mkdir(projectRoot, { recursive: true });
   registerIpcHandlers();

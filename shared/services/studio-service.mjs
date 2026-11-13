@@ -32,6 +32,7 @@ import { inspectGlb } from '../model3d/glb.mjs';
 import { validateStepOutputs } from '../qa/validators.mjs';
 import { createHostDefaults } from '../integrations/host-defaults.mjs';
 import { createProviderStore, isLoopbackEndpoint } from '../integrations/provider-store.mjs';
+import { inspectProjectStructure } from '../integrations/project-structure.mjs';
 import { adapterError } from '../adapters/sdk.mjs';
 import { generateVfxAtlas } from '../vfx/core.mjs';
 import { buildExportBundle, checkDestinationCompatibility, listDestinations } from '../destinations/profiles.mjs';
@@ -1250,6 +1251,33 @@ export function createStudioService(options = {}) {
      * Lista o que o usuário já tem em `<projeto>/input/`: é o que a interface
      * oferece para escolher, em vez de pedir que alguém digite um caminho.
      */
+    /**
+     * Passo 1 da jornada: onde está o projeto e o que há nele. Só leitura —
+     * nada é criado aqui (criar/abrir pasta é ação do hospedeiro, que usa
+     * `ensureProjectStructure` do mesmo módulo).
+     */
+    async projectInfo() {
+      const structure = await inspectProjectStructure(projectRoot);
+      const assets = await this.listAssets().catch(() => []);
+      const runs = await this.listRuns().catch(() => []);
+      return Object.freeze({
+        ...structure,
+        counts: Object.freeze({
+          ...structure.counts,
+          assets: Array.isArray(assets) ? assets.length : 0,
+          runs: Array.isArray(runs) ? runs.length : structure.counts.runs,
+        }),
+        activeRuns: this.activeRuns().length,
+        legacy: Object.freeze({
+          spriteforge: structure.directories.legacyState.exists,
+          liaManifest: structure.files.liaManifest.exists,
+          note: structure.directories.legacyState.exists || structure.files.liaManifest.exists
+            ? 'Conteúdo de versões anteriores (.spriteforge/, .lia.json) foi encontrado e é preservado: o produto não move, não converte e não apaga.'
+            : 'Nenhum conteúdo legado (.spriteforge/, .lia.json) foi encontrado nesta pasta.',
+        }),
+      });
+    },
+
     async listInputs() {
       return Object.freeze({ directory: INPUT_DIRECTORY, entries: Object.freeze(await walkInputs()) });
     },

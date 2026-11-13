@@ -413,10 +413,46 @@ try {
   assert.equal(activeRoute.status, 200, 'a rota de execuções em andamento existe no transporte HTTP');
   assert.deepEqual((await activeRoute.json()).active, [], 'sem execução em andamento neste processo');
 
+  // ------------------------------------------- 9. projeto (passo 1 da jornada)
+  const project = await liaForgeApi.projectInfo();
+  assert.equal(project.exists, true, 'o projeto existe no caminho informado ao servidor');
+  assert.equal(project.writable, true, 'a pasta do projeto é gravável');
+  assert.equal(project.managedHere, false, 'no navegador fica dito que a pasta vem do servidor');
+  assert.match(project.managementNote, /SPRITEFORGE_PROJECT_ROOT/, 'a nota explica de onde vem a pasta');
+  assert.ok(project.counts.inputs >= 1, `as entradas do projeto são contadas (${project.counts.inputs})`);
+  assert.ok(Array.isArray(project.preserved), 'o que já existe é listado como preservado');
+  const projectRoute = await nativeFetch(`${origin}/api/lia-forge/studio/project`);
+  assert.equal(projectRoute.status, 200, 'a rota /project existe no transporte HTTP');
+  assert.equal((await projectRoute.json()).root, project.root, 'a rota devolve a mesma raiz que o cliente');
+  const projectMethod = await nativeFetch(`${origin}/api/lia-forge/studio/project`, { method: 'POST' });
+  assert.equal(projectMethod.status, 405, 'criar/trocar projeto não é permitido por HTTP');
+  assert.equal(await liaForgeApi.chooseProject({ create: true }), null, 'no navegador não há seletor de pasta: a resposta é null, não um caminho inventado');
+
+  const { ProjectPanel } = await vite.ssrLoadModule('/src/ForgeStudio.jsx');
+  const browserProject = renderToStaticMarkup(createElement(ProjectPanel, {
+    project, busy: null, transport: 'http', onChoose: () => {}, onReveal: () => {}, onRefresh: () => {},
+  }));
+  assert.ok(browserProject.includes('Projeto') && browserProject.includes(project.root), 'o painel mostra a pasta do projeto');
+  assert.ok(/entrada\(s\)/.test(browserProject), 'o painel mostra quantas entradas existem');
+  assert.ok(!browserProject.includes('Abrir outra pasta'), 'no navegador não é oferecido trocar de pasta (ação do desktop)');
+  assert.ok(browserProject.includes('SPRITEFORGE_PROJECT_ROOT'), 'no navegador a origem da pasta é dita com clareza');
+
+  const desktopProject = renderToStaticMarkup(createElement(ProjectPanel, {
+    project: { ...project, legacy: { ...project.legacy, spriteforge: true, liaManifest: true, note: 'Conteúdo de versões anteriores (.spriteforge/, .lia.json) foi encontrado e é preservado: o produto não move, não converte e não apaga.' } },
+    busy: null,
+    transport: 'ipc',
+    onChoose: () => {},
+    onReveal: () => {},
+    onRefresh: () => {},
+  }));
+  assert.ok(desktopProject.includes('Abrir outra pasta') && desktopProject.includes('Novo projeto'), 'no desktop é possível abrir ou criar projeto');
+  assert.ok(desktopProject.includes('Ver no sistema'), 'no desktop a pasta pode ser revelada no sistema');
+  assert.ok(desktopProject.includes('preservado'), 'o conteúdo legado aparece como preservado, não como migrado');
+
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 
-  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab e ciclo de vida do run na UI; transporte ${liaForgeApi.transport}).`);
+  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab, ciclo de vida do run e projeto na UI; transporte ${liaForgeApi.transport}).`);
 } finally {
   globalThis.fetch = nativeFetch;
   await vite.close();

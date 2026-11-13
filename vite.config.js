@@ -358,6 +358,19 @@ function liaForgeStudioApi() {
             return json(200, await service.preflight({ capabilityIds }));
           }
 
+          // Projeto (§3, passo 1): onde está a pasta e o que há nela. No
+          // navegador a raiz vem de SPRITEFORGE_PROJECT_ROOT; criar ou trocar de
+          // projeto é ação do aplicativo desktop (dialog + pastas locais).
+          if (route === '/project') {
+            if (method !== 'GET') return json(405, { error: 'Method not allowed' });
+            const info = await service.projectInfo();
+            return json(200, {
+              ...info,
+              managedHere: false,
+              managementNote: 'Nesta página a pasta do projeto vem da variável SPRITEFORGE_PROJECT_ROOT do servidor. Criar ou trocar de projeto é feito no aplicativo desktop, que cria apenas input/ e .lia-forge/runs/ e preserva todo o resto.',
+            });
+          }
+
           // ------------------------------- entradas (referências do usuário)
           if (route === '/inputs') {
             if (method === 'GET') return json(200, await service.listInputs());
