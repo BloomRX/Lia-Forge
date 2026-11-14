@@ -176,6 +176,22 @@ O que passou a existir (mesmo serviço, mesmos gates, dois transportes):
 
 O envio de arquivos para **serviços externos** continua fora: nada sai da máquina, e a pendência de upload segue em §14.
 
+### Ver antes de executar: a prévia de VFX que o serviço já tinha
+
+`vfxPreview()` existia no serviço, no cliente HTTP e no IPC (um dos 30 métodos conferidos pelo smoke de coerência) e era medido nos testes — mas **nenhum lugar da interface o chamava**. Na prática, quem escolhia o preset de VFX escolhia às cegas: `impact`, `fire`, `spark`, `smoke`, `lightning` são palavras, e o resultado só aparecia depois de executar o workflow.
+
+O formulário de VFX ganhou o botão **Ver prévia** (`VfxPreview`): o atlas procedural é gerado pelo próprio produto e aparece com o que foi medido — preset, frames, grade, tamanho do quadro, folha, cores únicas e SHA-256 do PNG. Três regras de honestidade valem aqui como no resto:
+
+- a legenda diz que a prévia é gerada pelo produto, **sem ferramenta externa, sem rede e sem custo** — e que executar é o que grava e valida os artefatos (a prévia não é o artefato);
+- a prévia é **descartada assim que qualquer ajuste muda**, e se ainda assim estiver na tela com ajuste diferente a legenda avisa "os ajustes mudaram desde esta prévia": imagem que não corresponde ao que será executado é o mesmo tipo de mentira que o resto do produto evita;
+- sem prévia gerada, nenhuma imagem é inventada (o botão continua lá, o resto não).
+
+| Verificação | Resultado medido |
+|---|---|
+| `GET /vfx-preview?preset=fire&size=48&frameCount=6` | grade **6×1**, folha **288×48**, `deterministic: true`, **397** cores únicas, `blank: false`, SHA-256 `225f247d076ae40f…`, PNG de ~13,6 kB — gerado no processo, sem ferramenta externa |
+| Prévia com ajuste diferente | a legenda avisa que os ajustes mudaram (renderizado no smoke com `preset: impact, size: 64`) |
+| Sem prévia | botão presente, nenhum `<img>` no markup |
+
 ## 8. Ciclo de vida do run: progresso, cancelamento e retomada
 
 O engine já tinha cancelamento cooperativo e retomada por checkpoint, mas **nada disso chegava ao produto**: o snapshot do run só era gravado no fim (portanto não havia progresso para mostrar), nenhum canal permitia cancelar uma execução em andamento e um run interrompido só retomava se houvesse revisão pendente. Três correções, sem criar sistema paralelo:
@@ -210,6 +226,7 @@ A lista oferecia *Retomar* para o run interrompido — o caso em que retomar dos
 - `listRuns()` publica `planStored`: a interface não oferece botão que devolve erro — quando o plano original não está gravado, o item diz isso em vez de mostrar *Retomar*.
 - `isResumableRun(item)` em `shared/ui/journey.mjs` é a regra única da interface: interrompido, `failed`, `cancelled` e `paused` oferecem *Retomar*; `succeeded` não; **`blocked` também não** — a saída dele é aprovar a revisão no painel do run, e `reviewStep()` já retoma a partir dali (oferecer retomada no lugar de revisão empurraria o usuário para repetir o mesmo bloqueio).
 - `SavedRunItem` segue a regra (*Corrigir estado* continua sendo só do run interrompido, que é o caso em que o estado gravado não corresponde à realidade) e o roteiro recebe `runListed` para nomear apenas as ações que existem para aquele run.
+- O rodapé do run aberto tinha a **sua própria** lista (`['cancelled','paused','failed'].includes(run.status)`): uma segunda regra, divergente — não cobria o run interrompido (o caso em que retomar faz mais sentido) e não sabia se o plano original continua gravado. Passa a chamar `isResumableRun()` com o item real de `listRuns()`, o mesmo cálculo da lista lateral e do roteiro; o botão de parar um run que consta em andamento sem execução aqui se chama *Corrigir estado* (é o que ele faz) em vez de *Cancelar*, e a notificação diz quando o run vinha interrompido.
 
 Medido depois, na mesma rota e no mesmo projeto:
 
@@ -357,7 +374,7 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 - `tests/project-structure-smoke.mjs` (**novo**): leitura que não escreve, criação limitada a `input/` e `.lia-forge/runs/`, `.spriteforge/assets.json`, `.lia.json` e um arquivo do usuário preservados byte a byte, `projectInfo()` coerente com o disco e raízes inválidas (arquivo, symlink, caminho vazio) recusadas — com verificação de que nada foi criado fora do caminho informado (§9).
 - `tests/run-lifecycle-smoke.mjs` (**novo**): progresso gravado antes do fim do run, cancelamento com o processo externo encerrado de verdade, cancelar duas vezes sem reescrever nada, retomada por checkpoint sem reexecutar passo concluído, falha intermediária com código de saída e stderr preservados, retomada depois da falha, retomada de run **interrompido** com plano e checkpoints reais (`interrupted: true`, `checkpointsReused >= 1`, resultado `succeeded`), run sem plano gravado que não oferece retomada, run órfão corrigido sem fingir execução, coerência botão × serviço em toda a lista e recusas nomeadas (§8).
 - `tests/tool-stubs.mjs` (**novo**): os substitutos de ferramenta externa (renderizador, lento e falho) reunidos num módulo só, usados pelo smoke de ciclo de vida e pelo de integração — sem duplicar código e sempre rotulados como substitutos.
-- `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em cenários reais e renderizado (inclusive com `overview.assets`, a forma que a página passa), itens reais da lista de runs nos cinco estados — concluído, bloqueado, interrompido com plano, interrompido sem plano e cancelado depois de `cancelRun` (§10 e §8) e a nota do plano sobre ferramenta instalada que não serve ao passo (§6); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
+- `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em cenários reais e renderizado (inclusive com `overview.assets`, a forma que a página passa), itens reais da lista de runs nos cinco estados — concluído, bloqueado, interrompido com plano, interrompido sem plano e cancelado depois de `cancelRun` (§10 e §8); prévia de VFX buscada pela API e renderizada com os números medidos, o aviso de prévia vencida e a ausência de imagem quando nada foi gerado (§7) e a nota do plano sobre ferramenta instalada que não serve ao passo (§6); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
 - `tests/studio-service-smoke.mjs` (estendido): seção 11 com medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada a `input/` e Comparison Lab com caminho recusado (§7); passo opcional que produz prévia, passo opcional com erro que vira skip e brief como entrada de texto do passo de conceito.
 - `tests/host-integration-smoke.mjs` (**novo** nesta fase): integração real com processo externo e ComfyUI em loopback, providers, recusas, gates e a descoberta que diz a origem do executável sem afirmar versão não medida (§6).
 - `tests/workflow-coverage-smoke.mjs` (**novo** nesta fase): 11 casos sobre os 8 workflows, com a matriz de evidência impressa (§3).
@@ -417,6 +434,8 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 | `7f9d397` | documentação dos quatro fins de run no roteiro (§10) |
 | `580292b` | `run-states.mjs` como fonte única; `resumeRun` aceita run interrompido; `planStored`; botão *Retomar* só onde o serviço retoma (§8) |
 | `4941892` | correção da quebra ao escopar o passo 12 (`versions` como contagem no overview) + `versionRunIds` (§10) |
+| `31214b4` | documentação da coerência botão × serviço e dos cinco estados no roteiro (§8, §10) |
+| `153f3a8` | prévia de VFX na interface e regra única de retomada no rodapé do run (§7, §8) |
 | `47965f4` | run falho e cancelado no roteiro (revisão como decisão humana, "guardar" escopado ao run) |
 
 ## 14. Pendências que exigem decisão humana
