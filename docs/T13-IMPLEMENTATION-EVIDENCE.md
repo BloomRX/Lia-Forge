@@ -509,7 +509,7 @@ Acrescentado em 2026-10-25, pela remediação P0 (§15): um escritor canônico p
 
 ## 15. Remediação P0 sob ADR-002 (2026-10-25)
 
-Autorização, limites e desvios: [ADR-002](ADR-002-P0-REMEDIATION-AUTHORIZATION.md). Achados de origem: [revisão integrada](INTEGRATED-RESEARCH-AND-ARCHITECTURE-REVIEW-2026-11-14.md) §3 e §5. Branch `arena/649f88bd-3dspritesheet`; nada foi levado a `main`.
+Autorização, limites e desvios: [ADR-002](ADR-002-P0-REMEDIATION-AUTHORIZATION.md). Achados de origem: [revisão integrada](INTEGRATED-RESEARCH-AND-ARCHITECTURE-REVIEW-2026-11-14.md) §3 e §5. Branch `arena/649f88bd-3dspritesheet`; nada foi levado a `main`. As datas desta seção seguem a data de registro do ADR-002; o relógio do sandbox timestampou os commits em `2026-11-14T08:10Z`, divergência registrada no cabeçalho do ADR-002 e não resolvida.
 
 **Regra de leitura desta seção:** "fechado em código" = correção existe, tem teste negativo e positivo, e o teste foi verificado por mutação. **Não** é `EXECUTED` com ferramenta externa nem `VALIDATED` no alvo.
 

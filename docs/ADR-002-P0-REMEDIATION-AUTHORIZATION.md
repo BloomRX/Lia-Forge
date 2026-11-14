@@ -1,11 +1,12 @@
 # ADR-002 — Autorização de escopo para a remediação P0 (segurança, autorização e integridade)
 
-**Data do registro:** 2026-10-25 (UTC; data do sistema nesta sessão de trabalho)
-**Documento de origem:** [INTEGRATED-RESEARCH-AND-ARCHITECTURE-REVIEW-2026-11-14.md](INTEGRATED-RESEARCH-AND-ARCHITECTURE-REVIEW-2026-11-14.md) — o nome do arquivo traz 2026-11-14; a divergência entre essa data e a do registro é preexistente e **não** foi resolvida nem reinterpretada aqui
+**Data do registro:** 2026-10-25 (data informada pelo ambiente de trabalho nesta sessão)
+**Divergência de relógio, registrada e não resolvida:** o relógio do sandbox em que os commits foram produzidos lê `2026-11-14 08:11 UTC`, e é o que o histórico do git mostra (`git log --format=%aI` nos commits desta remediação ⇒ `2026-11-14T08:10:24+00:00`). O nome do arquivo da revisão de origem coincide com o relógio do sandbox, e o ADR-001 traz `2026-10-25`. Nenhuma das datas foi inventada nem convertida aqui: as duas ficam visíveis para quem ler o histórico
+**Documento de origem:** [INTEGRATED-RESEARCH-AND-ARCHITECTURE-REVIEW-2026-11-14.md](INTEGRATED-RESEARCH-AND-ARCHITECTURE-REVIEW-2026-11-14.md)
 **Estado:** `ACCEPTED — SCOPE OF AUTHORIZATION ONLY` (não cria arquitetura nova nem substitui decisão arquitetural)
 **Responsável pela decisão:** o usuário dono do repositório, por instrução direta nas tarefas desta linha de trabalho (DEC-A, opção A). Nenhuma pessoa foi nomeada por inferência
 **ADR anterior:** [ADR-001-LIA-FORGE-DECISIONS.md](ADR-001-LIA-FORGE-DECISIONS.md) — permanece `ACCEPTED — ARCHITECTURE ONLY` com `Implementação/migração: NOT AUTHORIZED`, **inalterado**. Este ADR não o reescreve, não o revoga e não declara que decisões antigas foram substituídas: ele registra apenas o que passou a estar autorizado, e o que continua não estando
-**Registro de evidência:** [T13-IMPLEMENTATION-EVIDENCE.md](T13-IMPLEMENTATION-EVIDENCE.md)
+**Registro de evidência:** [T13-IMPLEMENTATION-EVIDENCE.md](T13-IMPLEMENTATION-EVIDENCE.md) §15
 **Branch de trabalho:** `arena/649f88bd-3dspritesheet` (nada foi levado a `main`; ver "O que continua dependendo de autorização")
 
 ## 1. Contexto
