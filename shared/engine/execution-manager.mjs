@@ -161,6 +161,22 @@ export class ExecutionManager {
       planId: run.planId,
       planTitle: run.planTitle,
       planFingerprint: run.planFingerprint,
+      // Autorização por run (P0-2): o que foi autorizado, por quem, para qual
+      // escopo. Campos explícitos (projeção segura) — nunca o objeto cru que o
+      // chamador entregou, para não gravar segredo em run.json.
+      scope: run.scope ? Object.freeze({ ...run.scope }) : null,
+      authorization: run.authorization
+        ? Object.freeze({
+          granted: run.authorization.granted === true,
+          grantedBy: run.authorization.grantedBy ?? null,
+          grantedAt: run.authorization.grantedAt ?? null,
+          expiresAt: run.authorization.expiresAt ?? null,
+          fingerprint: run.authorization.fingerprint ?? null,
+          protectedActions: Object.freeze([...(run.authorization.protectedActions ?? [])].map(String)),
+          costCeiling: Number.isFinite(run.authorization.costCeiling) ? run.authorization.costCeiling : null,
+          scopeNote: typeof run.authorization.scopeNote === 'string' ? run.authorization.scopeNote : null,
+        })
+        : null,
       status: run.status,
       createdAt: run.createdAt,
       startedAt: run.startedAt,
@@ -193,7 +209,14 @@ export class ExecutionManager {
       if (!gate.ok) {
         current.status = 'blocked';
         this.emit(current, { type: 'run-blocked', code: gate.code, message: gate.reason });
-        for (const step of current.steps) step.state = 'blocked';
+        // Cada passo diz por que não executou. Passo bloqueado sem motivo é passo
+        // que a interface não tem como explicar — e a pessoa não sabe o que
+        // decidir. O motivo é o do gate, com segredos redigidos.
+        for (const step of current.steps) {
+          step.state = 'blocked';
+          step.error = { code: gate.code, message: redactSecrets(gate.reason), requiresUserDecision: true };
+        }
+        this.log(current, 'warn', `Run bloqueado no gate de autorização: ${gate.reason}`, { code: gate.code });
         await this.persistSnapshot(current);
         return this.snapshot(current);
       }

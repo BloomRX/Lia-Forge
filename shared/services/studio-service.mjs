@@ -25,7 +25,24 @@ import { runPreflight } from '../qa/preflight.mjs';
 import { listWorkflows, planWorkflow, WORKFLOW_IDS } from '../orchestrator/planner.mjs';
 import { ExecutionManager } from '../engine/execution-manager.mjs';
 import { isResumableRunState } from '../engine/run-states.mjs';
-import { assertSafeWriteTarget, redactSecrets, sha256Hex } from '../engine/gates.mjs';
+import { assertSafeWriteTarget, checkAuthorization, redactSecrets, sha256Hex } from '../engine/gates.mjs';
+import {
+  authorizationForScope,
+  buildRunScope,
+  missingProtectedActions,
+  scopeRequiresAuthorization,
+} from '../engine/run-authorization.mjs';
+
+// Reexportado para os consumidores existentes (testes, UI) não precisarem saber
+// onde a política mora; a implementação é uma só, em run-authorization.mjs.
+export {
+  authorizationForScope,
+  bindAuthorizationToScope,
+  buildRunScope,
+  missingProtectedActions,
+  policyAuthorizationForScope,
+  scopeRequiresAuthorization,
+} from '../engine/run-authorization.mjs';
 import { createAssetManager, classifyRights } from '../assets/manager.mjs';
 import { decodePng, encodePngRgba, analyzePngContent } from '../qa/png-codec.mjs';
 import { validatePngStructure } from '../qa/png.mjs';
@@ -776,7 +793,7 @@ export function createStudioService(options = {}) {
      * Executa um plano. Só adapters internos rodam sem ferramenta externa;
      * passos bloqueados permanecem bloqueados e o run registra o motivo.
      */
-    async run({ workflowId, destination = null, options: runOptions = {}, brief = null, params = {}, authorization = null, onEvent = null, signal = null, resume = null }) {
+    async run({ workflowId, destination = null, options: runOptions = {}, brief = null, params = {}, authorization = null, costCeiling = null, onEvent = null, signal = null, resume = null }) {
       const runId = resume?.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       // Cancelamento cooperativo: o engine recebe este signal e para no próximo
       // ponto de verificação. Um signal externo (do hospedeiro) é encadeado.
@@ -898,9 +915,67 @@ export function createStudioService(options = {}) {
         context.state.partImages = null;
       }
 
+      // Autorização por run (P0-2): o escopo é derivado do plano REAL deste run e
+      // a autorização da pessoa é vinculada a ele por fingerprint. Sem `scope` o
+      // gate do engine nem rodava — era o que fazia `authorization` ser decorativo.
+      // Na retomada, o escopo autorizado é o gravado no run: se o plano mudou, o
+      // fingerprint muda e o run bloqueia pedindo autorização de novo.
+      const scope = resume?.scope ?? buildRunScope(plan, {
+        destination,
+        inputs: context.inputs ?? {},
+        costCeiling,
+      });
+      const requiresAuthorization = scopeRequiresAuthorization(scope);
+      // Retomada: a autorização que vale é a gravada no run.json deste run, não
+      // uma nova decisão inventada aqui. Ela é vinculada por fingerprint ao escopo
+      // RECALCULADO a partir do plano atual — se o plano mudou (adapter novo,
+      // destino diferente, entrada trocada, ação protegida a mais), o fingerprint
+      // não bate e o engine bloqueia pedindo autorização de novo.
+      let requestedAuthorization = resume?.authorization ?? authorization;
+      if (!requestedAuthorization && resume) {
+        requestedAuthorization = await fs.readFile(path.join(runDirectory, 'run.json'), 'utf8')
+          .then((text) => JSON.parse(text)?.authorization ?? null)
+          .catch(() => null);
+      }
+      const boundAuthorization = authorizationForScope(scope, requestedAuthorization);
+      const uncoveredActions = requiresAuthorization
+        ? missingProtectedActions(scope, boundAuthorization)
+        : [];
+      if (requiresAuthorization && (!boundAuthorization || uncoveredActions.length > 0)) {
+        // Fail-closed antes de executar qualquer passo: o run fica gravado como
+        // bloqueado com o motivo e o fingerprint que a pessoa precisa autorizar.
+        const gate = checkAuthorization({
+          scope: { ...scope, plan: plan.steps.map((step) => step.id) },
+          authorization: uncoveredActions.length > 0 ? boundAuthorization : null,
+        });
+        const blockedSnapshot = await manager.execute(plan, {
+          context,
+          scope,
+          authorization: { granted: false },
+          signal: controller.signal,
+          onEvent,
+          runId,
+          resume: false,
+          checkpoints: null,
+        });
+        return Object.freeze({
+          runId,
+          plan,
+          snapshot: blockedSnapshot,
+          runDirectory: path.relative(projectRoot, runDirectory),
+          authorizationRequired: true,
+          authorizationScope: scope,
+          authorizationFingerprint: gate.fingerprint,
+          authorizationReason: uncoveredActions.length > 0
+            ? `Autorização incompleta: as ações protegidas ${uncoveredActions.join(', ')} deste run não foram concedidas. Nada foi executado.`
+            : gate.reason,
+          missingProtectedActions: Object.freeze(uncoveredActions),
+        });
+      }
       const snapshot = await manager.execute(plan, {
         context,
-        authorization,
+        scope,
+        authorization: boundAuthorization,
         // O signal interno é o que `cancelRun` aborta; o signal do chamador
         // (quando existe) foi encadeado nele acima.
         signal: controller.signal,
@@ -923,9 +998,25 @@ export function createStudioService(options = {}) {
         };
         const recorded = { ...snapshot, cancellation, logs: [...(snapshot.logs ?? []), entry] };
         await fs.writeFile(path.join(runDirectory, 'run.json'), `${JSON.stringify(recorded, null, 2)}\n`, 'utf8').catch(() => {});
-        return Object.freeze({ runId, plan, snapshot: Object.freeze(recorded), runDirectory: path.relative(projectRoot, runDirectory) });
+        return Object.freeze({
+          runId,
+          plan,
+          snapshot: Object.freeze(recorded),
+          runDirectory: path.relative(projectRoot, runDirectory),
+          authorizationRequired: requiresAuthorization,
+          authorizationScope: scope,
+          authorizationFingerprint: recorded.planFingerprint ?? null,
+        });
       }
-      return Object.freeze({ runId, plan, snapshot, runDirectory: path.relative(projectRoot, runDirectory) });
+      return Object.freeze({
+        runId,
+        plan,
+        snapshot,
+        runDirectory: path.relative(projectRoot, runDirectory),
+        authorizationRequired: requiresAuthorization,
+        authorizationScope: scope,
+        authorizationFingerprint: snapshot.planFingerprint ?? null,
+      });
       } catch (error) {
         // Falha antes de qualquer passo executar (entrada inexistente, plano
         // inválido…): o run ainda assim existe, fica gravado e explica o motivo
@@ -1073,6 +1164,8 @@ export function createStudioService(options = {}) {
         brief: stored.brief,
         options: stored.options ?? {},
         params: { ...(stored.params ?? {}), reviews },
+        // `authorization` não é passada de propósito: o run usa a que está gravada
+        // no run.json dele, revalidada contra o escopo recalculado.
         resume: { runId: id, checkpoints },
       });
       return Object.freeze({

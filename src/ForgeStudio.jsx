@@ -1601,6 +1601,13 @@ export default function ForgeStudio({ onNotify = () => {} }) {
     setExportResult(null);
     setRunTab('passos');
     const status = result?.snapshot?.status;
+    // Bloqueio por autorização é diferente de bloqueio por revisão: dizer
+    // "precisa da sua revisão" quando o que falta é uma autorização seria
+    // mentir sobre o motivo (e esconder que nada executou).
+    if (result?.authorizationRequired && result?.missingProtectedActions?.length) {
+      notify(`Nada foi executado: este run ${result.missingProtectedActions.join(' e ')} e exige a sua autorização no aplicativo desktop.`, 'warn');
+      return result;
+    }
     notify(status === 'succeeded' ? 'Execução concluída.' : status === 'blocked' ? 'Execução parada: precisa da sua revisão.' : `Execução ${status}.`, status === 'succeeded' ? 'success' : 'info');
   });
 

@@ -150,6 +150,22 @@ function requireText(value, field, maxLength = 120) {
   return value.trim();
 }
 
+/**
+ * Autorização por run que chega pelo IPC (canal da decisão humana).
+ *
+ * A validação mora em `shared/engine/run-authorization.mjs` — é a mesma usada
+ * pelo serviço, para não existir uma regra no desktop e outra no motor. Aqui só
+ * entra o que o IPC aceita: objeto validado ou erro (nada é ignorado em
+ * silêncio, porque autorização ignorada em silêncio é autorização fingida).
+ *
+ * A superfície HTTP **não** encaminha este campo (ver a rota `/run` em
+ * `vite.config.js`): uma requisição forjada não tem como conceder ação protegida.
+ */
+async function readRunAuthorization(payload) {
+  const { readRunAuthorization: validate } = await import('../shared/engine/run-authorization.mjs');
+  return validate(payload?.authorization);
+}
+
 async function resolveAdapter(adapterId) {
   const registry = await loadAdapterRegistry();
   if (!registry.has(adapterId)) {
@@ -1104,12 +1120,17 @@ function registerIpcHandlers() {
   });
   ipcMain.handle('lia-forge:studio:run', async (event, payload) => {
     assertTrustedIpcSender(event);
+    // A decisão humana (quando existe) chega só por aqui; é validada antes de
+    // entrar no serviço e fica gravada no run com autoria e fingerprint.
+    const { authorization, costCeiling } = readRunAuthorization(payload);
     return (await getStudioService()).run({
       workflowId: requireText(payload?.workflowId, 'workflowId', 80),
       destination: payload?.destination ? requireText(payload.destination, 'destination', 40) : null,
       options: payload?.options ?? {},
       brief: payload?.brief ? requireText(payload.brief, 'brief', 2000) : null,
       params: payload?.params ?? {},
+      authorization,
+      costCeiling,
       onEvent: forwardStudioEvent,
     });
   });
