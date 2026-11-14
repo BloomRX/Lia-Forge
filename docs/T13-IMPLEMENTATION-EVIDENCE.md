@@ -420,9 +420,9 @@ Escopar o passo 12 ao run em foco trouxe uma regressão, corrigida em seguida e 
 
 | Comando | Resultado |
 |---|---|
-| `npm test` | **33 smokes verdes** (Node 22, sem rede; o smoke de integração usa processo e HTTP loopback reais, sem ferramenta externa instalada) |
-| `npm run test:python` | **30 testes OK** |
-| `npx vite build` | build de produção sem erro |
+| `npm test` | **33 smokes verdes** na fase T13 (Node 22, sem rede; o smoke de integração usa processo e HTTP loopback reais, sem ferramenta externa instalada) → **38 suites EXIT=0** em 2026-10-25, depois da remediação P0 (§15) |
+| `npm run test:python` | **30 testes OK** na fase T13 → **37 testes OK** em 2026-10-25 (§15) |
+| `npx vite build` | build de produção sem erro (medido de novo em 2026-10-25: JS 362,38 kB / CSS 116,92 kB) |
 
 O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 
@@ -504,3 +504,59 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 Adoção de Spine ou de qualquer provider comercial/de IA · alternativa A de identidade Studio × Forge · licenças incertas (`2DAutoRigger`, `see-through`, MotionBricks) · backend remoto pago e teto de custo · upload de arquivos · instalação/download de ferramentas de terceiros · execução dos scripts de diagnóstico na máquina alvo (Windows + RX 580) · direitos das 6 artes `RIGHTS_PENDING`.
 
 Enquanto não houver decisão, o produto mantém o caminho alternativo implementado, marca a pendência no plano (`userActions` com `canBeAutomated: false`) e não finge capacidade.
+
+Acrescentado em 2026-10-25, pela remediação P0 (§15): um escritor canônico para o store legado (DEC-E) · política de CSP do renderer · escrita atômica e autoria confiável de `reviews.json` (P0-10) · reconciliação da flag persistente de provider com a autorização por run (DEC-F, opção C) · literais `validated: true` remanescentes em `shared/adapters/software.mjs` · versão-alvo do Blender e as três autorizações operacionais (DEC-G, DEC-P) · licença dos scripts que importam `bpy` (DEC-H) · consolidação em `main` (DEC-B). Todas estão nomeadas no §5 do [ADR-002](ADR-002-P0-REMEDIATION-AUTHORIZATION.md).
+
+## 15. Remediação P0 sob ADR-002 (2026-10-25)
+
+Autorização, limites e desvios: [ADR-002](ADR-002-P0-REMEDIATION-AUTHORIZATION.md). Achados de origem: [revisão integrada](INTEGRATED-RESEARCH-AND-ARCHITECTURE-REVIEW-2026-11-14.md) §3 e §5. Branch `arena/649f88bd-3dspritesheet`; nada foi levado a `main`.
+
+**Regra de leitura desta seção:** "fechado em código" = correção existe, tem teste negativo e positivo, e o teste foi verificado por mutação. **Não** é `EXECUTED` com ferramenta externa nem `VALIDATED` no alvo.
+
+### 15.1 Commits
+
+| Commit | Assunto | Arquivos principais |
+|---|---|---|
+| `6795da0` | Superfície HTTP fechada: host, `Origin`, token de sessão, operações exclusivas do IPC | `shared/http/api-policy.mjs` (novo), `vite.config.js`, `src/lia-forge-api.js`, `src/ForgeStudio.jsx`, `tests/http-api-policy-smoke.mjs` (novo) |
+| `de5efb9` | Autorização por run ligada ao fluxo real, escopo derivado do plano, decisão vinculada por fingerprint | `shared/engine/run-authorization.mjs` (novo), `shared/services/studio-service.mjs`, `shared/engine/execution-manager.mjs`, `electron/main.cjs`, `tests/run-authorization-smoke.mjs` (novo) |
+| `357f50c` | Direitos viram gate, `validated` deriva de evidência, decisão humana não é afrouxada | `shared/services/studio-service.mjs`, `shared/assets/manager.mjs`, `shared/destinations/profiles.mjs`, `tests/rights-provenance-smoke.mjs` (novo) |
+| `2e3f7a5` | Blender: `--disable-autoexec` em toda invocação e guarda dentro do script | `electron/blender-adapter.cjs`, `electron/blender-workflow-plan.cjs`, `scripts/blender_spritesheet.py` + 4 testes |
+| `97c0266` | `npm run dev` deixa de sobrescrever o loopback; exposição só por opt-in nomeado | `package.json`, `vite.config.js`, `shared/http/api-policy.mjs`, `scripts/spriteforge-mcp.mjs`, `tests/http-bind-smoke.mjs` (novo) |
+| `938c673` | Teste de bind mede o socket LISTEN do processo, atribuído ao PID | `tests/http-bind-smoke.mjs` |
+| `ddd0ae4` | Confinamento de caminhos: exportação aceita só artefatos do run | `shared/fs/path-containment.mjs` (novo), `shared/engine/gates.mjs`, `shared/destinations/profiles.mjs`, `shared/services/studio-service.mjs`, `tests/path-containment-smoke.mjs` (novo), `tests/studio-service-smoke.mjs` |
+
+### 15.2 O que foi reproduzido antes de cada correção
+
+Nada foi corrigido por leitura de código: cada área foi reproduzida com execução real neste ambiente.
+
+- **Superfície HTTP.** Servidor vivo em `0.0.0.0:5199`: `POST /studio/providers` **sem** `Origin` ⇒ `200` gravando `executable: /tmp/blender-falso`; com `mode: 'path'` o binário **executou** e escreveu `/tmp/pwned.txt`; `POST /run` sem `Origin` ⇒ `200`; `GET /overview` com `Host: attacker.example` ⇒ `200`.
+- **Autorização por run.** `run()` não passava `scope` e o engine só executa o gate `if (scope)` ⇒ `snapshot.gates = {}`; o que liberava envio remoto era a flag persistente gravável por HTTP.
+- **Direitos e proveniência.** `exportRun` gravava manifesto para asset `license-pending` sem consultar direitos, estado do run ou revisão; `attachRunToAsset` marcava todo artefato `validated: true` literal; `BLOCKED` declarado por pessoa era apagado pela proveniência anexada.
+- **Blender.** `buildBlenderSpritesheetArgs` ⇒ `['--background','--python',script,'--',…]`; `createBlenderSpritesheetPlan` aceitava args sem flags **e args vazios**; `import_source` abria `.blend` sem conferir `use_file_autorun`.
+- **Bind HTTP.** `vite --host 0.0.0.0` atendeu em `169.254.0.21` (Vite imprimiu `Network: http://169.254.0.21:5357/`) mesmo com `server.host` em loopback: a flag da CLI sobrescreve o config. `vite` sem a flag ⇒ `ECONNREFUSED` fora do loopback.
+- **Confinamento.** Run real com `run.json` adulterado ⇒ bundle de exportação continha `../run-mwg3itup-qebs0z-evil/segredo-do-vizinho.png` (pasta irmã cujo nome começa com o id do run) e `link-para-fora.png` (symlink criado dentro do run apontando para `/tmp`); o segundo termo da checagem antiga aceitava ainda **qualquer** arquivo do projeto.
+
+### 15.3 Testes e mutações
+
+| Teste | Checagens | Mutação (defeito reintroduzido) |
+|---|---|---|
+| `tests/http-api-policy-smoke.mjs` | 66 | — |
+| `tests/run-authorization-smoke.mjs` | 106 | 6 FAIL e 9 FAIL |
+| `tests/rights-provenance-smoke.mjs` | 79 | 7 FAIL (gate desligado) e 4 FAIL (`validated: true` literal) |
+| `tests/test_blender_spritesheet.py` | 37 testes (7 novos de autoexec) | — |
+| `tests/http-bind-smoke.mjs` | 37 (38 quando o ambiente registra nota) | 5 FAIL ao recolocar `--host 0.0.0.0`, incluindo o socket em `0.0.0.0 (any)` |
+| `tests/path-containment-smoke.mjs` | 81 | 20 FAIL (`exportRun` em `startsWith`), 3 FAIL (gate sem realpath do pai), 5 FAIL (guarda do pacote removida) |
+
+Validação executada em 2026-10-25: `npm test` **38 suites, EXIT=0**; `npm run test:python` **Ran 37 tests, OK**; `npx vite build` **ok** (JS 362,38 kB / gzip 106,48 kB · CSS 116,92 kB / gzip 22,76 kB).
+
+### 15.4 Medições que merecem registro próprio
+
+- **O bind é medido no kernel, não por probe externo.** Este sandbox **encaminha** tráfego do endereço link-local para listeners em loopback: em 8 levantamentos com o Vite em `127.0.0.1` (log sem URL `Network`), o probe em `169.254.0.21` conectou 3 vezes e serviu o `index.html` do projeto; e o kernel mostrou, nesses casos, um segundo socket LISTEN na mesma porta que **não** pertence ao Vite. Por isso a evidência primária é o endereço local do socket em estado `0A` lido de `/proc/net/tcp{,6}`, atribuído ao processo pelos inodes de `/proc/<pid>/fd`; sockets de terceiros vão para uma nota de diagnóstico. Medido: padrão ⇒ `127.0.0.1 (loopback)`; `LIA_FORGE_HTTP_EXPOSE=1` ⇒ `0.0.0.0 (any)`; `--mode expose` ⇒ `0.0.0.0 (any)`. Em plataforma sem `/proc` a checagem reporta "medição não executada", não "ok".
+- **`--factory-startup` foi avaliado e recusado.** Fecharia o mesmo vetor, mas descarta as preferências da pessoa e, combinado com auto-save, pode sobrescrever `userpref.blend` (efeito irreversível no ambiente de quem usa a máquina). A decisão e a fonte estão no ADR-002 (D5) e no comentário de `electron/blender-adapter.cjs`.
+- **A raiz de confinamento da exportação é a pasta do run**, não o projeto: era o segundo termo da checagem antiga que permitia exportar qualquer arquivo do repositório como se fosse artefato do run.
+
+### 15.5 O que continua aberto (e por quê)
+
+P0-5 (três escritores do store) · CSP do renderer · P0-10 (`reviews.json` sem escrita atômica e `reviewer` como texto livre) · reconciliação da flag persistente de provider com a autorização por run · literais `validated: true` em `shared/adapters/software.mjs:182/380/643/709` · `shell: process.platform === 'win32'` no MCP (linhas 277, 629, 646) · P0-8 (linha de base) · P0-9 (nenhuma execução com ferramenta externa real). Cada um está nomeado no §5 do ADR-002 com a decisão humana que o destrava.
+
+**Desvio registrado:** `npm install --ignore-scripts` foi executado para restaurar `node_modules` a partir do `package-lock.json` do próprio repositório (nenhuma dependência nova, nenhum postinstall de terceiro), porque `tests/test_bootstrap.py::test_installed_npm_tree_matches_lockfile` falha sem `node_modules/.package-lock.json`. DEC-P lista essa autorização como pendente; o desvio está registrado no §6 do ADR-002 em vez de ser apresentado como rotina.
