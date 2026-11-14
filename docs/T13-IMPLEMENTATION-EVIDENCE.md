@@ -260,6 +260,8 @@ A experiência pedida é "criar projeto → exportar" em 12 passos, mas a interf
 | 11 | Exportar para o destino | existe pacote exportado, com "verificado no destino: não" dito no próprio passo | — |
 | 12 | Guardar no projeto | há versão registrada no asset ou asset com versões/proveniência | — |
 
+Quando não há passo atual, a mensagem do painel distingue três situações, porque "tudo concluído" nem sempre é verdade: **há decisão pendente** → "O que depende só do produto está feito até aqui; o restante espera uma decisão sua"; **há pacote exportado sem verificação no destino** → importar na engine e conferir lá é com o usuário; **nada depende do usuário** → aí sim, os passos do produto estão concluídos. O caso concreto que motivou a regra: um run interrompido carregado deixa o passo 8 como decisão humana e o roteiro sem passo atual — dizer "todos concluídos" ali seria falso.
+
 As decisões humanas aparecem com **título e motivo** no próprio aviso, sem precisar abrir a lista dos 12 passos — é o que impede o usuário de achar que o produto vai instalar, autorizar ou recuperar algo sozinho. O passo 8 usa o mesmo campo `stale` que a lista lateral de runs usa (`listRuns()`), derivado na interface uma única vez: não há dois cálculos para o mesmo fato.
 
 A derivação mora em `shared/ui/journey.mjs` — lógica pura, sem React e sem módulo do Node — e a interface importa de lá: navegador, testes em Node e qualquer consumidor futuro (CLI, processo principal) calculam o roteiro no **mesmo** lugar, sem segunda versão que possa divergir. Junto sai `journeyProgress(steps)`, o resumo que o painel mostra (`total`, `done`, `percent`, `next` e `humanDecisions`), para que a contagem exibida e a conferida nos testes sejam o mesmo cálculo. Dois detalhes que vieram dessa mudança: sem pasta aberta existe **um único** passo atual (abrir o projeto), em vez de dois apontando ao mesmo tempo; e o passo de comparar concluído diz que o Comparison Lab mede e a escolha é do usuário.
@@ -292,7 +294,7 @@ Trilha medida: `0 → 1 → 2 → 6 → 8 → 9 → 10 → 11 → 12`, com a che
 | Plano com passo sem provider | `plan` e `brief` concluídos; **requisitos = decisão humana** com o texto "Instalar ou autorizar é decisão sua"; passo atual = "7 · Executar" |
 | Jornada completa (run `succeeded` + export + versão gravada) | 11 passos concluídos, nenhum passo atual pendente, exportação dizendo "verificado no destino: não" |
 | Render | o painel aparece com "Roteiro de produção", "2 de 12 passos", "Passo 3 — Escolher o objetivo" e a lista completa a um clique |
-| Render com run interrompido | o roteiro diz "não há execução neste processo", apresenta a recuperação como decisão do usuário e **não** mostra o texto de execução viva |
+| Render com run interrompido | o roteiro diz "não há execução neste processo", apresenta a recuperação como decisão do usuário, **não** mostra o texto de execução viva e **não** diz que a jornada terminou ("o restante espera uma decisão sua") |
 
 ## 11. Testes que provam o acima
 
@@ -362,6 +364,8 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 | `c889400` | run interrompido no roteiro de produção (`runStale` → passo 8 como decisão humana) e motivos das decisões visíveis |
 | `86df145` | documentação do run interrompido no roteiro (§10) |
 | `9c23d48` | seleção por passo: hook `canHandle`, Hub e planner conscientes do contexto, Blender fora do atlas 2D e nota visível no plano |
+| `a4e4a32` | documentação da seleção por passo (§6) |
+| `82ad851` | roteiro sem passo atual mas com decisão pendente não diz "tudo concluído" |
 
 ## 14. Pendências que exigem decisão humana
 
