@@ -113,6 +113,7 @@ Correções de honestidade que essa integração revelou:
 - `blender-spritesheet` aceitava qualquer caminho configurado como ferramenta: agora verifica existência + `X_OK` na descoberta e na execução, e falha de spawn (`ENOENT`/`EACCES`) vira **bloqueio nomeado**, nunca falha do produto;
 - o Hub tratava requisito não medido como veto: agora requisito **medido e insuficiente** → `blocked` com o número na mensagem (ex.: "RAM: precisa de 8192 MB e há 3940 MB"), e requisito **não medido** (VRAM sem probe autorizado) → aviso, não veto;
 - passos de difusão declaram `requiresParam: 'prompt'` e o brief escrito pelo usuário satisfaz essa entrada: o plano pede o texto antes de executar, em vez de falhar no meio;
+- **ter o Blender instalado quebrava os workflows 2D.** `render.atlas` e `motion.cycles` são capacidades compartilhadas entre o renderer 2D interno e o Blender, e a escolha entre candidatos prontos caía em ordem alfabética: com o Blender configurado, o atlas de `2d-character-parts` era entregue a ele e bloqueava pedindo "modelo animado, pasta de saída, script, personagem e dimensões" — entradas que um pipeline 2D nunca produz. O Adapter SDK ganhou o hook **opcional** `canHandle(context)` (os 15 campos do manifesto e as 3 classes seguem iguais), o Hub consulta esse critério com o contexto do passo (workflow, família, params com a entrada do usuário, capacidades de montante transitivas) e marca o candidato com `applicable`/`applicabilityReason`, ordenando os não aplicáveis por último. O Blender só entra em `render.atlas`/`motion.cycles` com material 3D de montante ou modelo informado; o renderer 2D só desenha atlas com `task: 'render'` quando há pipeline 2D de montante (`pack-atlas` serve a qualquer origem). Sem contexto, a escolha anterior permanece;
 - a descoberta dizia "Blender encontrado em `<caminho>`" mesmo quando o caminho era um arquivo indicado pelo usuário e **nenhuma versão tinha sido medida**. O pré-voo confere existência e permissão de execução — ele não executa o arquivo, porque rodar `--version` de um caminho digitado pelo usuário seria executar código arbitrário no pré-voo. A mensagem agora diz o que foi medido e o que não foi: `executableSource` (`user-configuration` ou `path`) e `versionConfirmed: false` saem da descoberta, são repassados por `preflight` e pelo Hub, e o painel **Ferramentas & requisitos** mostra os três (executável, origem dele e "versão detectada: não confirmada — o pré-voo mede existência e permissão de execução, mas não executa o arquivo");
 - `destination-profile` passou a conferir o pacote contra o **perfil publicado** do destino (destino existente no catálogo, fps/eixos/unidades/pivô/formatos idênticos, formatos aceitos por arquivo, bloqueios de compatibilidade). Continua sem afirmar importação real: `verifiedOnDestination` vem do perfil.
 
@@ -131,6 +132,17 @@ Correções de honestidade que essa integração revelou:
 | Remoto sem autorização | nada enviado, nada gerado, pendência visível na configuração |
 | Origem do executável | provider e pré-voo devolvem `executableSource: 'user-configuration'` e `versionConfirmed: false`, com a mensagem "A identidade como Blender não foi confirmada: a descoberta não executa o arquivo (nenhum `--version` foi rodado)" |
 | Recusas | endpoint não-loopback no modo local, campo de segredo, caminho de executável inválido, provider desativado |
+
+A seleção por passo foi medida **por HTTP no dev-server** com o Blender configurado (substituto de teste rotulado) no projeto de preview:
+
+| Plano | Passo | Adapter escolhido | O que o plano diz dos demais |
+|---|---|---|---|
+| `2d-character-parts` | `render` (`render.atlas`, task `render`) | `rig2d-software` | `blender-spritesheet ready` com `applicable: false` e o motivo (só entra com material 3D de montante) |
+| `variation-retexture` | `atlas` (`pack-atlas`) | `rig2d-software` | Blender marcado como não aplicável |
+| `3d-object-render` | `render` e `atlas` | `blender-spritesheet` | nenhum candidato descartado (os dois servem; o 3D vem primeiro) |
+| `3d-character-spritesheet` | `animate` (`motion.cycles`) e `render-2d` | `blender-spritesheet` | montante 3D (`rig3d.auto`) qualifica o passo |
+
+E o run completo de `2d-character-parts` no mesmo projeto — que antes parava bloqueado no atlas — chegou a **`succeeded`** com 24 frames, grade 8×3 de 48×48, validadores `animation-loop`, `png-content`, `spritesheet-manifest` e `destination-profile` aprovados, e pacote de exportação com 7 arquivos (`verifiedOnDestination: false`). Na interface, o passo do plano diz na hora qual ferramenta instalada não serve a ele e por quê, sem exigir que o usuário abra a lista de candidatos.
 
 Medido também **por HTTP no dev-server** (projeto de preview com um substituto de teste configurado como executável): `GET /overview` devolve, para `blender-spritesheet`, `status: available`, `executableSource: user-configuration`, `versionConfirmed: false` e o detalhe `Caminho configurado por você (/home/user/lia-preview-tools/blender-render.mjs) existe e é executável. A identidade como Blender não foi confirmada: a descoberta não executa o arquivo (nenhum --version foi rodado).` — ou seja, o substituto rotulado aparece como o que é (um caminho executável configurado), nunca como "Blender instalado".
 
@@ -297,13 +309,13 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 - `tests/project-structure-smoke.mjs` (**novo**): leitura que não escreve, criação limitada a `input/` e `.lia-forge/runs/`, `.spriteforge/assets.json`, `.lia.json` e um arquivo do usuário preservados byte a byte, `projectInfo()` coerente com o disco e raízes inválidas (arquivo, symlink, caminho vazio) recusadas — com verificação de que nada foi criado fora do caminho informado (§9).
 - `tests/run-lifecycle-smoke.mjs` (**novo**): progresso gravado antes do fim do run, cancelamento com o processo externo encerrado de verdade, cancelar duas vezes sem reescrever nada, retomada por checkpoint sem reexecutar passo concluído, falha intermediária com código de saída e stderr preservados, retomada depois da falha, run órfão corrigido sem fingir execução e recusas nomeadas (§8).
 - `tests/tool-stubs.mjs` (**novo**): os substitutos de ferramenta externa (renderizador, lento e falho) reunidos num módulo só, usados pelo smoke de ciclo de vida e pelo de integração — sem duplicar código e sempre rotulados como substitutos.
-- `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em três cenários reais e renderizado, além do item de run interrompido (§10 e §8); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
+- `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em três cenários reais e renderizado, item de run interrompido (§10 e §8) e a nota do plano sobre ferramenta instalada que não serve ao passo (§6); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
 - `tests/studio-service-smoke.mjs` (estendido): seção 11 com medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada a `input/` e Comparison Lab com caminho recusado (§7); passo opcional que produz prévia, passo opcional com erro que vira skip e brief como entrada de texto do passo de conceito.
 - `tests/host-integration-smoke.mjs` (**novo** nesta fase): integração real com processo externo e ComfyUI em loopback, providers, recusas, gates e a descoberta que diz a origem do executável sem afirmar versão não medida (§6).
 - `tests/workflow-coverage-smoke.mjs` (**novo** nesta fase): 11 casos sobre os 8 workflows, com a matriz de evidência impressa (§3).
-- `tests/orchestrator-engine-smoke.mjs` (estendido): entradas pendentes, `pendingInputs` e bloqueio nomeado por passo.
+- `tests/orchestrator-engine-smoke.mjs` (estendido): entradas pendentes, `pendingInputs`, bloqueio nomeado por passo e a regressão de seleção com Blender **e** adapters internos prontos (atlas 2D e retexture no renderer interno com motivo no plano; render/atlas 3D e animações do contrato humanoide no Blender; `select` sem contexto inalterado).
 - `tests/preflight-destinations-smoke.mjs` (estendido): conformidade do pacote com o perfil publicado do destino.
-- `tests/adapter-sdk-smoke.mjs` (estendido): caminho de executável inválido não vira ferramenta disponível.
+- `tests/adapter-sdk-smoke.mjs` (estendido): caminho de executável inválido não vira ferramenta disponível; contrato do hook `canHandle` (recusa de não-função, veredictos de Blender e renderer 2D por capacidade/origem, adapters sem hook inalterados).
 
 ## 12. O que **não** foi executado (e o que seria necessário)
 
@@ -348,6 +360,8 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 | `f9a01c6` | smoke de coerência IPC/HTTP (33 smokes) e fim da corrida no teste de cancelamento |
 | `1b2d012` | documentação da coerência dos transportes (§5) |
 | `c889400` | run interrompido no roteiro de produção (`runStale` → passo 8 como decisão humana) e motivos das decisões visíveis |
+| `86df145` | documentação do run interrompido no roteiro (§10) |
+| `9c23d48` | seleção por passo: hook `canHandle`, Hub e planner conscientes do contexto, Blender fora do atlas 2D e nota visível no plano |
 
 ## 14. Pendências que exigem decisão humana
 
