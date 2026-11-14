@@ -246,7 +246,45 @@ try {
   check(reviewsFile[rejectedStep.id].approved === false, 'a decisão de rejeição é gravada');
   check(typeof reviewsFile[rejectedStep.id].sha256 === 'string' && reviewsFile[rejectedStep.id].sha256.length === 64,
     'a revisão é ancorada no SHA-256 do artefato');
-  check((await service.readRun(rejectedRun.runId)).status === 'blocked', 'o run continua bloqueado no disco');
+  const afterRejection = await service.readRun(rejectedRun.runId);
+  check(afterRejection.status === 'blocked', 'o run continua bloqueado no disco');
+  // Gate pendente agora vale mais do que a decisão gravada: o passo não pode
+  // aparecer como aprovado só porque existe uma decisão no arquivo.
+  check(afterRejection.steps.find((step) => step.id === rejectedStep.id).review.status === 'review-missing',
+    'depois de rejeitar, o passo continua esperando revisão (não aparece como decidido)');
+  check(afterRejection.steps.find((step) => step.id === rejectedStep.id).review.recorded?.approved === false,
+    'e a rejeição fica visível como decisão gravada, com o motivo');
+  check(/braço colado no torso/.test(afterRejection.steps.find((step) => step.id === rejectedStep.id).review.recorded?.note ?? ''),
+    'a nota do revisor é preservada no registro');
+
+  // Reaprovar depois de rejeitar: a rejeição não pode sumir do histórico — foi ela
+  // que disse o que estava errado.
+  const reapproved = await service.reviewStep({
+    runId: rejectedRun.runId,
+    stepId: rejectedStep.id,
+    approved: true,
+    reviewer: 'smoke-test',
+    note: 'partes refeitas, pode seguir',
+  });
+  check(reapproved.resumed === true, 'aprovar depois da rejeição retoma o run');
+  const afterReapproval = await service.readRun(rejectedRun.runId);
+  const reapprovedStep = afterReapproval.steps.find((step) => step.id === rejectedStep.id);
+  check(reapprovedStep.review.status === 'approved', 'o passo reaprovado aparece como aprovado');
+  check(reapprovedStep.review.reviewedBy === 'smoke-test', 'com o nome de quem aprovou');
+  check(reapprovedStep.review.matchesArtifact === true, 'e a aprovação vale para o conteúdo atual do passo');
+  check((reapprovedStep.review.history ?? []).length === 1, 'a decisão anterior fica no histórico');
+  check(reapprovedStep.review.history[0].approved === false && /braço colado/.test(reapprovedStep.review.history[0].note ?? ''),
+    'o histórico diz que houve uma rejeição e o motivo dela');
+  check((afterReapproval.reviews ?? {})[rejectedStep.id]?.approved === true, 'readRun traz as decisões gravadas junto do snapshot');
+  const stillPending = afterReapproval.steps.find((step) => step.review?.status === 'review-missing');
+  check(Boolean(stillPending), 'o próximo gate humano continua pendente (a aprovação não vale para ele)');
+  check(stillPending.review.recorded === undefined, 'e ninguém inventa decisão para um passo que não foi revisado');
+
+  const reviewsAfter = JSON.parse(await fs.readFile(path.join(projectRoot, '.lia-forge', 'runs', rejectedRun.runId, 'reviews.json'), 'utf8'));
+  check(reviewsAfter[rejectedStep.id].approved === true, 'no disco fica a decisão atual (é o que o gate lê)');
+  check((reviewsAfter[rejectedStep.id].history ?? []).length === 1, 'e o histórico vai ao lado, sem mudar o que o gate lê');
+  const runOnDisk = JSON.parse(await fs.readFile(path.join(projectRoot, '.lia-forge', 'runs', rejectedRun.runId, 'run.json'), 'utf8'));
+  check(!('reviews' in runOnDisk), 'o snapshot gravado não embute as decisões: a junção é feita na leitura');
 
   // ---------------------- 6. segredos redigidos no que é gravado em disco
   const secret = 'sk-SEGREDOSUPERSENSIVEL123';

@@ -815,10 +815,75 @@ try {
   assert.ok(!failedJourneyMarkup.includes('Todos os passos que dependem só do produto estão concluídos'),
     'a frase de jornada concluída não aparece com run falho');
 
+  // --------------------- 12. revisão humana visível (quem, quando, com que nota)
+  // Dados reais pelo transporte HTTP: o run de animação bloqueado acima é rejeitado
+  // e depois aprovado, e é isso que a interface tem que mostrar.
+  const { timelineFor } = await vite.ssrLoadModule('/src/ForgeStudio.jsx');
+  // Run novo, parado de propósito no primeiro gate humano (os anteriores já foram
+  // aprovados até o fim nas seções acima).
+  const reviewRun = await liaForgeApi.run({
+    workflowId: '2d-character-parts',
+    destination: 'godot-4',
+    brief: 'revisão humana visível',
+    params: { sourceImage: 'input/sprite.png' },
+  });
+  assert.equal(reviewRun.snapshot.status, 'blocked', 'o run para no gate de revisão');
+  const reviewRunId = reviewRun.runId;
+  const pendingReviewStep = reviewRun.snapshot.steps.find((step) => step.state === 'blocked' && step.review?.status === 'review-missing');
+  assert.ok(pendingReviewStep, 'há um passo esperando revisão humana para exercitar');
+
+  const approvedSnapshot = await liaForgeApi.readRun(runId);
+  const approvedStep = approvedSnapshot.steps.find((step) => step.review?.status === 'approved');
+  assert.ok(approvedStep, 'readRun traz a decisão gravada no passo que foi aprovado');
+  const approvedMarkup = renderToStaticMarkup(createElement(RunStepRow, { step: approvedStep }));
+  assert.ok(approvedMarkup.includes('Aprovado por'), 'a linha do passo diz que houve aprovação humana');
+  assert.ok(approvedMarkup.includes(approvedStep.review.reviewedBy ?? 'smoke-ui'), 'e diz quem aprovou');
+  assert.ok(approvedMarkup.includes(String(approvedStep.review.reviewedAt ?? '')), 'e quando aprovou');
+
+  const rejected = await liaForgeApi.reviewStep(reviewRunId, {
+    stepId: pendingReviewStep.id,
+    approved: false,
+    reviewer: 'smoke-ui',
+    note: 'ações não fecham o ciclo',
+  });
+  assert.equal(rejected.resumed, false, 'rejeitar não retoma o run');
+  const afterRejection = await liaForgeApi.readRun(reviewRunId);
+  const rejectedStep = afterRejection.steps.find((step) => step.id === pendingReviewStep.id);
+  assert.equal(rejectedStep.review.status, 'review-missing', 'o passo rejeitado continua esperando revisão (não aparece como decidido)');
+  assert.equal(rejectedStep.review.recorded?.approved, false, 'a rejeição fica visível como decisão gravada');
+  const rejectedMarkup = renderToStaticMarkup(createElement(RunStepRow, { step: rejectedStep }));
+  assert.ok(rejectedMarkup.includes('Você rejeitou este conteúdo'), 'a interface diz que aquele conteúdo foi rejeitado');
+  assert.ok(rejectedMarkup.includes('ações não fecham o ciclo'), 'e mostra a nota do revisor');
+  assert.ok(rejectedMarkup.includes('Aprovar e continuar') && rejectedMarkup.includes('Rejeitar e parar'),
+    'as duas saídas continuam oferecidas depois da rejeição');
+
+  const reapproved = await liaForgeApi.reviewStep(reviewRunId, {
+    stepId: pendingReviewStep.id,
+    approved: true,
+    reviewer: 'smoke-ui',
+    note: 'ações refeitas',
+  });
+  assert.equal(reapproved.resumed, true, 'aprovar depois da rejeição retoma o run');
+  const afterReapproval = await liaForgeApi.readRun(reviewRunId);
+  const reapprovedStep = afterReapproval.steps.find((step) => step.id === pendingReviewStep.id);
+  assert.equal(reapprovedStep.review.status, 'approved', 'o passo reaprovado aparece como aprovado');
+  assert.equal(reapprovedStep.review.history.length, 1, 'e a rejeição anterior continua no histórico');
+  const reapprovedMarkup = renderToStaticMarkup(createElement(RunStepRow, { step: reapprovedStep }));
+  assert.ok(reapprovedMarkup.includes('Aprovado por'), 'a aprovação atual aparece');
+  assert.ok(reapprovedMarkup.includes('Rejeitado antes por'), 'a rejeição substituída aparece como histórico');
+  assert.ok(reapprovedMarkup.includes('ações não fecham o ciclo'), 'com a nota que explicou o que estava errado');
+
+  const timeline = timelineFor(afterReapproval);
+  assert.ok(timeline.some((entry) => entry.kind === 'review' && /aprovado por smoke-ui/.test(entry.text)),
+    'a aba Logs mostra a aprovação com autoria');
+  assert.ok(timeline.some((entry) => entry.kind === 'review-history' && /rejeitado por smoke-ui/.test(entry.text)),
+    'e mostra a rejeição anterior, marcada como decisão substituída');
+  assert.ok(timeline.every((entry) => !/sk-|token/i.test(entry.text)), 'nenhum segredo entra na timeline');
+
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 
-  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab, ciclo de vida do run, projeto, roteiro de 12 passos, run interrompido/cancelado na lista com as saídas que o serviço aceita; transporte ${liaForgeApi.transport}).`);
+  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, revisão humana visível com histórico, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab, ciclo de vida do run, projeto, roteiro de 12 passos, run interrompido/cancelado na lista com as saídas que o serviço aceita; transporte ${liaForgeApi.transport}).`);
 } finally {
   globalThis.fetch = nativeFetch;
   await vite.close();

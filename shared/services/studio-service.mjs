@@ -1109,7 +1109,20 @@ export function createStudioService(options = {}) {
       };
       const reviewsFile = path.join(projectRoot, RUNS_DIRECTORY, runId, 'reviews.json');
       const reviews = await fs.readFile(reviewsFile, 'utf8').then((text) => JSON.parse(text)).catch(() => ({}));
-      reviews[stepId] = decision;
+      // Decisão humana é proveniência: rejeitar e depois aprovar não pode apagar a
+      // rejeição (foi ela que disse o que estava errado). O mapa continua com a
+      // decisão atual — é o que o gate lê — e o histórico vai ao lado.
+      const previous = reviews[stepId] ?? null;
+      const history = previous
+        ? [...(previous.history ?? []), {
+          approved: previous.approved === true,
+          sha256: previous.sha256 ?? null,
+          reviewer: previous.reviewer ?? null,
+          reviewedAt: previous.reviewedAt ?? null,
+          note: previous.note ?? null,
+        }]
+        : [];
+      reviews[stepId] = history.length ? { ...decision, history } : decision;
       await fs.writeFile(reviewsFile, `${JSON.stringify(reviews, null, 2)}\n`, 'utf8');
       if (!approved) {
         return Object.freeze({ runId, stepId, decision, resumed: false, reason: 'Passo rejeitado pelo revisor; o run permanece bloqueado.' });
@@ -1176,10 +1189,51 @@ export function createStudioService(options = {}) {
       return runs.sort((a, b) => String(b.startedAt ?? '').localeCompare(String(a.startedAt ?? '')));
     },
 
+    /**
+     * Lê o run gravado e traz junto as decisões humanas de `reviews.json`.
+     *
+     * Sem isso a interface não tem como mostrar quem aprovou o quê: quando a
+     * retomada reaproveita o passo do checkpoint, o snapshot novo vem sem o campo
+     * `review` e a aprovação que destravou o run fica invisível — assim como uma
+     * rejeição anterior, que é justamente o registro do que estava errado.
+     *
+     * Regra de honestidade: um gate pendente **agora** vale mais do que a decisão
+     * gravada antes. Se o passo está de novo esperando revisão (o artefato mudou,
+     * por exemplo), ele não aparece como aprovado; a decisão antiga vai em
+     * `review.recorded`, com `matchesArtifact` dizendo se ela vale para o conteúdo
+     * atual do passo.
+     */
     async readRun(runId) {
-      const file = path.join(projectRoot, RUNS_DIRECTORY, String(runId), 'run.json');
+      const directory = path.join(projectRoot, RUNS_DIRECTORY, String(runId));
+      const file = path.join(directory, 'run.json');
       if (!await pathExists(file)) return null;
-      return JSON.parse(await fs.readFile(file, 'utf8'));
+      const snapshot = JSON.parse(await fs.readFile(file, 'utf8'));
+      const reviews = await fs.readFile(path.join(directory, 'reviews.json'), 'utf8')
+        .then((text) => JSON.parse(text))
+        .catch(() => null);
+      if (!reviews || typeof reviews !== 'object' || !Array.isArray(snapshot?.steps)) return snapshot;
+      const steps = snapshot.steps.map((step) => {
+        const decision = reviews[step.id];
+        if (!decision || typeof decision !== 'object') return step;
+        const matchesArtifact = decision.sha256 && step.sha256 ? decision.sha256 === step.sha256 : null;
+        const recorded = { ...decision, matchesArtifact };
+        const current = step.review ?? null;
+        if (current && current.status !== 'approved') return { ...step, review: { ...current, recorded } };
+        return {
+          ...step,
+          review: {
+            status: decision.approved === true ? 'approved' : 'rejected',
+            reviewedBy: decision.reviewer ?? null,
+            reviewedAt: decision.reviewedAt ?? null,
+            sha256: decision.sha256 ?? null,
+            note: decision.note ?? null,
+            history: decision.history ?? [],
+            matchesArtifact,
+            reason: decision.approved === true ? null : 'Rejeitado pelo revisor; o run permanece bloqueado.',
+          },
+        };
+      });
+      return { ...snapshot, steps, reviews };
     },
 
     /** Preview de VFX para a interface (PNG em base64, limitado a 6 MB). */

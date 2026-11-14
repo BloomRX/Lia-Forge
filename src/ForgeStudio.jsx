@@ -108,8 +108,12 @@ const COST_LABELS = {
   paid: 'Pago',
 };
 
-/** Transforma o fluxo de eventos + logs do run em linhas legíveis e ordenadas. */
-function timelineFor(run) {
+/**
+ * Transforma o fluxo de eventos + logs + decisões humanas do run em linhas
+ * legíveis e ordenadas. Exportada para os smokes: o que a aba Logs mostra tem que
+ * ser conferido, não suposto.
+ */
+export function timelineFor(run) {
   const events = (run?.events ?? []).map((event) => ({
     at: event.at,
     kind: event.type,
@@ -125,6 +129,18 @@ function timelineFor(run) {
               ? `Run encerrado com status "${run?.status ?? '?'}" e ${run?.summary?.progress ?? 0}% de progresso.`
               : event.type),
   }));
+  // Decisões humanas gravadas em reviews.json, com as que foram substituídas:
+  // rejeitar e depois aprovar não pode apagar o registro do que estava errado.
+  const reviews = Object.entries(run?.reviews ?? {}).flatMap(([stepId, decision]) => [
+    ...(decision?.history ?? []).map((item) => ({ ...item, superseded: true })),
+    decision,
+  ].filter(Boolean).map((item) => ({
+    at: item.reviewedAt ?? '',
+    kind: item.superseded ? 'review-history' : 'review',
+    level: item.approved ? 'info' : 'warn',
+    text: `Revisão humana de "${stepId}": ${item.approved ? 'aprovado' : 'rejeitado'} por ${item.reviewer ?? 'usuário'}${item.note ? ` — nota: ${item.note}` : ''}${item.superseded ? ' (decisão anterior, substituída pela atual)' : ''}`,
+  })));
+
   const logs = (run?.logs ?? []).map((entry) => ({
     at: entry.at,
     kind: entry.level,
@@ -132,7 +148,7 @@ function timelineFor(run) {
     text: entry.message,
     details: entry.details,
   }));
-  return [...events, ...logs].sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  return [...events, ...logs, ...reviews].sort((a, b) => String(a.at).localeCompare(String(b.at)));
 }
 
 /**
@@ -649,7 +665,39 @@ export function RunStepRow({ step, onReview = () => {}, reviewBusy = false, revi
         <p className="forge-step-reason"><Eye size={13} strokeWidth={1.9} />{step.review.reason}</p>
       ) : null}
       {step.review?.status === 'approved' ? (
-        <p className="forge-step-ok"><CheckCircle2 size={13} strokeWidth={1.9} />Aprovado por {step.review.reviewedBy ?? 'você'} em {step.review.reviewedAt ?? ''}</p>
+        <p className="forge-step-ok">
+          <CheckCircle2 size={13} strokeWidth={1.9} />
+          Aprovado por {step.review.reviewedBy ?? 'você'} em {step.review.reviewedAt ?? ''}
+          {step.review.note ? ` — nota: ${step.review.note}` : ''}
+          {step.review.matchesArtifact === false ? ' (o artefato mudou depois desta aprovação)' : ''}
+        </p>
+      ) : null}
+      {step.review?.status === 'rejected' ? (
+        <p className="forge-step-reason">
+          <Eye size={13} strokeWidth={1.9} />
+          Rejeitado por {step.review.reviewedBy ?? 'você'} em {step.review.reviewedAt ?? ''}
+          {step.review.note ? ` — nota: ${step.review.note}` : ''}
+        </p>
+      ) : null}
+      {(step.review?.history ?? []).length ? (
+        <ul className="forge-list is-review-history">
+          {(step.review.history ?? []).map((item) => (
+            <li key={`${item.reviewedAt}-${item.approved}`}>
+              {item.approved ? 'Aprovado' : 'Rejeitado'} antes por {item.reviewer ?? 'você'} em {item.reviewedAt ?? ''}
+              {item.note ? ` — nota: ${item.note}` : ''} (decisão substituída pela atual)
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {step.review?.recorded ? (
+        <p className="forge-step-reason">
+          <Eye size={13} strokeWidth={1.9} />
+          {step.review.recorded.approved
+            ? `Há uma aprovação anterior de ${step.review.recorded.reviewer ?? 'você'} em ${step.review.recorded.reviewedAt ?? ''}${step.review.recorded.matchesArtifact === false
+              ? ', mas ela vale para outro conteúdo: o artefato mudou e precisa de nova aprovação.'
+              : '; o passo voltou a esperar revisão.'}`
+            : `Você rejeitou este conteúdo em ${step.review.recorded.reviewedAt ?? ''}${step.review.recorded.note ? ` — nota: ${step.review.recorded.note}` : ''}. O passo continua esperando uma decisão.`}
+        </p>
       ) : null}
       {step.note ? <p className="forge-note">{step.note}</p> : null}
       {artifactImages.length ? (

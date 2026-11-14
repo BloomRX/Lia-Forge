@@ -455,6 +455,8 @@
 .forge-export-compat{display:flex;flex-direction:column;gap:5px;margin-top:8px}
 .forge-export-compat .forge-list.is-blockers{margin:0;padding-left:14px;color:#f0b7a6;font-size:9px}
 .forge-export-compat .forge-note{margin:0}
+/* Histórico de revisão humana: decisões substituídas continuam visíveis */
+.forge-list.is-review-history{margin:4px 0 0;padding-left:14px;color:#c9b08d;font-size:9px;line-height:1.5}
 /* Decisões humanas do roteiro: título + motivo visíveis sem abrir a lista */
 .forge-journey-human-head{display:flex;align-items:flex-start;gap:5px}
 .forge-journey-human{margin:5px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:4px}
