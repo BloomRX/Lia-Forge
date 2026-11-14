@@ -24,6 +24,7 @@ import { discoverHub } from '../hub/provider-hub.mjs';
 import { runPreflight } from '../qa/preflight.mjs';
 import { listWorkflows, planWorkflow, WORKFLOW_IDS } from '../orchestrator/planner.mjs';
 import { ExecutionManager } from '../engine/execution-manager.mjs';
+import { isResumableRunState } from '../engine/run-states.mjs';
 import { assertSafeWriteTarget, redactSecrets, sha256Hex } from '../engine/gates.mjs';
 import { createAssetManager, classifyRights } from '../assets/manager.mjs';
 import { decodePng, encodePngRgba, analyzePngContent } from '../qa/png-codec.mjs';
@@ -1037,7 +1038,11 @@ export function createStudioService(options = {}) {
       if (activeRuns.has(id)) throw new Error(`resumeRun: o run "${id}" ainda está em execução neste processo; cancele antes de retomar.`);
       const snapshot = await this.readRun(id);
       if (!snapshot) throw new Error(`resumeRun: run "${id}" não encontrado em .lia-forge/runs/`);
-      if (!['cancelled', 'paused', 'blocked', 'failed'].includes(snapshot.status)) {
+      // Run gravado como em andamento sem execução neste processo (o aplicativo
+      // foi fechado, a máquina reiniciou): os checkpoints estão no disco e a
+      // retomada é exatamente o que o usuário espera do botão "Retomar".
+      const interrupted = ['running', 'planned'].includes(snapshot.status) && !activeRuns.has(id);
+      if (!interrupted && !isResumableRunState(snapshot.status)) {
         return Object.freeze({ ok: false, runId: id, status: snapshot.status, reason: `Run "${snapshot.status}" não precisa de retomada.` });
       }
       const runDirectory = path.join(projectRoot, RUNS_DIRECTORY, id);
@@ -1064,6 +1069,7 @@ export function createStudioService(options = {}) {
         ok: true,
         runId: id,
         resumedFrom: snapshot.status,
+        interrupted,
         checkpointsReused: Object.keys(checkpoints).length,
         reason: reason ? redactSecrets(String(reason)) : null,
         result: resumed.snapshot,
@@ -1149,6 +1155,9 @@ export function createStudioService(options = {}) {
             summary: snapshot.summary,
             active,
             stale: !active && unfinished.has(snapshot.status),
+            // Retomar precisa do plano original gravado: sem ele o serviço recusa
+            // (e a interface não pode oferecer um botão que devolve erro).
+            planStored: await pathExists(path.join(root, entry.name, 'plan.json')),
           });
         } catch {
           runs.push({ runId: entry.name, status: 'unreadable', active: false, stale: false });

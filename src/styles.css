@@ -440,6 +440,10 @@
 .forge-list.is-runs li.is-stale{border-color:#7a5a2f;background:#1e1a14}
 .forge-run-recover{display:flex;flex-direction:column;gap:5px;margin:5px 0 2px;padding:6px 7px;border-radius:6px;background:#221c14}
 .forge-run-recover>span{color:#ffd8a8;font-size:9px;line-height:1.4}
+/* Run retomável (falhou/cancelado/pausado/interrompido): a saída existe e é visível */
+.forge-list.is-runs li.is-resumable{border-color:#4d5a6b;background:#151a1e}
+.forge-list.is-runs li.is-resumable .forge-run-recover{background:#161c22}
+.forge-list.is-runs li.is-resumable .forge-run-recover>span{color:#bcd6ea}
 /* Decisões humanas do roteiro: título + motivo visíveis sem abrir a lista */
 .forge-journey-human-head{display:flex;align-items:flex-start;gap:5px}
 .forge-journey-human{margin:5px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:4px}

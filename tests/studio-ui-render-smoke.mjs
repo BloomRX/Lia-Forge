@@ -548,7 +548,78 @@ try {
   }));
   assert.ok(normalMarkup.includes(listedRuns[0].runId), 'o item lista o id do run');
   assert.ok(!normalMarkup.includes('Corrigir estado'), 'run encerrado não oferece recuperação');
+  assert.ok(!normalMarkup.includes('Retomar'), 'run concluído não oferece retomada (o serviço recusaria)');
 
+  const renderRunItem = (item) => renderToStaticMarkup(createElement(SavedRunItem, {
+    item, currentRunId: null, busy: null, onOpen: () => {}, onRecover: () => {}, onResume: () => {},
+  }));
+
+  // Run bloqueado por revisão (real, produzido acima pela API): a saída dele é a
+  // aprovação no painel do run, não uma retomada que repetiria o mesmo bloqueio.
+  const blockedItem = listedRuns.find((item) => item.status === 'blocked');
+  assert.ok(blockedItem, 'o projeto do smoke tem um run bloqueado de verdade');
+  assert.equal(blockedItem.planStored, true, 'a lista diz se o plano original está gravado');
+  const blockedItemMarkup = renderRunItem(blockedItem);
+  assert.ok(!blockedItemMarkup.includes('Retomar'), 'run bloqueado não oferece retomada: o que ele espera é a revisão');
+  assert.ok(blockedItemMarkup.includes('Aguardando você'), 'e mostra o estado real do run');
+
+  // Run interrompido de verdade: gravado como em andamento, sem execução neste
+  // processo, com o plano original copiado de um run real do mesmo projeto.
+  const orphanId = 'run-interrompido-do-smoke';
+  const orphanDirectory = path.join(projectRoot, '.lia-forge', 'runs', orphanId);
+  await fs.mkdir(orphanDirectory, { recursive: true });
+  await fs.copyFile(path.join(projectRoot, '.lia-forge', 'runs', runId, 'plan.json'), path.join(orphanDirectory, 'plan.json'));
+  await fs.writeFile(path.join(orphanDirectory, 'run.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    runId: orphanId,
+    planId: '3d-object-render',
+    planTitle: 'Objeto 3D + render',
+    status: 'running',
+    startedAt: new Date(Date.now() - 60000).toISOString(),
+    finishedAt: null,
+    steps: [{ id: 'inspect', adapter: 'glb-inspect', state: 'running', outputs: [], error: null }],
+    gates: [],
+    logs: [],
+    provenance: [],
+    cost: { status: 'unknown', entries: [], total: null, currency: null },
+    summary: { total: 1, progress: 0, finished: false, failed: [], blocked: [] },
+  }, null, 2)}\n`, 'utf8');
+
+  const orphanItem = (await liaForgeApi.runs()).find((item) => item.runId === orphanId);
+  assert.equal(orphanItem?.stale, true, 'o run gravado como em andamento sem execução aqui chega à lista como interrompido');
+  assert.equal(orphanItem?.planStored, true, 'e a lista confirma que o plano original está gravado');
+  const orphanMarkup = renderRunItem(orphanItem);
+  assert.ok(orphanMarkup.includes('Corrigir estado') && orphanMarkup.includes('Retomar'),
+    'o item interrompido oferece as duas saídas que o serviço aceita');
+
+  // Sem o plano gravado, o botão de retomar não aparece: melhor dizer por quê do
+  // que oferecer um botão que devolve erro.
+  const planlessId = 'run-sem-plano-do-smoke';
+  const planlessDirectory = path.join(projectRoot, '.lia-forge', 'runs', planlessId);
+  await fs.mkdir(planlessDirectory, { recursive: true });
+  await fs.writeFile(path.join(planlessDirectory, 'run.json'), (await fs.readFile(path.join(orphanDirectory, 'run.json'), 'utf8')).replace(orphanId, planlessId), 'utf8');
+  const planlessItem = (await liaForgeApi.runs()).find((item) => item.runId === planlessId);
+  assert.equal(planlessItem?.planStored, false, 'a lista distingue o run sem plano gravado');
+  const planlessMarkup = renderRunItem(planlessItem);
+  assert.ok(!planlessMarkup.includes('Retomar'), 'sem plano gravado não é oferecida a retomada');
+  assert.ok(planlessMarkup.includes('não há como retomar com as mesmas entradas'), 'e o motivo é dito no item');
+  assert.ok(planlessMarkup.includes('Corrigir estado'), 'corrigir o estado continua disponível');
+
+  // Corrigir o estado pela API produz um run cancelado real: é ele que a lista
+  // passa a oferecer para retomar (o plano continua gravado).
+  const corrected = await liaForgeApi.cancelRun(orphanId, { reason: 'estado corrigido pelo usuário: não havia execução neste processo' });
+  assert.equal(corrected.ok, true, 'corrigir o estado do run interrompido pela API');
+  assert.equal(corrected.stale, true, 'a resposta diz que não havia execução neste processo (não finge ter parado um processo)');
+  const cancelledItem = (await liaForgeApi.runs()).find((item) => item.runId === orphanId);
+  assert.equal(cancelledItem?.status, 'cancelled', 'o estado gravado passa a cancelado');
+  assert.equal(cancelledItem?.stale, false, 'e ele deixa de constar como interrompido');
+  const cancelledMarkup = renderRunItem(cancelledItem);
+  assert.ok(cancelledMarkup.includes('Retomar'), 'run cancelado real oferece a retomada que o serviço aceita');
+  assert.ok(cancelledMarkup.includes('checkpoint'), 'o item diz que os passos concluídos ficaram em checkpoint');
+  assert.ok(!cancelledMarkup.includes('Corrigir estado'), 'com o estado já corrigido, não oferece corrigir de novo');
+
+  // Variante apresentada com o estado trocado de propósito (o run interrompido
+  // real, produzido acima, é o que prova o comportamento com dados do serviço).
   const staleMarkup = renderToStaticMarkup(createElement(SavedRunItem, {
     item: { ...listedRuns[0], status: 'running', stale: true, active: false },
     currentRunId: null,
@@ -635,7 +706,7 @@ try {
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 
-  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab, ciclo de vida do run, projeto, roteiro de 12 passos e run interrompido na UI; transporte ${liaForgeApi.transport}).`);
+  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab, ciclo de vida do run, projeto, roteiro de 12 passos, run interrompido/cancelado na lista com as saídas que o serviço aceita; transporte ${liaForgeApi.transport}).`);
 } finally {
   globalThis.fetch = nativeFetch;
   await vite.close();

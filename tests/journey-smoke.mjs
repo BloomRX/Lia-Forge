@@ -28,7 +28,8 @@ import path from 'node:path';
 
 import { createStudioService } from '../shared/services/studio-service.mjs';
 import { ensureProjectStructure } from '../shared/integrations/project-structure.mjs';
-import { buildJourneySteps, journeyProgress } from '../shared/ui/journey.mjs';
+import { buildJourneySteps, journeyProgress, isResumableRun } from '../shared/ui/journey.mjs';
+import { RESUMABLE_RUN_STATES } from '../shared/engine/run-states.mjs';
 import { encodePngRgba, analyzePngContent } from '../shared/qa/png-codec.mjs';
 import { buildGlbFixture } from './glb-fixtures.mjs';
 import { failingToolStub, slowToolStub } from './tool-stubs.mjs';
@@ -306,6 +307,12 @@ try {
   const followStep = interrupted.steps.find((step) => step.id === 'follow');
   check(followStep.state === 'human', 'run interrompido vira decisão humana no passo de acompanhar');
   check(/não há execução neste processo/.test(followStep.detail), 'e o passo diz que não há execução neste processo');
+  check(/"Corrigir estado"/.test(followStep.detail) && /"Retomar"/.test(followStep.detail),
+    'o passo nomeia as duas ações que a lista de execuções oferece de verdade');
+  check(isResumableRun({ runId: interruptedRun.runId, status: 'running', stale: true, active: false }),
+    'o run interrompido é retomável pelo serviço: o botão oferecido não devolve erro');
+  check(!isResumableRun({ runId: interruptedRun.runId, status: 'running', active: true }),
+    'com a execução viva neste processo o mesmo run não oferece retomada');
   check(interrupted.progress.humanDecisions.some((item) => item.id === 'follow'), 'o resumo lista a recuperação como decisão pendente');
   check(interrupted.steps.find((step) => step.id === 'review').state === 'todo', 'sem run encerrado, revisar não consta como feito');
   const base = {
@@ -361,6 +368,7 @@ try {
   check(failedReview.state === 'human', 'run falho não consta como revisado: o que resta é decisão do usuário');
   check(/terminou com falha em "render"/.test(failedReview.detail), `o passo nomeia onde falhou (${failedReview.detail.slice(0, 90)})`);
   check(/nada aqui foi entregue como pronto/.test(failedReview.detail), 'e diz que nada foi entregue como pronto');
+  check(/"Retomar" na lista de execuções/.test(failedReview.detail), 'o passo falho aponta a retomada pelos checkpoints, que o serviço aceita');
   check(failedJourney.steps.find((step) => step.id === 'export').state === 'todo', 'run falho não libera exportação');
   check(failedJourney.steps.find((step) => step.id === 'keep').state === 'todo',
     'asset guardado de outro run não conclui o passo de guardar deste run');
@@ -392,9 +400,33 @@ try {
   const cancelledReview = cancelledJourney.steps.find((step) => step.id === 'review');
   check(cancelledReview.state === 'human', 'run cancelado não consta como revisado');
   check(/Run cancelado: usuário desistiu desta geração/.test(cancelledReview.detail), 'o passo diz o motivo gravado do cancelamento');
-  check(/retomar ou recomeçar é decisão sua/i.test(cancelledReview.detail), 'e aponta as duas saídas como decisão do usuário');
+  check(/"Retomar" na lista de execuções/.test(cancelledReview.detail), 'e aponta a saída que existe na interface (retomar dos checkpoints)');
+  check(/executar de novo recomeça do zero/.test(cancelledReview.detail), 'e distingue retomar de recomeçar');
+  check(/smoke-journey/.test(cancelledReview.detail), 'a autoria gravada do cancelamento aparece no passo');
   check(cancelledJourney.steps.find((step) => step.id === 'follow').state === 'done', 'acompanhar estava concluído: o run foi encerrado de propósito');
   check(cancelledJourney.steps.find((step) => step.id === 'export').state === 'todo', 'run cancelado não libera exportação');
+
+  // ------------- 12.3 o botão da lista é exatamente o que o serviço aceita
+  // Regra de coerência: a interface não oferece ação que o serviço recusaria
+  // (botão que devolve "não precisa de retomada") nem esconde ação aceita.
+  const listed = await service.listRuns();
+  check(listed.length >= 3, `o projeto tem runs de estados diferentes gravados (${listed.length})`);
+  for (const item of listed) {
+    const offered = isResumableRun(item);
+    const accepted = RESUMABLE_RUN_STATES.includes(item.status)
+      || (['running', 'planned'].includes(item.status) && item.active !== true);
+    check(!offered || accepted,
+      `o run ${item.status}${item.stale ? ' (interrompido)' : ''} só oferece "Retomar" se o serviço aceita (${offered ? 'oferece' : 'não oferece'})`);
+    check(item.status !== 'succeeded' || !offered, 'run concluído não oferece retomada');
+    check(item.status !== 'blocked' || !offered,
+      'run bloqueado por revisão não oferece "Retomar": o que ele espera é a aprovação no painel do run');
+  }
+  check(listed.some((item) => item.status === 'failed' && isResumableRun(item)),
+    'o run que falhou aparece na lista com saída de retomada');
+  check(listed.some((item) => item.status === 'cancelled' && isResumableRun(item)),
+    'o run cancelado aparece na lista com saída de retomada');
+  check(listed.some((item) => item.status === 'succeeded' && !isResumableRun(item)),
+    'e o run concluído aparece sem ela');
 
   // ------------------------------------------------ honestidade do roteiro
   // Tirar a evidência tem que tirar o "concluído": o estado nunca é decorativo.

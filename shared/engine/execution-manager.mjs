@@ -41,7 +41,9 @@ export const BLOCKING_CODES = Object.freeze([
   'ADAPTER_SEND_UNAUTHORIZED',
 ]);
 
-export const RUN_STATES = Object.freeze(['planned', 'running', 'succeeded', 'failed', 'cancelled', 'blocked', 'paused']);
+// Os estados moram em `./run-states.mjs` para que serviço, engine e interface
+// usem a mesma lista (reexportado aqui para não quebrar quem já importa daqui).
+export { RUN_STATES, RESUMABLE_RUN_STATES, TERMINAL_RUN_STATES, isResumableRunState } from './run-states.mjs';
 
 const MAX_LOG_ENTRIES = 1200;
 const DEFAULT_STEP_TIMEOUT_MS = 30 * 60 * 1000;

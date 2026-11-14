@@ -19,6 +19,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createStudioService } from '../shared/services/studio-service.mjs';
 import { buildGlbFixture } from './glb-fixtures.mjs';
 import { codecShimSource, rendererStub, slowToolStub, failingToolStub } from './tool-stubs.mjs';
+import { isResumableRun } from '../shared/ui/journey.mjs';
+import { RESUMABLE_RUN_STATES } from '../shared/engine/run-states.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const findings = [];
@@ -195,6 +197,9 @@ try {
   const orphanListed = (await service.listRuns()).find((item) => item.runId === 'run-orfao-de-teste');
   check(orphanListed?.stale === true, 'run gravado como em andamento sem execução aqui é marcado como interrompido');
   check(orphanListed?.active === false, 'e não aparece como ativo neste processo');
+  check(orphanListed?.planStored === false, 'a lista diz que o plano original não está gravado');
+  check(isResumableRun(orphanListed) === false,
+    'sem plano gravado a interface não oferece "Retomar" — o botão só existe onde o serviço consegue retomar');
 
   const orphan = await service.cancelRun({ runId: 'run-orfao-de-teste', reason: 'o aplicativo foi fechado durante a execução' });
   check(orphan.ok === true && orphan.stale === true, 'run marcado como em andamento sem execução aqui é corrigido com a marca de execução ausente');
@@ -210,6 +215,57 @@ try {
   check(orphanAfter?.stale === false && orphanAfter?.status === 'cancelled',
     'depois de corrigido, o run deixa de aparecer como interrompido e consta cancelado');
 
+  // ------- 4.2 interrompido com plano e checkpoints no disco: retomar funciona
+  // O caso que a interface oferece como "Retomar": o aplicativo foi fechado no
+  // meio, o run consta `running`, não há execução neste processo, e o plano
+  // original mais os passos concluídos continuam gravados.
+  const interruptedId = 'run-interrompido-com-plano';
+  const interruptedDirectory = path.join(projectRoot, '.lia-forge', 'runs', interruptedId);
+  await fs.mkdir(interruptedDirectory, { recursive: true });
+  await fs.copyFile(path.join(projectRoot, '.lia-forge', 'runs', runId, 'plan.json'), path.join(interruptedDirectory, 'plan.json'));
+  const sourceSnapshot = JSON.parse(await fs.readFile(path.join(projectRoot, '.lia-forge', 'runs', runId, 'run.json'), 'utf8'));
+  let runningMarked = false;
+  const interruptedSteps = (sourceSnapshot.steps ?? []).map((step) => {
+    if (step.state === 'succeeded') return step;
+    if (!runningMarked) { runningMarked = true; return { ...step, state: 'running', error: null, finishedAt: null }; }
+    return { ...step, state: 'pending', error: null, finishedAt: null };
+  });
+  await fs.writeFile(path.join(interruptedDirectory, 'run.json'), `${JSON.stringify({
+    ...sourceSnapshot,
+    runId: interruptedId,
+    status: 'running',
+    finishedAt: null,
+    steps: interruptedSteps,
+    summary: { ...sourceSnapshot.summary, finished: false },
+  }, null, 2)}\n`, 'utf8');
+
+  const interruptedListed = (await service.listRuns()).find((item) => item.runId === interruptedId);
+  check(interruptedListed?.stale === true && interruptedListed?.active === false,
+    'o run gravado como em andamento sem execução aqui aparece como interrompido');
+  check(interruptedListed?.planStored === true, 'a lista confirma que o plano original continua gravado');
+  check(isResumableRun(interruptedListed) === true, 'a lista oferece "Retomar" para ele (mesma regra da interface)');
+
+  await useTool(renderingTool);
+  const resumedInterrupted = await service.resumeRun({ runId: interruptedId, reason: 'usuário reabriu o aplicativo' });
+  check(resumedInterrupted.ok === true, 'retomar o run interrompido é aceito — não devolve "não precisa de retomada"');
+  check(resumedInterrupted.interrupted === true && resumedInterrupted.resumedFrom === 'running',
+    'a resposta diz que a retomada vem de uma execução interrompida');
+  check(resumedInterrupted.checkpointsReused >= 1,
+    `os passos concluídos antes da interrupção são reaproveitados (${resumedInterrupted.checkpointsReused})`);
+  check(['blocked', 'succeeded'].includes(resumedInterrupted.result.status),
+    `a retomada do interrompido segue até o próximo ponto real (${resumedInterrupted.result.status})`);
+  check((await service.listRuns()).find((item) => item.runId === interruptedId)?.stale === false,
+    'depois de retomado o run deixa de constar como interrompido');
+
+  // Coerência geral: nenhum run da lista oferece uma ação que o serviço recusaria.
+  for (const item of await service.listRuns()) {
+    const offered = isResumableRun(item);
+    const accepted = RESUMABLE_RUN_STATES.includes(item.status)
+      || (['running', 'planned'].includes(item.status) && item.active !== true);
+    check(!offered || accepted,
+      `"Retomar" só é oferecido onde o serviço aceita (run ${item.status}${item.stale ? ' interrompido' : ''}: ${offered ? 'oferece' : 'não oferece'})`);
+  }
+
   // ------------------------------------------------------- 5. recusas e limites
   await assert.rejects(() => service.cancelRun({ runId: '../../etc/passwd' }), /runId inválido/, 'cancelRun recusa caminho como runId');
   await assert.rejects(() => service.resumeRun({ runId: '../fora' }), /runId inválido/, 'resumeRun recusa caminho como runId');
@@ -220,11 +276,13 @@ try {
   check(finished.snapshot.status === 'succeeded', `run interno de controle conclui (${finished.snapshot.status})`);
   const noop = await service.cancelRun({ runId: finished.runId });
   check(noop.ok === false && noop.status === 'succeeded', 'cancelar um run concluído não altera nada e devolve o estado real');
+  check(isResumableRun((await service.listRuns()).find((item) => item.runId === finished.runId)) === false,
+    'run concluído não oferece "Retomar" na lista');
   const noopResume = await service.resumeRun({ runId: finished.runId });
   check(noopResume.ok === false && /não precisa de retomada/.test(noopResume.reason), 'retomar um run concluído é recusado sem mexer no disco');
   check(service.activeRuns().length === 0, 'nenhuma execução fica registrada como ativa depois de encerrada');
 
-  console.log(`Run lifecycle smoke test passed (cancelamento cooperativo com processo externo encerrado, falha intermediária, retomada por checkpoint, run órfão corrigido sem fingir execução, recusas nomeadas).`);
+  console.log(`Run lifecycle smoke test passed (cancelamento cooperativo com processo externo encerrado, falha intermediária, retomada por checkpoint — inclusive de run interrompido —, run órfão corrigido sem fingir execução, recusas nomeadas).`);
   for (const finding of findings) console.log(`  · ${finding}`);
   console.log('  · Substitutos de teste (não são Blender): executáveis criados por este smoke em pasta temporária; a execução na ferramenta real continua pendente de instalação pelo usuário.');
 } finally {
