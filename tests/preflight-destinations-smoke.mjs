@@ -107,6 +107,32 @@ const blocked = checkDestinationCompatibility({ destinationId: 'video-timeline',
 assert.equal(blocked.compatible, false);
 assert.ok(blocked.blockers.length > 0);
 
+// Metadado é reconhecido pelo **formato**, não pelo passo que o produziu: quem
+// empacota informa o step id como `role` (`render`, `rig`, `deliver`…), e exigir
+// um papel específico fazia o mesmo pacote ser compatível num caminho e bloqueado
+// noutro — e o exportador acabava descartando o manifesto da folha.
+const comMetadado = checkDestinationCompatibility({
+  destinationId: 'godot-4',
+  artifacts: [
+    { id: 'render:spritesheet.png', format: 'png', role: 'render' },
+    { id: 'render:spritesheet-manifest.json', format: 'json', role: 'render' },
+    { id: 'rig:rig.json', format: 'json', role: 'rig' },
+  ],
+});
+assert.equal(comMetadado.compatible, true, 'pacote com asset + metadados é compatível');
+assert.deepEqual(comMetadado.summary, { assets: 1, metadata: 2, conversions: 0, blockers: 0 }, 'a composição é contada separadamente');
+assert.equal(comMetadado.metadata.every((item) => item.role === 'metadata'), true, 'metadados vêm marcados como tal');
+assert.deepEqual(comMetadado.metadata.map((item) => item.sourceRole), ['render', 'rig'], 'e continuam dizendo de que passo vieram');
+assert.deepEqual(comMetadado.assets.map((item) => item.id), ['render:spritesheet.png'], 'asset importável é listado à parte');
+
+const assetRecusado = checkDestinationCompatibility({
+  destinationId: 'godot-4',
+  artifacts: [{ id: 'decompose:sprite.psd', format: 'psd', role: 'decompose' }, { id: 'render:spritesheet.png', format: 'png', role: 'render' }],
+});
+assert.equal(assetRecusado.compatible, false, 'asset em formato que o destino não importa continua bloqueando');
+assert.equal(assetRecusado.summary.blockers, 1);
+assert.match(assetRecusado.blockers[0], /psd/, 'o bloqueio nomeia o formato');
+
 const bundle = buildExportBundle({
   destinationId: 'godot-4',
   artifacts: [{ id: 'atlas', format: 'png', role: 'spritesheet', relativePath: 'atlas.png', bytes: atlasPng }],

@@ -744,11 +744,16 @@ export function createExportPackageAdapter({ hash }) {
       }
       if (!destinationId) throw adapterError('ADAPTER_MISCONFIGURED', 'export-package precisa do destino.', { adapterId: 'export-package' });
       let compatibility = checkDestinationCompatibility({ destinationId, artifacts });
-      // Coleta automática: se o destino não aceitar algum formato intermediário
-      // (ex.: JSON de camadas no Godot), exporta só os artefatos aceitos.
+      // Rede de segurança: se o destino não aceitar algum **asset** (ex.: um .psd
+      // intermediário), exporta só o que ele aceita. Metadado não entra aqui — é
+      // aceito por formato em qualquer destino. Quando algo fica de fora, o pacote
+      // diz o quê e por quê: descartar em silêncio entregaria menos do que o run
+      // produziu sem avisar.
+      let dropped = [];
       if (!compatibility.compatible && !(context.artifacts ?? []).length) {
         const accepted = artifacts.filter((artifact) => checkDestinationCompatibility({ destinationId, artifacts: [artifact] }).compatible);
         if (accepted.length) {
+          dropped = artifacts.filter((artifact) => !accepted.includes(artifact));
           artifacts = accepted;
           compatibility = checkDestinationCompatibility({ destinationId, artifacts });
         }
@@ -764,9 +769,18 @@ export function createExportPackageAdapter({ hash }) {
       }
       return {
         outputs,
-        metrics: { destination: bundle.destination, files: bundle.files.length, fps: bundle.profile.fps, pivot: bundle.profile.pivot, verifiedOnDestination: bundle.verifiedOnDestination },
+        metrics: {
+          destination: bundle.destination,
+          files: bundle.files.length,
+          assetFiles: compatibility.summary?.assets ?? null,
+          metadataFiles: compatibility.summary?.metadata ?? null,
+          fps: bundle.profile.fps,
+          pivot: bundle.profile.pivot,
+          verifiedOnDestination: bundle.verifiedOnDestination,
+          droppedArtifacts: dropped.map((artifact) => artifact.id),
+        },
         execution: { kind: 'process', provider: 'lia-forge-internal', task: 'export-package', destination: bundle.destination },
-        note: `${bundle.files.length} arquivo(s) empacotado(s) para ${bundle.label} com SHA-256 e notas de importação. Import no destino ainda não foi verificado.`,
+        note: `${bundle.files.length} arquivo(s) empacotado(s) para ${bundle.label} (${compatibility.summary?.assets ?? bundle.files.length} asset(s) + ${compatibility.summary?.metadata ?? 0} metadado(s)) com SHA-256 e notas de importação.${dropped.length ? ` ${dropped.length} artefato(s) ficaram de fora por não serem aceitos pelo destino: ${dropped.map((artifact) => artifact.id).join(', ')}.` : ''} Import no destino ainda não foi verificado.`,
       };
     },
   });

@@ -125,6 +125,13 @@ export const DESTINATIONS = Object.freeze([
 ]);
 
 export const METADATA_FORMATS = Object.freeze(['json', 'txt', 'md', 'csv', 'yaml']);
+/**
+ * Papéis que já foram usados para reconhecer sidecar. Mantido publicado porque
+ * faz parte do contrato do módulo, mas **não decide mais** a classificação: quem
+ * produz o pacote informa o passo de origem como `role` (`render`, `rig`,
+ * `deliver`…), e exigir um papel específico fazia o mesmo pacote ser "compatível"
+ * num caminho e "bloqueado" noutro. O que define metadado é o formato do arquivo.
+ */
 export const METADATA_ROLES = Object.freeze(['manifest', 'metadata', 'sidecar', 'report']);
 
 export function listDestinations() {
@@ -161,10 +168,13 @@ export function checkDestinationCompatibility({ destinationId, artifacts = [] })
       accepted.push({ id: artifact.id ?? format, format });
       continue;
     }
-    // Sidecar de metadados (manifesto, notas de importação) acompanha qualquer
-    // destino: não é asset, é dado sobre o asset.
-    if (METADATA_FORMATS.includes(format) && (!artifact.role || METADATA_ROLES.includes(artifact.role))) {
-      accepted.push({ id: artifact.id ?? format, format, role: 'metadata' });
+    // Sidecar de metadados (manifesto da folha, rig, camadas, animações, notas de
+    // importação) acompanha qualquer destino: não é asset que a engine importa, é
+    // dado sobre o asset — e sem ele o pacote perde justamente a informação de
+    // grade, pivô e fps. A classificação é pelo **formato**, nunca pelo passo que
+    // produziu o arquivo.
+    if (METADATA_FORMATS.includes(format)) {
+      accepted.push({ id: artifact.id ?? format, format, role: 'metadata', sourceRole: artifact.role ?? null });
       continue;
     }
     if (format === 'glb' && profile.modelFormats.includes('fbx')) {
@@ -174,13 +184,25 @@ export function checkDestinationCompatibility({ destinationId, artifacts = [] })
     blockers.push(`${artifact.id ?? format}: formato "${format}" não é aceito por ${profile.label} (${[...profile.spriteFormats, ...profile.modelFormats].join(', ') || 'nenhum'})`);
   }
 
+  const metadata = accepted.filter((item) => item.role === 'metadata');
+  const assetFiles = accepted.filter((item) => item.role !== 'metadata');
   return Object.freeze({
     destinationId: profile.id,
     label: profile.label,
     compatible: blockers.length === 0 && conversions.length === 0,
     accepted: Object.freeze(accepted),
+    // Separados para a interface dizer o que é asset importável e o que é dado
+    // sobre o asset: "7 arquivos aceitos" esconde que só 2 entram na engine.
+    assets: Object.freeze(assetFiles),
+    metadata: Object.freeze(metadata),
     conversionsNeeded: Object.freeze(conversions),
     blockers: Object.freeze(blockers),
+    summary: Object.freeze({
+      assets: assetFiles.length,
+      metadata: metadata.length,
+      conversions: conversions.length,
+      blockers: blockers.length,
+    }),
     verified: profile.verified,
     fps: profile.fps,
     pivot: profile.pivot,

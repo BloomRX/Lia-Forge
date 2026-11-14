@@ -451,6 +451,10 @@
 .forge-vfx-figure{margin:0;display:flex;flex-direction:column;gap:4px}
 .forge-vfx-figure img{width:100%;max-width:260px;border:1px solid #46304b;border-radius:6px;background:#120d13;image-rendering:pixelated}
 .forge-vfx-figure figcaption{color:#8d7c8f;font:8px var(--mono);line-height:1.5}
+/* Compatibilidade do pacote com o perfil publicado do destino: medida, não prometida */
+.forge-export-compat{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+.forge-export-compat .forge-list.is-blockers{margin:0;padding-left:14px;color:#f0b7a6;font-size:9px}
+.forge-export-compat .forge-note{margin:0}
 /* Decisões humanas do roteiro: título + motivo visíveis sem abrir a lista */
 .forge-journey-human-head{display:flex;align-items:flex-start;gap:5px}
 .forge-journey-human{margin:5px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:4px}

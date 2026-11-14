@@ -83,6 +83,14 @@ export function buildJourneySteps({
     ? (assets ?? []).some((asset) => runIdsOf(asset).includes(run.runId))
     : storedAsset;
   const verifiedOnDestination = exportResult?.bundle?.verifiedOnDestination === true;
+  // Compatibilidade medida contra o perfil publicado do destino: se o destino não
+  // aceita o pacote como está, exportar aconteceu mas não resolveu — escolher
+  // outro destino ou converter é decisão humana.
+  const compatibility = exportResult?.bundle?.compatibility ?? null;
+  const exportProblems = [
+    ...(compatibility?.blockers ?? []),
+    ...(compatibility?.conversionsNeeded ?? []).map((item) => `converter ${item.from}→${item.to} (${item.reason})`),
+  ];
   // O item da lista de runs traz o que só o serviço sabe (está ativo aqui? o plano
   // original continua gravado?). Sem ele, o roteiro deriva o mínimo do snapshot.
   const resumable = isResumableRun(runListed ?? (run
@@ -187,9 +195,14 @@ export function buildJourneySteps({
     {
       id: 'export',
       title: `Exportar para ${destination ?? 'o destino'}`,
-      state: exportResult ? 'done' : run?.status === 'succeeded' ? 'now' : 'todo',
+      state: exportResult ? (exportProblems.length ? 'human' : 'done') : run?.status === 'succeeded' ? 'now' : 'todo',
       detail: exportResult
-        ? `${exportResult.bundle?.files?.length ?? 0} arquivo(s) no pacote; verificado no destino: ${verifiedOnDestination ? 'sim' : 'não'}.`
+        ? `${exportResult.bundle?.files?.length ?? 0} arquivo(s) no pacote`
+          + `${compatibility?.summary ? ` (${compatibility.summary.assets} asset(s) importáveis + ${compatibility.summary.metadata} de metadados)` : ''}`
+          + `; verificado no destino: ${verifiedOnDestination ? 'sim' : 'não'}.`
+          + (exportProblems.length
+            ? ` ${compatibility?.label ?? 'O destino'} não aceita o pacote como está: ${exportProblems.slice(0, 3).join('; ')}. Escolher outro destino ou converter é decisão sua.`
+            : '')
         : 'A exportação libera quando o run conclui; o pacote confere com o perfil publicado do destino.',
     },
     {

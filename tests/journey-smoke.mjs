@@ -248,6 +248,11 @@ try {
   // ------------------------------------------------ 11. exportar
   const exported = await service.exportRun({ runId, destination: DESTINATION });
   check(exported.bundle.verifiedOnDestination === false, 'a exportação não afirma import verificado no destino');
+  check(exported.bundle.compatibility?.compatible === true,
+    `o pacote é compatível com o perfil publicado do destino (${JSON.stringify(exported.bundle.compatibility?.summary)})`);
+  check((exported.bundle.compatibility?.summary?.metadata ?? 0) >= 1,
+    'os metadados (manifesto da folha, rig, animações) vão no pacote: sem eles o destino não sabe grade, pivô nem fps');
+  check((exported.bundle.compatibility?.summary?.assets ?? 0) >= 1, 'e o pacote separa o que é asset importável do que é metadado');
   const exportedJourney = journeyAt('pacote exportado', {
     project,
     inputs: inputs.entries,
@@ -264,6 +269,44 @@ try {
   const exportStep = exportedJourney.steps.find((step) => step.id === 'export');
   check(exportStep.state === 'done', 'pacote exportado conclui o passo 11');
   check(exportStep.detail.includes('verificado no destino: não'), 'e diz na tela que não foi verificado no destino');
+  check(/asset\(s\) importáveis/.test(exportStep.detail), `o passo diz a composição do pacote (${exportStep.detail.slice(0, 120)})`);
+
+  // Pacote que o destino não aceita: exportar aconteceu, mas não resolveu — a
+  // decisão (outro destino ou converter) é humana e o roteiro não pode dizer que
+  // está tudo concluído.
+  const rejectedExport = {
+    ...exported,
+    bundle: {
+      ...exported.bundle,
+      compatibility: {
+        ...exported.bundle.compatibility,
+        compatible: false,
+        blockers: ['render:sprite.psd: formato "psd" não é aceito por Godot 4.x (png, glb)'],
+        summary: { ...exported.bundle.compatibility.summary, blockers: 1 },
+      },
+    },
+  };
+  const rejectedSteps = buildJourneySteps({
+    project,
+    inputs: inputs.entries,
+    requiresInput: true,
+    workflowId: WORKFLOW,
+    brief,
+    destination: DESTINATION,
+    plan: planned.plan,
+    preflight: overview.preflight,
+    run: snapshot,
+    comparison,
+    exportResult: rejectedExport,
+  });
+  const rejectedStep = rejectedSteps.find((step) => step.id === 'export');
+  check(rejectedStep.state === 'human', 'pacote que o destino recusa não consta como passo concluído');
+  check(/não aceita o pacote como está/.test(rejectedStep.detail), 'e o passo diz que o destino não aceita o pacote');
+  check(/sprite\.psd/.test(rejectedStep.detail), 'o arquivo recusado é nomeado no passo');
+  check(journeyProgress(rejectedSteps).done === exportedJourney.progress.done - 1,
+    'a contagem cai exatamente um quando o pacote é recusado');
+  check(journeyProgress(rejectedSteps).humanDecisions.some((item) => item.id === 'export'),
+    'e a recusa entra como decisão humana no resumo');
   check(exportedJourney.progress.next?.id === 'keep', 'falta só guardar no projeto');
 
   // ------------------------------------------------ 12. guardar no projeto

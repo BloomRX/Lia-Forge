@@ -155,6 +155,12 @@ try {
   assert.equal(exported.bundle.destination, 'godot-4', 'exportação pela API');
   assert.ok(exported.bundle.files.every((file) => file.sha256?.length === 64), 'SHA-256 por arquivo');
   assert.equal(exported.bundle.verifiedOnDestination, false, 'não afirma import verificado no destino');
+  assert.equal(exported.bundle.compatibility.compatible, true,
+    `o pacote é compatível com o perfil publicado do destino (${JSON.stringify(exported.bundle.compatibility.summary)})`);
+  assert.ok(exported.bundle.compatibility.summary.assets >= 1, 'a compatibilidade separa o que é asset importável');
+  assert.ok(exported.bundle.compatibility.summary.metadata >= 1,
+    'e o que é metadado — antes os JSON do pacote apareciam como bloqueio e o exportador os descartava');
+  assert.equal(exported.bundle.compatibility.blockers.length, 0, 'nenhum bloqueio de compatibilidade no pacote real');
 
   const runs = await liaForgeApi.runs();
   assert.ok(runs.some((item) => item.runId === runId), 'run aparece na listagem');
@@ -586,6 +592,39 @@ try {
     assets: freshOverview.assets,
   }));
   assert.ok(summarizedMarkup.includes('12 de 12 passos'), 'o roteiro renderiza inteiro com os dados que a página passa');
+
+  // Pacote que o destino não aceita (entrada construída para a derivação: o
+  // pacote real acima é compatível). Exportar aconteceu, mas não resolveu.
+  const rejectedJourneyMarkup = renderToStaticMarkup(createElement(JourneyChecklist, {
+    project,
+    inputs: listedInputs.entries,
+    requiresInput: true,
+    workflowId: '2d-character-parts',
+    brief: 'herói neon',
+    destination: 'godot-4',
+    plan: characterRun.plan,
+    preflight: overview.preflight,
+    run: snapshot,
+    comparison,
+    exportResult: {
+      ...exported,
+      bundle: {
+        ...exported.bundle,
+        compatibility: {
+          ...exported.bundle.compatibility,
+          compatible: false,
+          blockers: ['decompose:sprite.psd: formato "psd" não é aceito por Godot 4.x (png, glb)'],
+          summary: { ...exported.bundle.compatibility.summary, blockers: 1 },
+        },
+      },
+    },
+    assets: freshOverview.assets,
+  }));
+  assert.ok(rejectedJourneyMarkup.includes('não aceita o pacote como está'), 'o roteiro diz que o destino não aceita o pacote');
+  assert.ok(rejectedJourneyMarkup.includes('sprite.psd'), 'e nomeia o arquivo recusado');
+  assert.ok(rejectedJourneyMarkup.includes('o restante espera uma decisão sua'), 'com o pacote recusado, não diz que está tudo concluído');
+  assert.ok(!rejectedJourneyMarkup.includes('Todos os passos que dependem só do produto estão concluídos'),
+    'a frase de jornada concluída não aparece enquanto o destino recusar o pacote');
 
   const journeyMarkup = renderToStaticMarkup(createElement(JourneyChecklist, {
     project,

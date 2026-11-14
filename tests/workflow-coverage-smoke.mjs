@@ -265,6 +265,16 @@ try {
   check(exported.bundle.files.every((file) => file.sha256?.length === 64), 'cada arquivo exportado carrega SHA-256');
   check(exported.bundle.verifiedOnDestination === false, 'nada afirma validação no destino sem execução na engine de jogo');
   check(typeof exported.compatibility?.compatible === 'boolean', 'a compatibilidade declarada é conferida contra o perfil do destino');
+  check(exported.bundle.compatibility?.compatible === true,
+    `o pacote do run é compatível com o destino (${JSON.stringify(exported.bundle.compatibility?.summary)})`);
+  check((exported.bundle.compatibility?.summary?.metadata ?? 0) >= 1,
+    'o manifesto/rig/animações vão no pacote em vez de serem descartados como "formato não aceito"');
+  const deliverStep = (characterDone.steps ?? []).find((step) => step.id === 'deliver') ?? null;
+  const deliverMetrics = deliverStep?.metrics ?? null;
+  check(deliverMetrics !== null, 'o passo de entrega do run existe');
+  check((deliverMetrics?.metadataFiles ?? 0) >= 1, `o pacote gravado pelo run leva metadados (${deliverMetrics?.metadataFiles})`);
+  check((deliverMetrics?.droppedArtifacts ?? []).length === 0, 'nenhum artefato foi descartado do pacote sem aviso');
+  check(/asset\(s\)/.test(String(deliverStep?.note ?? '')), 'a nota do passo diz a composição do pacote (assets + metadados)');
 
   // ------------------------------------------------------- 5. resumo impresso
   const executados = matrix.filter((row) => row.status === 'succeeded').length;

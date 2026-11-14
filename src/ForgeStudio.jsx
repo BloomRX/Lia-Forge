@@ -2027,7 +2027,40 @@ export default function ForgeStudio({ onNotify = () => {} }) {
                     <KeyValue label="FPS do destino" value={exportResult.bundle.profile.fps} />
                     <KeyValue label="Pivot" value={exportResult.bundle.profile.pivot} />
                     <KeyValue label="Manifesto" value={exportResult.path} mono />
+                    {exportResult.bundle.compatibility?.summary ? (
+                      <KeyValue
+                        label="Composição"
+                        value={`${exportResult.bundle.compatibility.summary.assets} asset(s) importáveis + ${exportResult.bundle.compatibility.summary.metadata} metadado(s)`}
+                      />
+                    ) : null}
+                    {exportResult.bundle.evidence ? <KeyValue label="Evidência do destino" value={exportResult.bundle.evidence} /> : null}
                   </div>
+                  {exportResult.bundle.compatibility ? (
+                    <div className="forge-export-compat">
+                      <span className={`forge-badge ${exportResult.bundle.compatibility.compatible ? 'is-ready' : 'is-blocked'}`}>
+                        {exportResult.bundle.compatibility.compatible
+                          ? 'compatível com o perfil publicado do destino'
+                          : 'o destino não aceita o pacote como está'}
+                      </span>
+                      {exportResult.bundle.compatibility.blockers?.length ? (
+                        <ul className="forge-list is-blockers">
+                          {exportResult.bundle.compatibility.blockers.map((item) => <li key={item}>{item}</li>)}
+                        </ul>
+                      ) : null}
+                      {exportResult.bundle.compatibility.conversionsNeeded?.length ? (
+                        <ul className="forge-list is-blockers">
+                          {exportResult.bundle.compatibility.conversionsNeeded.map((item) => (
+                            <li key={`${item.id}-${item.to}`}>converter <code>{item.from}</code> → <code>{item.to}</code>: {item.reason}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      <p className="forge-note">
+                        {exportResult.bundle.compatibility.compatible
+                          ? 'Os metadados (manifesto da folha, rig, animações) acompanham o pacote: a engine não os importa, mas sem eles o destino não sabe a grade, o pivô nem o fps.'
+                          : 'Nada é descartado em silêncio: o que o destino não aceita está listado acima e continua no pacote.'}
+                      </p>
+                    </div>
+                  ) : null}
                   <ul className="forge-list">
                     {exportResult.bundle.files.map((file) => (
                       <li key={file.path ?? file.relativePath}>
