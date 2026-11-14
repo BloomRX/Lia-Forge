@@ -30,6 +30,8 @@ import { createStudioService } from '../shared/services/studio-service.mjs';
 import { ensureProjectStructure } from '../shared/integrations/project-structure.mjs';
 import { buildJourneySteps, journeyProgress } from '../shared/ui/journey.mjs';
 import { encodePngRgba, analyzePngContent } from '../shared/qa/png-codec.mjs';
+import { buildGlbFixture } from './glb-fixtures.mjs';
+import { failingToolStub, slowToolStub } from './tool-stubs.mjs';
 
 const DESTINATION = 'godot-4';
 const WORKFLOW = '2d-character-parts';
@@ -37,6 +39,18 @@ const ORDER = [
   'project', 'references', 'objective', 'brief', 'requirements', 'plan',
   'execute', 'follow', 'review', 'compare', 'export', 'keep',
 ];
+
+const sleep = (milliseconds) => new Promise((resolve) => { setTimeout(resolve, milliseconds); });
+
+async function waitFor(probe, { label, timeoutMs = 25000, intervalMs = 60 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await probe();
+    if (value) return value;
+    await sleep(intervalMs);
+  }
+  throw new Error(`tempo esgotado esperando ${label}`);
+}
 
 const checks = [];
 function check(condition, message) {
@@ -63,6 +77,7 @@ function spriteBytes() {
 }
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'lia-journey-'));
+const toolDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'lia-journey-tools-'));
 const service = createStudioService({ projectRoot: root });
 const trail = [];
 const detours = [];
@@ -308,6 +323,79 @@ try {
   const finishedIgnored = buildJourneySteps({ ...base, run: snapshot, comparison, exportResult: exported, runStale: true });
   check(finishedIgnored.find((step) => step.id === 'follow').state === 'done', 'run encerrado não vira interrompido só porque o sinal chegou');
 
+  // --------------------- 12.2 run falho e run cancelado entram no roteiro
+  // Substitutos de teste (não são Blender) para produzir estados reais de falha e
+  // de cancelamento sobre o mesmo projeto.
+  const writeTool = async (name, source) => {
+    const target = path.join(toolDirectory, name);
+    await fs.writeFile(target, source, 'utf8');
+    await fs.chmod(target, 0o755);
+    return target;
+  };
+  const failingTool = await writeTool('blender-falha.mjs', failingToolStub());
+  const slowTool = await writeTool('blender-lento.mjs', slowToolStub(path.join(toolDirectory, 'lento.pid')));
+  const model = await service.saveInput({ filename: 'modelo.glb', bytes: buildGlbFixture() });
+  check(model.path === 'input/modelo.glb', `o modelo 3D entrou como ${model.path}`);
+
+  await service.configureProvider({ id: 'blender', mode: 'path', executable: failingTool, frameSize: '48x48' });
+  const failedResult = await service.run({
+    workflowId: '3d-object-render',
+    destination: DESTINATION,
+    brief,
+    params: { model: model.path },
+  });
+  check(failedResult.snapshot.status === 'failed', `a ferramenta que falha termina o run como failed (${failedResult.snapshot.status})`);
+  const failedJourney = journeyAt('run falho', {
+    project,
+    inputs: (await service.listInputs()).entries,
+    requiresInput: true,
+    workflowId: '3d-object-render',
+    brief,
+    destination: DESTINATION,
+    plan: failedResult.plan ?? null,
+    preflight: overview.preflight,
+    run: failedResult.snapshot,
+    assets: (await service.listAssets()).assets ?? [],
+  }, { detour: true });
+  const failedReview = failedJourney.steps.find((step) => step.id === 'review');
+  check(failedReview.state === 'human', 'run falho não consta como revisado: o que resta é decisão do usuário');
+  check(/terminou com falha em "render"/.test(failedReview.detail), `o passo nomeia onde falhou (${failedReview.detail.slice(0, 90)})`);
+  check(/nada aqui foi entregue como pronto/.test(failedReview.detail), 'e diz que nada foi entregue como pronto');
+  check(failedJourney.steps.find((step) => step.id === 'export').state === 'todo', 'run falho não libera exportação');
+  check(failedJourney.steps.find((step) => step.id === 'keep').state === 'todo',
+    'asset guardado de outro run não conclui o passo de guardar deste run');
+  check(failedJourney.progress.humanDecisions.some((item) => item.id === 'review'), 'a falha aparece como decisão pendente no resumo');
+
+  await service.configureProvider({ id: 'blender', mode: 'path', executable: slowTool, frameSize: '48x48' });
+  const cancellingRun = service.run({
+    workflowId: '3d-object-render',
+    destination: DESTINATION,
+    brief,
+    params: { model: model.path },
+  });
+  const activeEntry = await waitFor(async () => (await service.activeRuns())[0] ?? null, { label: 'o run ficar ativo' });
+  await service.cancelRun({ runId: activeEntry.runId, reason: 'usuário desistiu desta geração', cancelledBy: 'smoke-journey' });
+  const cancelledResult = await cancellingRun;
+  check(cancelledResult.snapshot.status === 'cancelled', `o cancelamento termina o run como cancelled (${cancelledResult.snapshot.status})`);
+  const cancelledJourney = journeyAt('run cancelado', {
+    project,
+    inputs: (await service.listInputs()).entries,
+    requiresInput: true,
+    workflowId: '3d-object-render',
+    brief,
+    destination: DESTINATION,
+    plan: cancelledResult.plan ?? null,
+    preflight: overview.preflight,
+    run: cancelledResult.snapshot,
+    assets: (await service.listAssets()).assets ?? [],
+  }, { detour: true });
+  const cancelledReview = cancelledJourney.steps.find((step) => step.id === 'review');
+  check(cancelledReview.state === 'human', 'run cancelado não consta como revisado');
+  check(/Run cancelado: usuário desistiu desta geração/.test(cancelledReview.detail), 'o passo diz o motivo gravado do cancelamento');
+  check(/retomar ou recomeçar é decisão sua/i.test(cancelledReview.detail), 'e aponta as duas saídas como decisão do usuário');
+  check(cancelledJourney.steps.find((step) => step.id === 'follow').state === 'done', 'acompanhar estava concluído: o run foi encerrado de propósito');
+  check(cancelledJourney.steps.find((step) => step.id === 'export').state === 'todo', 'run cancelado não libera exportação');
+
   // ------------------------------------------------ honestidade do roteiro
   // Tirar a evidência tem que tirar o "concluído": o estado nunca é decorativo.
   const state = {
@@ -355,7 +443,7 @@ try {
   check(sequence.every((value, index) => index === 0 || value >= sequence[index - 1]),
     `o progresso só avançou com evidência (${sequence.join(' → ')})`);
   check(sequence.at(-1) === 12, 'a última parada da trilha é a jornada completa');
-  check(detours.length === 2, `os dois cenários alternativos ficam fora da trilha (${detours.length})`);
+  check(detours.length === 4, `os quatro cenários alternativos ficam fora da trilha (${detours.length})`);
   check(detours.every((stop) => stop.humanDecisions.length > 0),
     'cada cenário alternativo (objetivo sem provider aqui, run interrompido) é registrado como decisão humana, não como progresso');
   check(trail.every((stop) => stop.humanDecisions.length === 0),
@@ -375,4 +463,5 @@ try {
   console.log(`Journey smoke test passed (jornada de 12 passos percorrida com o serviço real: ${checks.length} checagens · progresso ${sequence.join(' → ')} · run ${runId} ${snapshot.status} · pacote ${path.basename(exported.path ?? '')}).`);
 } finally {
   await fs.rm(root, { recursive: true, force: true });
+  await fs.rm(toolDirectory, { recursive: true, force: true });
 }

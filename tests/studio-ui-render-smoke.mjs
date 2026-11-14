@@ -606,6 +606,32 @@ try {
   assert.ok(planCandidates.includes('<code>rig2d-software</code>'), 'e o passo continua com o adapter que serve a ele');
   assert.ok(!planCandidates.includes('sem adapter'), 'o passo não aparece como sem adapter só porque outra ferramenta foi descartada');
 
+  // Run falho: o roteiro nomeia a falha como decisão pendente e não diz que a
+  // jornada terminou (a derivação com runs reais está no journey-smoke).
+  const failedJourneyMarkup = renderToStaticMarkup(createElement(JourneyChecklist, {
+    project,
+    inputs: listedInputs.entries,
+    requiresInput: true,
+    workflowId: '3d-object-render',
+    brief: 'item de teste',
+    destination: 'godot-4',
+    plan: null,
+    preflight: overview.preflight,
+    run: {
+      runId: 'run-falho-de-teste',
+      status: 'failed',
+      summary: { finished: true, total: 4, progress: 50 },
+      steps: [{ id: 'render', state: 'failed', error: { code: 'ADAPTER_EXECUTION_FAILED', message: 'a ferramenta saiu com código 2.' } }],
+    },
+    assets: [],
+  }));
+  assert.ok(failedJourneyMarkup.includes('O run terminou com falha em &quot;render&quot;') || failedJourneyMarkup.includes('O run terminou com falha em "render"'),
+    'o roteiro nomeia o passo que falhou');
+  assert.ok(failedJourneyMarkup.includes('ADAPTER_EXECUTION_FAILED'), 'e mostra o código do erro');
+  assert.ok(failedJourneyMarkup.includes('o restante espera uma decisão sua'), 'não diz que a jornada terminou');
+  assert.ok(!failedJourneyMarkup.includes('Todos os passos que dependem só do produto estão concluídos'),
+    'a frase de jornada concluída não aparece com run falho');
+
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 

@@ -44,6 +44,14 @@ export function buildJourneySteps({
   // e o roteiro não pode fingir que a execução continua.
   const stale = Boolean(runStale && run && !finished);
   const storedAsset = (assets ?? []).some((asset) => (asset.versions?.length ?? 0) > 0 || (asset.provenance?.length ?? 0) > 0);
+  const failedStep = run?.status === 'failed' ? (run.steps ?? []).find((step) => step.state === 'failed') ?? null : null;
+  const cancellation = run?.status === 'cancelled' ? run.cancellation ?? null : null;
+  // "Guardar no projeto" vale para o resultado em foco: com um run carregado, só
+  // conta a versão registrada para ELE — asset de outro run não conclui este passo
+  // (senão um run falho apareceria com a jornada quase toda feita).
+  const keptForRun = run?.runId
+    ? (assets ?? []).some((asset) => (asset.versions ?? []).some((version) => version.runId === run.runId))
+    : storedAsset;
   const verifiedOnDestination = exportResult?.bundle?.verifiedOnDestination === true;
 
   const steps = [
@@ -116,12 +124,22 @@ export function buildJourneySteps({
     {
       id: 'review',
       title: 'Revisar os artefatos',
-      state: run?.status === 'blocked' ? 'now' : run && finished ? 'done' : 'todo',
+      // Run falho ou cancelado não tem artefato revisado: o que resta é decisão
+      // do usuário (corrigir e executar de novo, ou retomar do checkpoint).
+      state: run?.status === 'blocked'
+        ? 'now'
+        : run?.status === 'failed' || run?.status === 'cancelled'
+          ? 'human'
+          : run && finished ? 'done' : 'todo',
       detail: run?.status === 'blocked'
         ? 'Um passo parou de propósito esperando o seu olhar; a aprovação fica amarrada ao SHA-256 do arquivo.'
-        : run && finished
-          ? 'Revisões gravadas com o hash dos artefatos.'
-          : 'Revisão humana é gate: nenhum arquivo é entregue como pronto sem ela.',
+        : run?.status === 'failed'
+          ? `O run terminou com falha em "${failedStep?.id ?? 'um passo'}"${failedStep?.error?.code ? ` (${failedStep.error.code})` : ''}: ${String(failedStep?.error?.message ?? 'veja o log do run').slice(0, 200)} Corrija a entrada ou a ferramenta e execute de novo — nada aqui foi entregue como pronto.`
+          : run?.status === 'cancelled'
+            ? `Run cancelado${cancellation?.reason ? `: ${String(cancellation.reason).slice(0, 160)}` : ''}${cancellation?.cancelledBy ? ` (por ${cancellation.cancelledBy})` : ''}. Os passos concluídos continuam em checkpoint; retomar ou recomeçar é decisão sua.`
+            : run && finished
+              ? 'Revisões gravadas com o hash dos artefatos.'
+              : 'Revisão humana é gate: nenhum arquivo é entregue como pronto sem ela.',
     },
     {
       id: 'compare',
@@ -142,11 +160,13 @@ export function buildJourneySteps({
     {
       id: 'keep',
       title: 'Guardar no projeto',
-      state: registeredVersion || storedAsset ? 'done' : exportResult ? 'now' : 'todo',
+      state: registeredVersion || keptForRun ? 'done' : exportResult ? 'now' : 'todo',
       detail: registeredVersion
         ? `Versão ${registeredVersion.version ?? 'nova'} registrada no asset "${registeredVersion.assetId}".`
-        : storedAsset
-          ? 'Há asset com versões ou proveniência no inventário do projeto.'
+        : keptForRun
+          ? (run?.runId
+            ? 'Há versão de asset registrada para este run no inventário do projeto.'
+            : 'Há asset com versões ou proveniência no inventário do projeto.')
           : 'Guardar registra artefatos, origem e direitos — sem isso o resultado se perde entre runs.',
     },
   ];
