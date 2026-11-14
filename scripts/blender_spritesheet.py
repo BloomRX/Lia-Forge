@@ -53,9 +53,46 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def disable_autoexec(bpy) -> None:
+    """Garante que nenhum script embutido execute ao abrir um arquivo.
+
+    Um ``.blend`` de origem desconhecida pode carregar Python embutido; com a
+    preferência "Auto Run Python Scripts" ligada (padrão em instalações normais)
+    esse código roda dentro do processo que o produto iniciou. O processo é
+    aberto com ``--disable-autoexec``, e aqui a preferência é conferida de novo
+    antes de abrir o arquivo: defesa em profundidade para o caso de o script ser
+    invocado por outro caminho (outra linha de comando, outra versão).
+
+    A alteração vale só para este processo. Nada chama ``save_userpref``, então o
+    ``userpref.blend`` da pessoa não é tocado.
+    """
+    preferences = getattr(getattr(bpy, "context", None), "preferences", None)
+    filepaths = getattr(preferences, "filepaths", None)
+    if filepaths is None:
+        raise RuntimeError(
+            "Não consegui ler as preferências do Blender para conferir a execução automática de scripts; "
+            "abrindo um arquivo sem essa conferência o processo poderia executar código embutido nele."
+        )
+    if getattr(filepaths, "use_file_autorun", False):
+        report("Execução automática de scripts Python estava ligada; desativada neste processo antes de abrir o arquivo")
+        try:
+            filepaths.use_file_autorun = False
+        except Exception as error:  # noqa: BLE001 - preferências podem ser somente leitura
+            raise RuntimeError(
+                f"A execução automática de scripts não pôde ser desativada ({error}); "
+                "recusando abrir o arquivo para não executar código embutido de terceiro."
+            ) from error
+    if getattr(filepaths, "use_file_autorun", False):
+        raise RuntimeError(
+            "A execução automática de scripts continua ligada depois da tentativa de desativá-la; "
+            "recusando abrir o arquivo para não executar código embutido de terceiro."
+        )
+
+
 def import_source(bpy, filepath: Path) -> None:
     suffix = filepath.suffix.lower()
     if suffix == ".blend":
+        disable_autoexec(bpy)
         bpy.ops.wm.open_mainfile(filepath=str(filepath))
     elif suffix in {".glb", ".gltf"}:
         bpy.ops.import_scene.gltf(filepath=str(filepath))

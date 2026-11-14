@@ -2,8 +2,10 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { makePng, makeSpritesheetFixture } = require('./png-fixtures.cjs');
 const {
+  BLENDER_SAFETY_FLAGS,
   buildBlenderSpritesheetArgs,
   candidateModelPaths,
+  missingBlenderSafetyFlags,
   findModelInput,
   parseFrameSize,
   runProcess,
@@ -30,6 +32,19 @@ async function main() {
   assert(args.includes('/workspace/hero rig.blend'));
   assert(args.includes(JSON.stringify(['Idle', 'Walk'])));
   assert.equal(args[args.indexOf('--frame-width') + 1], '48');
+
+  // P0-4: abrir um .blend de origem desconhecida sem --disable-autoexec executa o
+  // Python embutido no arquivo, dentro do processo que o produto iniciou.
+  assert.deepEqual(BLENDER_SAFETY_FLAGS, ['--background', '--disable-autoexec']);
+  assert.deepEqual(missingBlenderSafetyFlags(args), [], 'os args produzidos não deixam flag de segurança de fora');
+  assert(args.includes('--disable-autoexec'), '--disable-autoexec vai na linha de comando');
+  assert(args.indexOf('--disable-autoexec') < args.indexOf('--python'),
+    'e vem antes do --python (o Blender lê as próprias flags antes do script)');
+  assert(args.indexOf('--background') < args.indexOf('--python'), '--background também vem antes do script');
+  assert(args.indexOf('--disable-autoexec') < args.indexOf('--'),
+    'as flags ficam antes do "--" (depois dele são argumentos do script, não do Blender)');
+  assert(!args.includes('--factory-startup'),
+    'não usamos --factory-startup: ele descarta as preferências da pessoa e pode sobrescrever o userpref.blend');
 
   const png = makePng(384, 48);
   const metadata = {

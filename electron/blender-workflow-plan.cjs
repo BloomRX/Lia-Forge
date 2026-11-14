@@ -1,3 +1,5 @@
+const { BLENDER_SAFETY_FLAGS, missingBlenderSafetyFlags } = require('./blender-adapter.cjs');
+
 const BLENDER_SPRITESHEET_WORKFLOW_ID = 'render-spritesheet-from-existing-3d';
 
 function createBlenderSpritesheetPlan({
@@ -19,6 +21,17 @@ function createBlenderSpritesheetPlan({
     || !Array.isArray(blenderArgs) || blenderArgs.some((arg) => typeof arg !== 'string')
     || typeof outputDirectory !== 'string' || !outputDirectory.trim()) {
     throw new Error('Não é possível criar o plano Blender: faltam dados válidos da execução.');
+  }
+  // Fail-closed nas flags de segurança (P0-4): o plano é o que o Workflow Runner
+  // executa, então um plano com Blender sem `--disable-autoexec` é código de
+  // terceiro podendo rodar ao abrir um `.blend`. Antes qualquer `blenderArgs`
+  // era aceito, inclusive vazio.
+  const missingFlags = missingBlenderSafetyFlags(blenderArgs);
+  if (missingFlags.length > 0) {
+    throw new Error(`Não é possível criar o plano Blender: faltam as flags de segurança ${missingFlags.join(', ')} (obrigatórias: ${BLENDER_SAFETY_FLAGS.join(', ')}). Nada foi executado.`);
+  }
+  if (!blenderArgs.includes('--python')) {
+    throw new Error('Não é possível criar o plano Blender: sem --python não há script do repositório para executar. Nada foi executado.');
   }
   return {
     id: runId,

@@ -60,13 +60,43 @@ function findModelInput(asset) {
   return candidateModelPaths(asset)[0] || null;
 }
 
+/**
+ * Flags de segurança obrigatórias em toda invocação de Blender feita pelo produto.
+ *
+ * `--disable-autoexec` desliga a execução automática de scripts Python. Sem ela,
+ * abrir um `.blend` de origem desconhecida executa o que estiver embutido no
+ * arquivo (a preferência "Auto Run Python Scripts" vem ligada em instalações
+ * normais): é execução de código de terceiro dentro do processo que o produto
+ * iniciou, com o filesystem do usuário ao alcance. Medido antes desta correção:
+ * `buildBlenderSpritesheetArgs` produzia `['--background','--python',…]` e
+ * `createBlenderSpritesheetPlan` aceitava até `blenderArgs: []`.
+ *
+ * `--background` mantém o processo sem janela e sem interação.
+ *
+ * De propósito **não** usamos `--factory-startup`: ele descarta as preferências
+ * da pessoa (tema, add-ons, atalhos) e, combinado com auto-save, pode
+ * sobrescrever o `userpref.blend` do usuário — efeito colateral irreversível no
+ * ambiente de quem usa a máquina. `--disable-autoexec` fecha o vetor sem mexer
+ * nas preferências.
+ */
+const BLENDER_SAFETY_FLAGS = Object.freeze(['--background', '--disable-autoexec']);
+
+/** Args que faltam para a invocação ser segura (vazio = seguro). */
+function missingBlenderSafetyFlags(args) {
+  const given = new Set((Array.isArray(args) ? args : []).filter((arg) => typeof arg === 'string'));
+  return BLENDER_SAFETY_FLAGS.filter((flag) => !given.has(flag));
+}
+
 function buildBlenderSpritesheetArgs({ scriptPath, inputPath, outputDirectory, asset, frameSize }) {
   if (!scriptPath || !inputPath || !outputDirectory) throw new Error('Blender adapter: faltam caminhos obrigatórios.');
   if (!['character', 'item'].includes(asset?.type)) throw new Error('Blender adapter: tipo de asset não suportado.');
   const animations = Array.isArray(asset.animations) ? asset.animations.filter((name) => typeof name === 'string' && name.trim()) : [];
   const size = frameSize || parseFrameSize(asset.target);
   return [
+    // Ordem importa para o Blender: flags antes do `--python` e dos argumentos do
+    // script (que vêm depois de `--`).
     '--background',
+    '--disable-autoexec',
     '--python', scriptPath,
     '--',
     '--input', inputPath,
@@ -170,6 +200,8 @@ function spawnBlender(executable, args, options = {}) {
 
 module.exports = {
   MODEL_EXTENSIONS,
+  BLENDER_SAFETY_FLAGS,
+  missingBlenderSafetyFlags,
   buildBlenderSpritesheetArgs,
   candidateModelPaths,
   findModelInput,

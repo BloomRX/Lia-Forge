@@ -1,7 +1,9 @@
 import unittest
 from types import SimpleNamespace
 
-from scripts.blender_spritesheet import matching_actions
+from pathlib import Path
+
+from scripts.blender_spritesheet import disable_autoexec, import_source, matching_actions
 
 
 def fake_blender(action_names):
@@ -36,6 +38,95 @@ class BlenderActionResolutionTest(unittest.TestCase):
         bpy = fake_blender(["Idle"])
         with self.assertRaisesRegex(RuntimeError, "use nomes únicos"):
             matching_actions(bpy, ["Idle", "idle"])
+
+
+def fake_bpy_for_file(autorun: bool):
+    """bpy mínimo: preferências com Auto Run e um ops que registra chamadas."""
+    opened = []
+    filepaths = SimpleNamespace(use_file_autorun=autorun)
+    ops = SimpleNamespace(wm=SimpleNamespace(open_mainfile=lambda filepath: opened.append(filepath)))
+    return (
+        SimpleNamespace(
+            context=SimpleNamespace(preferences=SimpleNamespace(filepaths=filepaths)),
+            ops=ops,
+        ),
+        filepaths,
+        opened,
+    )
+
+
+class BlenderAutoexecGuardTest(unittest.TestCase):
+    """Abrir um .blend de origem desconhecida não pode executar código embutido.
+
+    O processo é iniciado com --disable-autoexec (ver
+    tests/blender-adapter-smoke.cjs e tests/blender-workflow-plan-smoke.cjs);
+    estes testes cobrem a segunda camada, dentro do script.
+    """
+
+    def test_opening_blend_disables_autorun_before_reading_the_file(self):
+        bpy, filepaths, opened = fake_bpy_for_file(autorun=True)
+        import_source(bpy, Path("input/modelo.blend"))
+        self.assertFalse(filepaths.use_file_autorun, "Auto Run precisa ficar desligado")
+        self.assertEqual(opened, ["input/modelo.blend"], "o arquivo é aberto depois da guarda")
+
+    def test_autorun_already_disabled_still_opens_the_file(self):
+        bpy, filepaths, opened = fake_bpy_for_file(autorun=False)
+        import_source(bpy, Path("input/modelo.blend"))
+        self.assertFalse(filepaths.use_file_autorun)
+        self.assertEqual(opened, ["input/modelo.blend"])
+
+    def test_unreadable_preferences_refuse_to_open_the_file(self):
+        opened = []
+        bpy = SimpleNamespace(
+            context=SimpleNamespace(preferences=None),
+            ops=SimpleNamespace(wm=SimpleNamespace(open_mainfile=lambda filepath: opened.append(filepath))),
+        )
+        with self.assertRaisesRegex(RuntimeError, "Não consegui ler as preferências"):
+            import_source(bpy, Path("input/modelo.blend"))
+        self.assertEqual(opened, [], "nada é aberto quando a guarda não pode conferir")
+
+    def test_readonly_preference_that_stays_on_refuses_to_open_the_file(self):
+        opened = []
+
+        class FrozenFilepaths:
+            use_file_autorun = True
+
+            def __setattr__(self, name, value):
+                raise AttributeError("preferências somente leitura")
+
+        bpy = SimpleNamespace(
+            context=SimpleNamespace(preferences=SimpleNamespace(filepaths=FrozenFilepaths())),
+            ops=SimpleNamespace(wm=SimpleNamespace(open_mainfile=lambda filepath: opened.append(filepath))),
+        )
+        with self.assertRaisesRegex(RuntimeError, "não pôde ser desativada"):
+            import_source(bpy, Path("input/modelo.blend"))
+        self.assertEqual(opened, [], "recusa em vez de abrir com Auto Run ligado")
+
+    def test_preference_that_ignores_the_change_refuses_to_open_the_file(self):
+        class StubbornFilepaths:
+            use_file_autorun = True
+
+            def __setattr__(self, name, value):
+                return None  # aceita a escrita sem mudar nada
+
+        bpy, _filepaths, opened = fake_bpy_for_file(autorun=True)
+        bpy.context.preferences.filepaths = StubbornFilepaths()
+        with self.assertRaisesRegex(RuntimeError, "continua ligada"):
+            import_source(bpy, Path("input/modelo.blend"))
+        self.assertEqual(opened, [])
+
+    def test_non_blend_formats_do_not_open_a_mainfile(self):
+        bpy, _filepaths, opened = fake_bpy_for_file(autorun=True)
+        imported = []
+        bpy.ops.import_scene = SimpleNamespace(gltf=lambda filepath: imported.append(filepath))
+        import_source(bpy, Path("input/modelo.glb"))
+        self.assertEqual(opened, [], "open_mainfile só existe para .blend")
+        self.assertEqual(imported, ["input/modelo.glb"])
+
+    def test_disable_autoexec_reports_when_it_had_to_turn_the_preference_off(self):
+        bpy, filepaths, _opened = fake_bpy_for_file(autorun=True)
+        disable_autoexec(bpy)
+        self.assertFalse(filepaths.use_file_autorun)
 
 
 if __name__ == "__main__":

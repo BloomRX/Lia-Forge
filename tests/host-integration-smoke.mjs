@@ -225,6 +225,13 @@ try {
   check(renderStep.execution.executable === rendererPath, 'a proveniência aponta o executável configurado pelo usuário');
   const args = renderStep.execution.args;
   check(args.includes('--python') && args[args.indexOf('--python') + 1].endsWith('blender_spritesheet.py'), 'o script do repositório é passado ao processo');
+  // P0-4: estas flags chegam ao processo de verdade (o substituto de teste recebe
+  // a mesma linha de comando que o Blender receberia). Sem --disable-autoexec, um
+  // .blend de origem desconhecida executa o Python embutido nele.
+  check(args.includes('--disable-autoexec'), 'o processo recebe --disable-autoexec (nenhum script embutido no arquivo executa)');
+  check(args.includes('--background'), 'o processo recebe --background (sem janela nem interação)');
+  check(args.indexOf('--disable-autoexec') < args.indexOf('--python'), 'as flags de segurança vêm antes do --python');
+  check(!args.includes('--factory-startup'), 'e não vêm com --factory-startup (as preferências da pessoa não são descartadas)');
   check(args.includes('--input') && args[args.indexOf('--input') + 1].endsWith('modelo.glb'), 'o modelo informado pelo usuário é passado ao processo');
   check(args.includes('--frame-width') && args[args.indexOf('--frame-width') + 1] === '48', 'as dimensões configuradas chegam ao processo');
 
