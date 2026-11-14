@@ -633,7 +633,12 @@ registerTool(server, 'spriteforge_open_panel', {
   await fs.mkdir(logDirectory, { recursive: true });
   const logPath = path.join(logDirectory, 'panel.log');
   const logFd = fsSync.openSync(logPath, 'a');
-  const child = spawn(npm, ['run', 'dev', '--', '--host', '0.0.0.0', '--port', String(port), '--strictPort'], {
+  // Sem `--host`: a flag da CLI do Vite sobrescreve `server.host` do config, então
+  // passá-la aqui reabriria a superfície HTTP para a rede inteira — exatamente o
+  // que o P0-1/R-02 fechou. O bind é decidido por `resolveBindHost` em
+  // `shared/http/api-policy.mjs`: loopback, a menos que quem opera o MCP tenha
+  // pedido exposição explícita (LIA_FORGE_HTTP_EXPOSE=1 ou `npm run dev:expose`).
+  const child = spawn(npm, ['run', 'dev', '--', '--port', String(port), '--strictPort'], {
     cwd: SPRITEFORGE_HOME,
     env: { ...process.env, SPRITEFORGE_PROJECT_ROOT: PROJECT_ROOT },
     stdio: ['ignore', logFd, logFd],

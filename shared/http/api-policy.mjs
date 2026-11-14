@@ -353,22 +353,43 @@ export function createHttpApiPolicy(options = {}) {
  * @param {NodeJS.ProcessEnv} [env]
  * @returns {{host:string, exposed:boolean, reason:string}}
  */
-export function resolveBindHost(env = process.env) {
+/**
+ * Onde o servidor escuta.
+ *
+ * Loopback por padrão. Expor na rede é decisão explícita e só acontece por um dos
+ * dois caminhos nomeados: a variável `LIA_FORGE_HTTP_EXPOSE=1` (com
+ * `LIA_FORGE_HTTP_HOST` opcional) ou o modo `expose` do Vite — que existe porque
+ * `npm run dev:expose` precisa funcionar também no Windows, onde escrever
+ * `VAR=1 comando` no script não é portável.
+ *
+ * Nada aqui lê a linha de comando: a flag `--host` da CLI do Vite **sobrescreve**
+ * `server.host` do config (medido: `vite --host 0.0.0.0` atendeu em endereço
+ * não-loopback mesmo com o config em 127.0.0.1). Por isso os scripts npm não
+ * passam `--host` — quem decide o bind é esta função.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {{mode?:string|null}} [options] modo do Vite (`development`, `expose`…)
+ */
+export function resolveBindHost(env = process.env, { mode = null } = {}) {
   const expose = String(env.LIA_FORGE_HTTP_EXPOSE ?? '').trim().toLowerCase();
   const requested = String(env.LIA_FORGE_HTTP_HOST ?? '').trim();
-  if (expose === '1' || expose === 'true') {
+  const exposeByMode = String(mode ?? '').trim().toLowerCase() === 'expose';
+  if (expose === '1' || expose === 'true' || exposeByMode) {
+    const cause = [
+      expose === '1' || expose === 'true' ? `LIA_FORGE_HTTP_EXPOSE=${expose}` : null,
+      requested ? `LIA_FORGE_HTTP_HOST=${requested}` : null,
+      exposeByMode ? 'modo "expose" (npm run dev:expose / preview:expose)' : null,
+    ].filter(Boolean).join(' e ');
     return {
       host: requested || '0.0.0.0',
       exposed: true,
-      reason: `Exposição explícita por LIA_FORGE_HTTP_EXPOSE=${expose}`
-        + (requested ? ` e LIA_FORGE_HTTP_HOST=${requested}` : '')
-        + '. O token de sessão e a lista de hosts continuam valendo.',
+      reason: `Exposição explícita por ${cause}. O token de sessão e a lista fechada de hosts continuam valendo.`,
     };
   }
   return {
     host: '127.0.0.1',
     exposed: false,
-    reason: 'Bind em loopback por padrão. Para expor na rede é preciso LIA_FORGE_HTTP_EXPOSE=1 (e, opcionalmente, LIA_FORGE_HTTP_HOST).',
+    reason: 'Bind em loopback por padrão. Para expor na rede é preciso LIA_FORGE_HTTP_EXPOSE=1 (e, opcionalmente, LIA_FORGE_HTTP_HOST) ou npm run dev:expose.',
   };
 }
 

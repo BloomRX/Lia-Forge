@@ -22,7 +22,6 @@ const MAX_STORE_BYTES = 24 * 1024 * 1024;
  * lista de hosts é fechada (nunca `allowedHosts: true`).
  */
 const HTTP_POLICY = createHttpApiPolicy();
-const HTTP_BIND = resolveBindHost();
 
 function isInside(root, candidate) {
   const relative = path.relative(root, candidate);
@@ -643,26 +642,30 @@ function liaForgeStudioApi() {
   };
 }
 
-export default defineConfig({
-  plugins: [react(), liaForgeSessionToken(), projectAssetStore(), comfyUiApi(), liaForgeStudioApi()],
-  server: {
-    // Loopback por padrão; expor na rede exige LIA_FORGE_HTTP_EXPOSE=1. O
-    // preview desta estação funciona porque o proxy fala com o servidor em
-    // loopback e o host dele está na lista fechada da política.
-    host: HTTP_BIND.host,
-    // Lista fechada (nunca `true`): qualquer outro Host é recusado com 421,
-    // o que impede que um nome de domínio apontado para esta máquina seja
-    // atendido (DNS rebinding).
-    allowedHosts: viteAllowedHosts(HTTP_POLICY),
-  },
-  preview: {
-    host: HTTP_BIND.host,
-    allowedHosts: viteAllowedHosts(HTTP_POLICY),
-  },
+// `mode` vem do Vite: é o que permite `npm run dev:expose` (portável, inclusive
+// no Windows) como opt-in de exposição de rede, ao lado de LIA_FORGE_HTTP_EXPOSE.
+export default defineConfig(({ mode }) => {
+  const bind = resolveBindHost(process.env, { mode });
+  // O motivo do bind fica registrado assim que o servidor sobe: exposição de rede
+  // é decisão explícita, nunca padrão silencioso.
+  if (bind.exposed) {
+    process.stderr.write(`[lia-forge] ${bind.reason}\n`);
+  }
+  return {
+    plugins: [react(), liaForgeSessionToken(), projectAssetStore(), comfyUiApi(), liaForgeStudioApi()],
+    server: {
+      // Loopback por padrão; expor na rede exige opt-in nomeado. O preview desta
+      // estação funciona porque o proxy fala com o servidor em loopback e o host
+      // dele está na lista fechada da política.
+      host: bind.host,
+      // Lista fechada (nunca `true`): qualquer outro Host é recusado com 421,
+      // o que impede que um nome de domínio apontado para esta máquina seja
+      // atendido (DNS rebinding).
+      allowedHosts: viteAllowedHosts(HTTP_POLICY),
+    },
+    preview: {
+      host: bind.host,
+      allowedHosts: viteAllowedHosts(HTTP_POLICY),
+    },
+  };
 });
-
-// O motivo do bind fica registrado no início do servidor: exposição de rede é
-// decisão explícita, nunca padrão silencioso.
-if (HTTP_BIND.exposed) {
-  process.stderr.write(`[lia-forge] ${HTTP_BIND.reason}\n`);
-}
