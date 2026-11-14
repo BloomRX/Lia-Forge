@@ -194,6 +194,33 @@ Cancelamento tem três casos e os três são ditos com clareza, porque confundir
 
 Um run interrompido não podia ficar com cara de ocupado para sempre: `listRuns()` agora devolve `active` (está executando **neste processo**) e `stale` (o arquivo diz que está em andamento e não há execução aqui). A lista lateral mostra o item como **Interrompido**, explica o motivo e oferece as duas saídas no próprio item — *Corrigir estado* (grava `cancelled` com `executionPresent: false`) e *Retomar* (reaproveita os checkpoints que existem). Run `unreadable` continua `unreadable`, sem ser promovido a nenhum estado.
 
+### O botão oferecido é exatamente o que o serviço faz
+
+Medido pela rota que o próprio botão chama, no projeto de preview, antes desta correção:
+
+```
+POST /api/lia-forge/studio/runs/run-mwfn45sd-l8idhl/resume    (run interrompido, gravado "running")
+→ {"ok":false,"status":"running","reason":"Run \"running\" não precisa de retomada."}
+```
+
+A lista oferecia *Retomar* para o run interrompido — o caso em que retomar dos checkpoints faz mais sentido — e o serviço recusava dizendo que não havia o que retomar. Na direção oposta, run `failed` e run `cancelled` eram aceitos pelo serviço e **não tinham botão nenhum** na lista. Duas mentiras do mesmo tipo: a interface promete o que não acontece e esconde o que acontece.
+
+- `shared/engine/run-states.mjs` (**novo**) reúne `RUN_STATES`, `RESUMABLE_RUN_STATES`, `TERMINAL_RUN_STATES` e `isResumableRunState()` num módulo só de constantes, sem import nenhum: engine, serviço e interface lêem a mesma lista. `execution-manager.mjs` reexporta dali (a exportação pública não mudou).
+- `resumeRun()` aceita run **interrompido**: `running`/`planned` sem execução neste processo retoma dos checkpoints gravados e responde com `interrupted: true`. Continua recusando run ativo aqui (com erro nomeado), run `succeeded` (com o estado real no motivo) e run sem `plan.json` (sem ele não há como retomar com as mesmas entradas).
+- `listRuns()` publica `planStored`: a interface não oferece botão que devolve erro — quando o plano original não está gravado, o item diz isso em vez de mostrar *Retomar*.
+- `isResumableRun(item)` em `shared/ui/journey.mjs` é a regra única da interface: interrompido, `failed`, `cancelled` e `paused` oferecem *Retomar*; `succeeded` não; **`blocked` também não** — a saída dele é aprovar a revisão no painel do run, e `reviewStep()` já retoma a partir dali (oferecer retomada no lugar de revisão empurraria o usuário para repetir o mesmo bloqueio).
+- `SavedRunItem` segue a regra (*Corrigir estado* continua sendo só do run interrompido, que é o caso em que o estado gravado não corresponde à realidade) e o roteiro recebe `runListed` para nomear apenas as ações que existem para aquele run.
+
+Medido depois, na mesma rota e no mesmo projeto:
+
+| Run | Resposta medida |
+|---|---|
+| Interrompido (`running`, sem execução aqui, plano gravado) | `{"ok":true,"resumedFrom":"running","interrupted":true,"checkpointsReused":1,"result":{"status":"succeeded"}}` |
+| `failed` (causa corrigida: executável que renderiza no lugar do que falha) | `{"ok":true,"resumedFrom":"failed","checkpointsReused":0,"result":{"status":"succeeded"}}` |
+| `failed` (causa **não** corrigida) | `{"ok":true,"resumedFrom":"failed","checkpointsReused":1,"result":{"status":"failed"}}` — retomar não conserta nada sozinho; o passo `render` falha de novo e o run continua falho |
+| `blocked` (revisões gravadas no run) | `{"ok":true,"resumedFrom":"blocked","checkpointsReused":3,"result":{"status":"succeeded"}}` — aceito pelo serviço, sem botão na lista (a saída é a revisão) |
+| `succeeded` | `{"ok":false,"reason":"Run \"succeeded\" não precisa de retomada."}` — e sem botão na lista |
+
 ### O que foi executado de verdade
 
 `tests/run-lifecycle-smoke.mjs` (novo) usa um **executável de teste** no lugar do Blender — que não está instalado aqui — e percorre o caminho real (`spawn` com os argumentos do contrato, signal até o processo filho, leitura de saída, validação, checkpoints):
@@ -209,9 +236,12 @@ Um run interrompido não podia ficar com cara de ocupado para sempre: `listRuns(
 | Run órfão | `run.json` escrito à mão como `running` → `cancelRun` devolve `stale: true`, grava `cancelled` com `executionPresent: false`, mantém o passo concluído e marca o que estava em andamento como cancelado; `resumeRun` sem `plan.json` é recusado com motivo claro |
 | Lista de runs durante a execução | `active: true` e `stale: false` enquanto o processo externo trabalha; depois do cancelamento, `active: false`, `stale: false`, `status: cancelled` |
 | Run interrompido na lista | `run.json` gravado como `running` sem execução aqui → `stale: true`, `active: false`; após corrigir, `status: cancelled` e `stale: false` |
+| Retomar o interrompido | run gravado como `running` **com** `plan.json` e checkpoints reais → `stale: true`, `planStored: true`, `isResumableRun: true`; `resumeRun` devolve `ok: true`, `interrupted: true`, `resumedFrom: 'running'`, `checkpointsReused >= 1` e resultado `succeeded`; depois disso o run deixa de constar como interrompido |
+| Run sem plano gravado | `planStored: false` → `isResumableRun: false`: a lista não oferece *Retomar*, e `resumeRun` continua recusando com o motivo ("o plano original … não foi encontrado") |
+| Coerência botão × serviço | para **cada** run da lista: se a interface oferece *Retomar*, o estado está entre os que `resumeRun` aceita (ou é um interrompido sem execução aqui) |
 | Recusas | `cancelRun`/`resumeRun` com caminho como `runId`, run inexistente, run concluído, run ainda em execução |
 
-Na interface, o item da lista (`SavedRunItem`) foi renderizado nos dois estados: run encerrado não oferece recuperação; run `stale` mostra "Interrompido", a explicação "não há execução neste processo" e os dois botões.
+Na interface, o item da lista (`SavedRunItem`) foi renderizado com itens **reais vindos pelo transporte HTTP**: run `succeeded` não oferece *Corrigir estado* nem *Retomar*; run `blocked` (real, produzido pela API) mostra "Aguardando você" e não oferece retomada; run interrompido com plano gravado oferece as duas saídas; run interrompido **sem** plano não oferece *Retomar* e diz "não há como retomar com as mesmas entradas"; e o run cancelado de verdade (depois de `POST /runs/{id}/cancel` sobre o interrompido) oferece só *Retomar*, com a nota de que os passos concluídos ficaram em checkpoint.
 
 O mesmo caminho foi exercitado **por HTTP no dev-server** (projeto real em disco, executável de teste): `GET /runs/active` devolveu o run com `render: running`; `POST /runs/{id}/cancel` devolveu `cancelling` e o estado final gravado foi `cancelled` com `cancellation.reason = "usuário desistiu desta geração"` e `cancelledBy = "validação HTTP"`; o processo de teste (PID 2708) não estava mais vivo; `POST /runs/{id}/resume` reaproveitou 1 checkpoint e terminou `succeeded` com `png-structural`, `png-content` e `destination-profile` aprovados e 6 artefatos; `POST /runs/run-inexistente/cancel` devolveu `404`. Um run gravado à mão como `running` no projeto de preview apareceu em `GET /runs` com `stale: true, active: false`; `POST /runs/{id}/cancel` devolveu `ok: true, status: 'cancelled', stale: true` com a nota de que não havia execução neste processo, e a listagem seguinte passou a mostrar `status: cancelled, stale: false`.
 
@@ -270,7 +300,7 @@ Importar na engine **não é passo do produto** e não aparece como concluído: 
 
 ### O que foi executado de verdade
 
-Dois testes cobrem o roteiro. `tests/journey-smoke.mjs` (**novo**, 88 checagens) **percorre a jornada inteira** com o serviço real sobre um projeto temporário, derivando o roteiro a cada parada com a mesma função da interface:
+Dois testes cobrem o roteiro. `tests/journey-smoke.mjs` (**novo**, 114 checagens) **percorre a jornada inteira** com o serviço real sobre um projeto temporário, derivando o roteiro a cada parada com a mesma função da interface:
 
 | Parada | Progresso medido |
 |---|---|
@@ -296,17 +326,21 @@ Trilha medida: `0 → 1 → 2 → 6 → 8 → 9 → 10 → 11 → 12`, com a che
 | Render | o painel aparece com "Roteiro de produção", "2 de 12 passos", "Passo 3 — Escolher o objetivo" e a lista completa a um clique |
 | Render com run interrompido | o roteiro diz "não há execução neste processo", apresenta a recuperação como decisão do usuário, **não** mostra o texto de execução viva e **não** diz que a jornada terminou ("o restante espera uma decisão sua") |
 | Render com run falho | nomeia o passo (`render`), mostra o código (`ADAPTER_EXECUTION_FAILED`), mantém a mensagem de decisão pendente e não mostra a frase de jornada concluída |
+| Jornada completa com `overview.assets` (a forma real) | `versions` como contagem + `versionRunIds` com o run anexado → passo 12 concluído e painel renderizando "12 de 12 passos" sem lançar |
 
 Com os quatro runs gravados no projeto de preview (um de cada estado), o roteiro derivado pela mesma função que a interface usa devolveu:
 
-| Run no foco | Progresso | Próximo passo | Decisões humanas |
-|---|---|---|---|
-| `succeeded` (atlas exportável) | 9 de 12 | 11 · Exportar para `godot-4` | nenhuma |
-| `blocked` (gate de revisão) | 7 de 12 | 9 · Revisar os artefatos | nenhuma |
-| `failed` (ferramenta que falha) | 7 de 12 | nenhum | 9 · Revisar os artefatos (nomeia a falha) |
-| `running` interrompido (sem execução no processo) | 6 de 12 | nenhum | 8 · Acompanhar (corrigir estado ou retomar) |
+| Run no foco | Progresso | Próximo passo | Decisões humanas | *Retomar* na lista |
+|---|---|---|---|---|
+| `succeeded` **guardado** no asset (`versionRunIds` contém o run) | 9 de 12 | 11 · Exportar para `godot-4` | nenhuma | não |
+| `succeeded` ainda não guardado (retomado do interrompido) | 8 de 12 | 11 · Exportar para `godot-4` | nenhuma | não |
+| `blocked` (gate de revisão em `decompose`) | 7 de 12 | 9 · Revisar os artefatos | nenhuma | não (a saída é aprovar) |
+| `failed` em `render` (`WORKFLOW_FAILED`, código 3 + stderr da ferramenta) | 7 de 12 | nenhum | 9 · Revisar os artefatos (nomeia passo, código e mensagem) | sim |
+| `running` interrompido (sem execução no processo) | 6 de 12 | nenhum | 8 · Acompanhar (corrigir estado ou retomar) | sim |
 
 Antes desta rodada, o run `failed` aparecia com 9 de 12, "Revisar os artefatos" como concluído e a frase "Todos os passos que dependem só do produto estão concluídos" — ou seja, o painel apresentava como terminada uma jornada que tinha falhado no meio. O mesmo valia para run cancelado, e "Guardar no projeto" contava qualquer asset do inventário, ainda que fosse de outro run.
+
+Escopar o passo 12 ao run em foco trouxe uma regressão, corrigida em seguida e registrada aqui porque o tipo importa: a página passa `overview.assets`, onde `versions` é a **contagem**, e a derivação nova lia `versions` como lista — `buildJourneySteps({ run, assets: [{ versions: 1 }] })` lançava `TypeError: (asset.versions ?? []).some is not a function`, ou seja, abrir qualquer run derrubaria o roteiro no navegador. Os smokes não pegaram porque renderizavam o componente com o inventário completo (versões como lista), uma forma que o produto não usa. Agora `overview()` publica `versionRunIds` por asset (sem isso o roteiro não tem como saber se o resultado em foco foi guardado), `buildJourneySteps` aceita as duas formas, e os dois smokes derivam o roteiro **com o resumo do overview** — journey-smoke chega a `12 de 12` com ele e studio-ui-render-smoke renderiza "12 de 12 passos" sem lançar.
 
 ## 11. Testes que provam o acima
 
@@ -319,11 +353,11 @@ Antes desta rodada, o run `failed` aparecia com 9 de 12, "Revisar os artefatos" 
 O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 
 - `tests/ipc-coherence-smoke.cjs` (**novo**): coerência estática entre cliente, preload e processo principal (30 métodos/30 canais), guard de IPC em todos os handlers do Studio, paridade de transporte com o HTTP e janela endurecida (§5).
-- `tests/journey-smoke.mjs` (**novo**): a jornada de 12 passos percorrida de ponta a ponta com o serviço real, com o roteiro derivado a cada parada e a honestidade verificada removendo uma evidência por vez (§10).
+- `tests/journey-smoke.mjs` (**novo**, 114 checagens): a jornada de 12 passos percorrida de ponta a ponta com o serviço real, com o roteiro derivado a cada parada e a honestidade verificada removendo uma evidência por vez; run falho e run cancelado produzidos de verdade; derivação com o resumo do `overview()` (a forma que a página usa); e coerência entre o *Retomar* oferecido e os estados que `resumeRun` aceita, medida sobre os runs reais do projeto (§10 e §8).
 - `tests/project-structure-smoke.mjs` (**novo**): leitura que não escreve, criação limitada a `input/` e `.lia-forge/runs/`, `.spriteforge/assets.json`, `.lia.json` e um arquivo do usuário preservados byte a byte, `projectInfo()` coerente com o disco e raízes inválidas (arquivo, symlink, caminho vazio) recusadas — com verificação de que nada foi criado fora do caminho informado (§9).
-- `tests/run-lifecycle-smoke.mjs` (**novo**): progresso gravado antes do fim do run, cancelamento com o processo externo encerrado de verdade, cancelar duas vezes sem reescrever nada, retomada por checkpoint sem reexecutar passo concluído, falha intermediária com código de saída e stderr preservados, retomada depois da falha, run órfão corrigido sem fingir execução e recusas nomeadas (§8).
+- `tests/run-lifecycle-smoke.mjs` (**novo**): progresso gravado antes do fim do run, cancelamento com o processo externo encerrado de verdade, cancelar duas vezes sem reescrever nada, retomada por checkpoint sem reexecutar passo concluído, falha intermediária com código de saída e stderr preservados, retomada depois da falha, retomada de run **interrompido** com plano e checkpoints reais (`interrupted: true`, `checkpointsReused >= 1`, resultado `succeeded`), run sem plano gravado que não oferece retomada, run órfão corrigido sem fingir execução, coerência botão × serviço em toda a lista e recusas nomeadas (§8).
 - `tests/tool-stubs.mjs` (**novo**): os substitutos de ferramenta externa (renderizador, lento e falho) reunidos num módulo só, usados pelo smoke de ciclo de vida e pelo de integração — sem duplicar código e sempre rotulados como substitutos.
-- `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em três cenários reais e renderizado, item de run interrompido (§10 e §8) e a nota do plano sobre ferramenta instalada que não serve ao passo (§6); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
+- `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em cenários reais e renderizado (inclusive com `overview.assets`, a forma que a página passa), itens reais da lista de runs nos cinco estados — concluído, bloqueado, interrompido com plano, interrompido sem plano e cancelado depois de `cancelRun` (§10 e §8) e a nota do plano sobre ferramenta instalada que não serve ao passo (§6); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
 - `tests/studio-service-smoke.mjs` (estendido): seção 11 com medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada a `input/` e Comparison Lab com caminho recusado (§7); passo opcional que produz prévia, passo opcional com erro que vira skip e brief como entrada de texto do passo de conceito.
 - `tests/host-integration-smoke.mjs` (**novo** nesta fase): integração real com processo externo e ComfyUI em loopback, providers, recusas, gates e a descoberta que diz a origem do executável sem afirmar versão não medida (§6).
 - `tests/workflow-coverage-smoke.mjs` (**novo** nesta fase): 11 casos sobre os 8 workflows, com a matriz de evidência impressa (§3).
@@ -379,6 +413,10 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 | `a4e4a32` | documentação da seleção por passo (§6) |
 | `82ad851` | roteiro sem passo atual mas com decisão pendente não diz "tudo concluído" |
 | `8a9e363` | documentação da mensagem do roteiro quando só resta decisão humana (§10) |
+| `47965f4` | run falho e cancelado no roteiro: revisão como decisão humana e "guardar" escopado ao run (§10) |
+| `7f9d397` | documentação dos quatro fins de run no roteiro (§10) |
+| `580292b` | `run-states.mjs` como fonte única; `resumeRun` aceita run interrompido; `planStored`; botão *Retomar* só onde o serviço retoma (§8) |
+| `4941892` | correção da quebra ao escopar o passo 12 (`versions` como contagem no overview) + `versionRunIds` (§10) |
 | `47965f4` | run falho e cancelado no roteiro (revisão como decisão humana, "guardar" escopado ao run) |
 
 ## 14. Pendências que exigem decisão humana
