@@ -43,6 +43,8 @@ const ORDER = [
 
 const sleep = (milliseconds) => new Promise((resolve) => { setTimeout(resolve, milliseconds); });
 
+const stepOfJourney = (steps, id) => steps.find((step) => step.id === id);
+
 async function waitFor(probe, { label, timeoutMs = 25000, intervalMs = 60 } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -362,7 +364,7 @@ try {
     plan: failedResult.plan ?? null,
     preflight: overview.preflight,
     run: failedResult.snapshot,
-    assets: (await service.listAssets()).assets ?? [],
+    assets: assets ?? [],
   }, { detour: true });
   const failedReview = failedJourney.steps.find((step) => step.id === 'review');
   check(failedReview.state === 'human', 'run falho não consta como revisado: o que resta é decisão do usuário');
@@ -372,6 +374,10 @@ try {
   check(failedJourney.steps.find((step) => step.id === 'export').state === 'todo', 'run falho não libera exportação');
   check(failedJourney.steps.find((step) => step.id === 'keep').state === 'todo',
     'asset guardado de outro run não conclui o passo de guardar deste run');
+  check(assets.some((asset) => (asset.versions ?? []).length > 0),
+    'e o projeto realmente tem asset guardado (a checagem acima não passa por lista vazia)');
+  check(assets.every((asset) => (asset.versions ?? []).every((version) => version.runId !== failedResult.snapshot.runId)),
+    'nenhuma versão do inventário vem do run falho');
   check(failedJourney.progress.humanDecisions.some((item) => item.id === 'review'), 'a falha aparece como decisão pendente no resumo');
 
   await service.configureProvider({ id: 'blender', mode: 'path', executable: slowTool, frameSize: '48x48' });
@@ -395,7 +401,7 @@ try {
     plan: cancelledResult.plan ?? null,
     preflight: overview.preflight,
     run: cancelledResult.snapshot,
-    assets: (await service.listAssets()).assets ?? [],
+    assets: assets ?? [],
   }, { detour: true });
   const cancelledReview = cancelledJourney.steps.find((step) => step.id === 'review');
   check(cancelledReview.state === 'human', 'run cancelado não consta como revisado');
@@ -405,6 +411,22 @@ try {
   check(/smoke-journey/.test(cancelledReview.detail), 'a autoria gravada do cancelamento aparece no passo');
   check(cancelledJourney.steps.find((step) => step.id === 'follow').state === 'done', 'acompanhar estava concluído: o run foi encerrado de propósito');
   check(cancelledJourney.steps.find((step) => step.id === 'export').state === 'todo', 'run cancelado não libera exportação');
+
+  // ---- 12.2.1 o roteiro aceita a forma que a interface recebe de verdade
+  // A página passa `overview.assets`, onde `versions` é a **contagem** e
+  // `versionRunIds` diz de que run cada versão veio. Com a lista de versões ali,
+  // a derivação quebrava (TypeError) assim que um run era aberto.
+  const summaryOverview = await service.overview();
+  const summarized = summaryOverview.assets ?? [];
+  check(summarized.length === assets.length, `o overview resume o inventário (${summarized.length} asset(s))`);
+  check(summarized.some((asset) => typeof asset.versions === 'number'), 'no resumo, versions é a contagem (formato publicado)');
+  check(summarized.some((asset) => (asset.versionRunIds ?? []).includes(runId)),
+    'e o resumo diz de qual run vem a versão guardada');
+  const summarizedJourney = buildJourneySteps({ ...base, run: snapshot, comparison, exportResult: exported, assets: summarized });
+  check(stepOfJourney(summarizedJourney, 'keep').state === 'done',
+    'com o resumo do overview, o passo 12 continua concluído para o run guardado');
+  check(stepOfJourney(buildJourneySteps({ ...base, run: failedResult.snapshot, assets: summarized }), 'keep').state === 'todo',
+    'e continua não concluído para um run que não foi guardado');
 
   // ------------- 12.3 o botão da lista é exatamente o que o serviço aceita
   // Regra de coerência: a interface não oferece ação que o serviço recusaria

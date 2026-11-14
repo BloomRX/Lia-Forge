@@ -514,6 +514,47 @@ try {
   assert.equal(journeyFinished.find((step) => step.id === 'keep').state, 'done', 'versão registrada no asset conclui o roteiro');
   assert.equal(journeyFinished.filter((step) => step.state === 'now').length, 0, 'roteiro concluído não tem passo atual pendente');
 
+  // A página passa `overview.assets`, onde `versions` é a **contagem** (não a
+  // lista) e `versionRunIds` diz de que run vem cada versão guardada. É a forma
+  // que a derivação recebe no produto real: com a lista de versões ali ela
+  // lançava TypeError assim que um run era aberto.
+  const freshOverview = await liaForgeApi.overview();
+  assert.ok(freshOverview.assets.some((asset) => typeof asset.versions === 'number'),
+    'no resumo do overview, versions é a contagem (formato publicado)');
+  assert.ok(freshOverview.assets.some((asset) => (asset.versionRunIds ?? []).includes(runId)),
+    'e o resumo diz de qual run vem a versão guardada');
+  const summarizedJourney = buildJourneySteps({
+    project,
+    inputs: listedInputs.entries,
+    requiresInput: true,
+    workflowId: '2d-character-parts',
+    brief: 'herói neon',
+    destination: 'godot-4',
+    plan: characterRun.plan,
+    preflight: overview.preflight,
+    run: snapshot,
+    comparison,
+    exportResult: exported,
+    assets: freshOverview.assets,
+  });
+  assert.equal(summarizedJourney.find((step) => step.id === 'keep').state, 'done',
+    'com o resumo que a página usa de verdade, o passo 12 conclui para o run guardado');
+  const summarizedMarkup = renderToStaticMarkup(createElement(JourneyChecklist, {
+    project,
+    inputs: listedInputs.entries,
+    requiresInput: true,
+    workflowId: '2d-character-parts',
+    brief: 'herói neon',
+    destination: 'godot-4',
+    plan: characterRun.plan,
+    preflight: overview.preflight,
+    run: snapshot,
+    comparison,
+    exportResult: exported,
+    assets: freshOverview.assets,
+  }));
+  assert.ok(summarizedMarkup.includes('12 de 12 passos'), 'o roteiro renderiza inteiro com os dados que a página passa');
+
   const journeyMarkup = renderToStaticMarkup(createElement(JourneyChecklist, {
     project,
     inputs: listedInputs.entries,

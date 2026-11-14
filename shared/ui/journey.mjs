@@ -67,14 +67,20 @@ export function buildJourneySteps({
   // fechado, a máquina reiniciou): corrigir o estado ou retomar é decisão humana,
   // e o roteiro não pode fingir que a execução continua.
   const stale = Boolean(runStale && run && !finished);
-  const storedAsset = (assets ?? []).some((asset) => (asset.versions?.length ?? 0) > 0 || (asset.provenance?.length ?? 0) > 0);
+  // `assets` chega de duas fontes com formas diferentes: o inventário completo
+  // (`versions` é a lista de versões) e o resumo do `overview()` (`versions` é a
+  // contagem e `versionRunIds` diz de que run cada versão veio). As duas valem.
+  const versionList = (asset) => (Array.isArray(asset?.versions) ? asset.versions : []);
+  const versionCount = (asset) => (typeof asset?.versions === 'number' ? asset.versions : versionList(asset).length);
+  const runIdsOf = (asset) => (asset?.versionRunIds ?? versionList(asset).map((version) => version?.runId ?? null)).filter(Boolean);
+  const storedAsset = (assets ?? []).some((asset) => versionCount(asset) > 0 || (asset?.provenance?.length ?? 0) > 0);
   const failedStep = run?.status === 'failed' ? (run.steps ?? []).find((step) => step.state === 'failed') ?? null : null;
   const cancellation = run?.status === 'cancelled' ? run.cancellation ?? null : null;
   // "Guardar no projeto" vale para o resultado em foco: com um run carregado, só
   // conta a versão registrada para ELE — asset de outro run não conclui este passo
   // (senão um run falho apareceria com a jornada quase toda feita).
   const keptForRun = run?.runId
-    ? (assets ?? []).some((asset) => (asset.versions ?? []).some((version) => version.runId === run.runId))
+    ? (assets ?? []).some((asset) => runIdsOf(asset).includes(run.runId))
     : storedAsset;
   const verifiedOnDestination = exportResult?.bundle?.verifiedOnDestination === true;
   // O item da lista de runs traz o que só o serviço sabe (está ativo aqui? o plano

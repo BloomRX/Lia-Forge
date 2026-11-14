@@ -718,7 +718,17 @@ export function createStudioService(options = {}) {
         preflight: Object.freeze({ summary: preflight.summary, userActions: preflight.userActions, tools: preflight.tools }),
         workflows: listWorkflows({ hub, registry }),
         destinations: listDestinations(),
-        assets: assetManager.list().map((asset) => ({ id: asset.id, name: asset.name, type: asset.type, versions: asset.versions.length, rights: asset.rights.state })),
+        // `versions` é a contagem (formato publicado e consumido pela interface);
+        // `versionRunIds` diz de quais runs cada versão veio — sem isso o roteiro
+        // não tem como saber se o resultado em foco foi guardado no projeto.
+        assets: assetManager.list().map((asset) => ({
+          id: asset.id,
+          name: asset.name,
+          type: asset.type,
+          versions: asset.versions.length,
+          versionRunIds: (asset.versions ?? []).map((version) => version.runId ?? null).filter(Boolean),
+          rights: asset.rights.state,
+        })),
         rights: assetManager.rightsReport(),
         note: 'Nenhuma ferramenta foi instalada, baixada ou contatada; nenhum probe de GPU foi executado.',
       });
