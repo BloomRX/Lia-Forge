@@ -17,6 +17,8 @@
 
 import { createHash } from 'node:crypto';
 
+import { resolveContainedPath } from '../fs/path-containment.mjs';
+
 export const GATE_SCHEMA_VERSION = 1;
 
 export const GATE_CODES = Object.freeze([
@@ -201,27 +203,36 @@ export function checkProtectedAction({ action, authorization, step = null }) {
  * Recusa caminhos fora da raiz do projeto e qualquer alvo que seja symlink
  * (ou cujo pai ainda não exista e precise ser criado fora da raiz).
  * `resolve`/`lstat` são injetados para manter o módulo testável sem disco.
+ *
+ * A decisão de contenção vem de `shared/fs/path-containment.mjs` (auditoria P0,
+ * item 2): comparação por **caminho relativo**, não por `startsWith` — que deixava
+ * passar uma pasta irmã cujo nome começa com o nome da raiz — e resolução do
+ * **caminho real** subindo até o ancestral existente mais próximo, o que pega o
+ * symlink num pai de um alvo que ainda não foi criado. O contrato de retorno
+ * (`ok`/`code`/`reason`/`target`) e as mensagens são os de antes.
  */
 export async function assertSafeWriteTarget({ root, target, resolve, lstat, realpath = null }) {
-  if (typeof resolve !== 'function' || typeof lstat !== 'function') {
-    throw new TypeError('assertSafeWriteTarget: resolve e lstat são obrigatórios');
+  const contained = await resolveContainedPath({
+    root,
+    target,
+    resolve,
+    lstat,
+    realpath,
+    label: 'Alvo',
+  });
+  if (contained.code === 'unsafe-path') {
+    return { ok: false, code: 'unsafe-write-target', reason: contained.reason, target: String(target ?? '') };
   }
-  const resolvedRoot = await resolve(root);
-  const resolvedTarget = await resolve(target);
-  if (resolvedTarget !== resolvedRoot && !resolvedTarget.startsWith(`${resolvedRoot}/`) && !resolvedTarget.startsWith(`${resolvedRoot}\\`)) {
-    return { ok: false, code: 'unsafe-write-target', reason: `Alvo "${target}" está fora da raiz do projeto.`, target: resolvedTarget };
+  if (contained.code === 'outside-root') {
+    return { ok: false, code: 'unsafe-write-target', reason: `Alvo "${target}" está fora da raiz do projeto.`, target: contained.target };
   }
-  const stats = await lstat(resolvedTarget).catch(() => null);
-  if (stats?.isSymbolicLink?.()) {
-    return { ok: false, code: 'unsafe-write-target', reason: `Alvo "${target}" é um symlink; escrita recusada.`, target: resolvedTarget };
+  if (contained.isSymlink) {
+    return { ok: false, code: 'unsafe-write-target', reason: `Alvo "${target}" é um symlink; escrita recusada.`, target: contained.target };
   }
-  if (realpath && stats) {
-    const real = await realpath(resolvedTarget).catch(() => null);
-    if (real && real !== resolvedTarget && !real.startsWith(`${resolvedRoot}/`) && !real.startsWith(`${resolvedRoot}\\`)) {
-      return { ok: false, code: 'unsafe-write-target', reason: `Alvo "${target}" aponta para fora da raiz do projeto.`, target: real };
-    }
+  if (!contained.ok) {
+    return { ok: false, code: 'unsafe-write-target', reason: `Alvo "${target}" aponta para fora da raiz do projeto.`, target: contained.real ?? contained.target };
   }
-  return { ok: true, target: resolvedTarget };
+  return { ok: true, target: contained.target };
 }
 
 /**

@@ -324,7 +324,14 @@ try {
     escaped = error;
   }
   check(escaped instanceof Error, 'run com saída fora do projeto não exporta nada');
-  check(/não produziu artefatos/.test(escaped.message), `motivo claro: ${escaped.message}`);
+  // Antes do confinamento por caminho relativo (auditoria P0, item 2) as saídas
+  // escapantes eram descartadas em silêncio e a recusa saía como "não produziu
+  // artefatos" — sem dizer que o registro do run apontava para fora. Agora o
+  // motivo nomeia o confinamento e cada caminho recusado.
+  check(/fora da pasta do run/.test(escaped.message), `motivo claro: ${escaped.message}`);
+  check(/etc\/passwd/.test(escaped.message) && /fora-do-projeto\.png/.test(escaped.message),
+    'a recusa nomeia os dois caminhos que escapavam');
+  check(/Nada foi gravado/.test(escaped.message), 'e diz que nada foi gravado');
   check(!await fs.stat(outside).then((stats) => stats.isFile()).catch(() => false), 'nenhum arquivo foi criado fora do projeto');
 
   // --------------------------------- 8. exportação por destino (§7 perfis)

@@ -11,6 +11,8 @@
  * (Node usa SHA-256 do `node:crypto`), então o mesmo código roda no Studio.
  */
 
+import { isDeclaredPathContained } from '../fs/path-containment.mjs';
+
 export const DESTINATION_PROFILE_SCHEMA_VERSION = 1;
 
 export const DESTINATIONS = Object.freeze([
@@ -222,8 +224,18 @@ export function buildExportBundle({ destinationId, artifacts = [], hash, asset =
   const files = [];
   for (const artifact of artifacts) {
     if (!artifact?.bytes) continue;
+    const declared = artifact.relativePath ?? artifact.path ?? artifact.id ?? 'artifact';
+    // Confinamento do pacote (auditoria P0, item 2): o caminho declarado entra no
+    // manifesto que outra ferramenta/pessoa vai usar para materializar arquivos.
+    // Um caminho absoluto ou com ".." entregaria conteúdo de fora da pasta do run
+    // (ou de fora do projeto) sem que ninguém tivesse autorizado. A conferência é
+    // por caminho relativo normalizado, não por prefixo de string.
+    const contained = isDeclaredPathContained(declared);
+    if (!contained.ok) {
+      throw new Error(`buildExportBundle: o caminho declarado do artefato "${declared}" ${contained.reason}; o pacote só aceita caminhos relativos dentro da raiz do run. Nada foi empacotado.`);
+    }
     files.push({
-      path: artifact.relativePath ?? artifact.path ?? artifact.id ?? 'artifact',
+      path: contained.normalized,
       role: artifact.role ?? 'asset',
       format: artifact.format ?? 'bin',
       bytes: artifact.bytes.length,

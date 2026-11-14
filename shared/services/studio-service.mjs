@@ -26,6 +26,7 @@ import { listWorkflows, planWorkflow, WORKFLOW_IDS } from '../orchestrator/plann
 import { ExecutionManager } from '../engine/execution-manager.mjs';
 import { isResumableRunState } from '../engine/run-states.mjs';
 import { assertSafeWriteTarget, checkAuthorization, redactSecrets, sha256Hex } from '../engine/gates.mjs';
+import { isPathContained, resolveContainedPath } from '../fs/path-containment.mjs';
 import {
   authorizationForScope,
   buildRunScope,
@@ -650,10 +651,28 @@ export function createStudioService(options = {}) {
     return typeof value === 'string' && MODEL_EXTENSIONS.includes(path.extname(value).toLowerCase());
   }
 
+  /**
+   * Injeção de filesystem para os gates de contenção (mesmo padrão de
+   * `assertSafeWriteTarget`: funções injetadas, módulo testável sem disco).
+   */
+  const containmentFs = {
+    resolve: async (value) => path.resolve(value),
+    lstat: async (value) => fs.lstat(value).catch(() => null),
+    realpath: async (value) => fs.realpath(value).catch(() => null),
+  };
+
+  /**
+   * Caminho declarado como entrada do usuário, confinado à raiz do projeto.
+   *
+   * Decisão por **caminho relativo** (`shared/fs/path-containment.mjs`), não por
+   * `startsWith`: uma pasta irmã cujo nome começa com o nome da raiz passava no
+   * teste de prefixo. A resolução de symlink acontece nos gates assíncronos
+   * (`assertPathInsideProject`, `resolveInside`) que já usam o mesmo módulo.
+   */
   function absoluteInsideProject(value) {
     if (typeof value !== 'string' || !value.trim()) return null;
     const resolved = path.isAbsolute(value) ? path.resolve(value) : path.resolve(projectRoot, value);
-    return resolved.startsWith(path.resolve(projectRoot) + path.sep) || resolved === path.resolve(projectRoot) ? resolved : null;
+    return isPathContained(path.resolve(projectRoot), resolved) ? resolved : null;
   }
 
   /**
@@ -925,10 +944,18 @@ export function createStudioService(options = {}) {
         if (priorRunDirectory) candidates.push(path.join(priorRunDirectory, relativePath));
         candidates.push(path.join(projectRoot, relativePath));
         for (const absolute of candidates) {
-          const resolved = path.resolve(absolute);
-          if (!resolved.startsWith(path.resolve(projectRoot))) return null;
+          // Confinamento (auditoria P0, item 2): nada é lido fora da raiz do
+          // projeto, e a conferência é por caminho relativo + caminho real
+          // (symlink dentro do projeto apontando para fora não é lido).
+          const contained = await resolveContainedPath({
+            root: projectRoot,
+            target: absolute,
+            ...containmentFs,
+            label: 'artefato de origem',
+          });
+          if (!contained.ok) continue;
           try {
-            return await fs.readFile(resolved);
+            return await fs.readFile(contained.target);
           } catch {
             /* tenta o próximo candidato */
           }
@@ -1474,13 +1501,32 @@ export function createStudioService(options = {}) {
       }
       const runDirectory = path.join(projectRoot, RUNS_DIRECTORY, runId);
       const artifacts = [];
+      const escaping = [];
       for (const step of snapshot.steps) {
         const emitted = step.outputs ?? [];
         for (const [index, relative] of emitted.entries()) {
           const absolute = path.isAbsolute(relative) ? relative : path.join(projectRoot, relative);
-          if (!absolute.startsWith(runDirectory) && !absolute.startsWith(projectRoot)) continue;
-          if (!await pathExists(absolute)) continue;
-          const bytes = await fs.readFile(absolute);
+          // Confinamento da exportação (auditoria P0, item 2 / R-11): só os
+          // artefatos **deste run** são autorizados. Antes a checagem era
+          // `absolute.startsWith(runDirectory) || absolute.startsWith(projectRoot)`
+          // — dois escapes medidos: (a) pasta irmã cujo nome começa com o id do
+          // run (`run-abc-evil/…`) satisfazia o prefixo; (b) symlink criado dentro
+          // do run apontando para fora do projeto tem caminho textual dentro da
+          // raiz e conteúdo fora dela. E aceitar qualquer caminho do projeto
+          // inteiro entregava ao manifesto arquivos que ninguém autorizou.
+          // Aqui: caminho relativo + caminho real (symlinks resolvidos).
+          const contained = await resolveContainedPath({
+            root: runDirectory,
+            target: absolute,
+            ...containmentFs,
+            label: `saída "${relative}" do passo "${step.id}"`,
+          });
+          if (!contained.ok) {
+            escaping.push(`${step.id}: "${relative}" — ${contained.reason}`);
+            continue;
+          }
+          if (!await pathExists(contained.target)) continue;
+          const bytes = await fs.readFile(contained.target);
           // Integridade do byte exportado. O engine grava o SHA-256 da primeira
           // saída do passo (é o hash que a revisão humana aprovou); se o arquivo
           // em disco não bate com ele, o conteúdo mudou depois do run — exportar
@@ -1489,13 +1535,18 @@ export function createStudioService(options = {}) {
             throw new Error(`exportRun: o artefato "${path.basename(absolute)}" do passo "${step.id}" mudou depois do run (SHA-256 ${String(step.sha256).slice(0, 12)}… gravado, ${hash(bytes).slice(0, 12)}… em disco). Nada foi gravado.`);
           }
           artifacts.push({
-            id: `${step.id}:${path.basename(absolute)}`,
-            format: path.extname(absolute).slice(1).toLowerCase(),
+            id: `${step.id}:${path.basename(contained.target)}`,
+            format: path.extname(contained.target).slice(1).toLowerCase(),
             role: step.id,
-            relativePath: path.relative(runDirectory, absolute).split(path.sep).join('/'),
+            relativePath: path.relative(runDirectory, contained.target).split(path.sep).join('/'),
             bytes,
           });
         }
+      }
+      // Sair da pasta do run não é "artefato ignorado", é sinal de adulteração do
+      // registro do run: falha fechado e nomeia o que foi recusado.
+      if (escaping.length) {
+        throw new Error(`exportRun: o run "${runId}" declara saída(s) fora da pasta do run — ${escaping.join('; ')}. Exportar só aceita os artefatos autorizados deste run. Nada foi gravado.`);
       }
       if (!artifacts.length) throw new Error('exportRun: o run não produziu artefatos gravados');
       const compatibility = checkDestinationCompatibility({ destinationId: destination, artifacts });
