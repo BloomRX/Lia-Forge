@@ -225,6 +225,9 @@ try {
   const preview = await liaForgeApi.vfxPreview({ preset: 'fire', size: 48, frameCount: 6 });
   assert.ok(preview.pngBase64.length > 100, 'preview de VFX em base64');
   assert.equal(analyzePngContent(Buffer.from(preview.pngBase64, 'base64')).blank, false, 'preview tem conteúdo');
+  assert.equal(preview.grid.columns * preview.grid.rows >= preview.frameCount, true, 'a grade declarada comporta os frames');
+  assert.equal(preview.sha256.length, 64, 'a prévia recebe SHA-256 do PNG gerado');
+
 
   // ------------------------------------------- 6. componente renderiza (SSR)
   const { default: ForgeStudio } = await vite.ssrLoadModule('/src/ForgeStudio.jsx');
@@ -234,6 +237,35 @@ try {
   const markup = renderToStaticMarkup(createElement(ForgeStudio, { onNotify: () => {} }));
   assert.ok(markup.includes('forge-page'), 'o componente renderiza a página do Forge');
   assert.ok(/Lendo o estado real|forge-loading/.test(markup), 'o estado inicial é o de carregamento (efeitos não rodam em SSR)');
+
+  // A prévia existe no serviço desde sempre; a interface é que não a oferecia.
+  const { VfxPreview } = await vite.ssrLoadModule('/src/ForgeStudio.jsx');
+  const previewMarkup = renderToStaticMarkup(createElement(VfxPreview, {
+    preset: 'fire', size: 48, frameCount: 6, preview, busy: null, onRequest: () => {},
+  }));
+  assert.ok(previewMarkup.includes('Ver prévia'), 'o botão de prévia aparece no formulário de VFX');
+  assert.ok(previewMarkup.includes('data:image/png;base64,'), 'a prévia gerada é mostrada como imagem');
+  assert.ok(previewMarkup.includes(`${preview.grid.columns}×${preview.grid.rows}`), 'a grade medida aparece na legenda');
+  assert.ok(previewMarkup.includes(`${preview.sheetWidth}×${preview.sheetHeight}`), 'o tamanho da folha medido aparece na legenda');
+  assert.ok(previewMarkup.includes(String(preview.content.uniqueColors)), 'as cores únicas medidas aparecem na legenda');
+  assert.ok(previewMarkup.includes(preview.sha256.slice(0, 16)), 'o SHA-256 da prévia aparece (o usuário avançado confere)');
+  assert.ok(previewMarkup.includes('não chama ferramenta externa') && previewMarkup.includes('não gera custo'),
+    'a prévia diz que é gerada pelo produto, sem ferramenta externa e sem custo');
+  assert.ok(!previewMarkup.includes('os ajustes mudaram desde esta prévia'),
+    'com os ajustes iguais aos da geração, nada de aviso de prévia vencida');
+
+  const stalePreviewMarkup = renderToStaticMarkup(createElement(VfxPreview, {
+    preset: 'impact', size: 64, frameCount: 6, preview, busy: null, onRequest: () => {},
+  }));
+  assert.ok(stalePreviewMarkup.includes('os ajustes mudaram desde esta prévia'),
+    'se o ajuste mudou, a legenda avisa que a imagem não corresponde ao que será executado');
+
+  const emptyPreviewMarkup = renderToStaticMarkup(createElement(VfxPreview, {
+    preset: 'fire', size: 48, frameCount: 6, preview: null, busy: null, onRequest: () => {},
+  }));
+  assert.ok(emptyPreviewMarkup.includes('Ver prévia'), 'sem prévia gerada o botão continua lá');
+  assert.ok(!emptyPreviewMarkup.includes('<img'), 'e nenhuma imagem é inventada antes de gerar');
+
 
   // Componentes de passo renderizados com dados reais vindos do serviço: é o que
   // garante que validação executada, bloqueio nomeado e entrada pendente

@@ -784,6 +784,43 @@ export function SavedRunItem({ item, currentRunId = null, busy = null, onOpen, o
 const JOURNEY_ICONS = { done: Check, now: ChevronRight, human: UserRound, todo: CircleDashed, optional: CircleDashed };
 
 /** Roteiro visível: o leigo sabe onde está e o que vem a seguir, sem decorar termos. */
+/**
+ * Prévia de VFX (§3: quem não conhece a ferramenta precisa ver o que o preset
+ * faz antes de executar). O atlas é gerado pelo próprio produto — VFX
+ * procedural, sem ferramenta externa, sem rede e sem custo — e o que aparece é
+ * medido: grade, tamanho da folha, cores únicas e SHA-256 do PNG gerado.
+ *
+ * A prévia some assim que qualquer ajuste muda: imagem na tela que não
+ * corresponde ao que será executado é o mesmo tipo de mentira que este produto
+ * evita em todo o resto.
+ */
+export function VfxPreview({ preset, size, frameCount, preview, busy, onRequest }) {
+  const frameSize = preview?.grid?.columns ? Math.round(preview.sheetWidth / preview.grid.columns) : null;
+  const matches = Boolean(preview)
+    && preview.preset === preset
+    && preview.frameCount === Number(frameCount)
+    && frameSize === Number(size);
+  return (
+    <div className="forge-vfx-preview is-wide">
+      <div className="forge-vfx-preview-head">
+        <button type="button" className="button button-quiet" onClick={onRequest} disabled={busy !== null}>
+          {busy === 'vfx-preview' ? <span className="spin" /> : <Sparkles size={13} strokeWidth={2} />} Ver prévia
+        </button>
+        <em className="forge-note">Gerada pelo próprio produto (VFX procedural): não chama ferramenta externa, não usa rede e não gera custo. Executar é o que grava e valida os artefatos.</em>
+      </div>
+      {preview ? (
+        <figure className="forge-vfx-figure">
+          <img src={`data:image/png;base64,${preview.pngBase64}`} alt={`Prévia do atlas de VFX ${preview.preset}`} />
+          <figcaption>
+            {preview.preset} · {preview.frameCount} frames em {preview.grid.columns}×{preview.grid.rows} · quadro {frameSize}px · folha {preview.sheetWidth}×{preview.sheetHeight} · {preview.content?.uniqueColors ?? 0} cores · sha256 {String(preview.sha256 ?? '').slice(0, 16)}…
+            {matches ? '' : ' — os ajustes mudaram desde esta prévia'}
+          </figcaption>
+        </figure>
+      ) : null}
+    </div>
+  );
+}
+
 export function JourneyChecklist(props) {
   const steps = buildJourneySteps(props);
   const progress = journeyProgress(steps);
@@ -1096,6 +1133,13 @@ export default function ForgeStudio({ onNotify = () => {} }) {
   const [fromRun, setFromRun] = useState('');
   const [modelPath, setModelPath] = useState('');
   const [vfx, setVfx] = useState({ preset: 'impact', size: 64, frameCount: 8 });
+  const [vfxPreview, setVfxPreview] = useState(null);
+  // Mudou o ajuste, a prévia deixa de valer: melhor pedir de novo do que mostrar
+  // na tela uma imagem que não é o que vai ser executado.
+  const updateVfx = (patch) => {
+    setVfx((current) => ({ ...current, ...patch }));
+    setVfxPreview(null);
+  };
   const [plan, setPlan] = useState(null);
   const [run, setRun] = useState(null);
   const [busy, setBusy] = useState(null);
@@ -1173,6 +1217,11 @@ export default function ForgeStudio({ onNotify = () => {} }) {
   // O run em foco consta como em andamento sem execução neste processo? O roteiro
   // precisa saber para não apresentar como vivo o que foi interrompido.
   const runStale = Boolean(run?.runId && (runs ?? []).some((item) => item.runId === run.runId && item.stale));
+  // O item da lista traz o que só o serviço sabe (está ativo aqui? o plano
+  // original continua gravado?). É dele que sai a decisão de oferecer retomada —
+  // a mesma regra da lista lateral e do roteiro, sem segunda lista de estados.
+  const runListItem = run?.runId ? (runs ?? []).find((item) => item.runId === run.runId) ?? null : null;
+  const runResumable = isResumableRun(runListItem ?? (run ? { runId: run.runId, status: run.status, stale: runStale, active: busy === 'run' } : null));
 
   const runAction = useCallback(async (label, action) => {
     setBusy(label);
@@ -1369,6 +1418,13 @@ export default function ForgeStudio({ onNotify = () => {} }) {
     return result;
   });
 
+  const handleVfxPreview = () => runAction('vfx-preview', async () => {
+    const result = await liaForgeApi.vfxPreview({ preset: vfx.preset, size: Number(vfx.size), frameCount: Number(vfx.frameCount) });
+    setVfxPreview(result);
+    notify(`Prévia gerada aqui mesmo: ${result.frameCount} frames em ${result.grid.columns}×${result.grid.rows}, folha ${result.sheetWidth}×${result.sheetHeight}.`, 'info');
+    return result;
+  });
+
   const handleResumeRun = () => runAction('resume', async () => {
     if (!run?.runId) return null;
     const result = await liaForgeApi.resumeRun(run.runId, { reason: 'retomado pelo usuário no Studio' });
@@ -1377,7 +1433,7 @@ export default function ForgeStudio({ onNotify = () => {} }) {
       setRunTab('passos');
       setExportResult(null);
       setRuns(await liaForgeApi.runs().catch(() => []));
-      notify(`Run retomado a partir de ${result.checkpointsReused} checkpoint(s): ${result.result.status}.`, result.result.status === 'succeeded' ? 'success' : 'info');
+      notify(`Run ${result.interrupted ? 'interrompido ' : ''}retomado a partir de ${result.checkpointsReused} checkpoint(s): ${result.result.status}.`, result.result.status === 'succeeded' ? 'success' : 'info');
     } else {
       notify(result?.reason ?? 'Nada a retomar.', 'info');
     }
@@ -1596,7 +1652,7 @@ export default function ForgeStudio({ onNotify = () => {} }) {
             run={run}
             liveRun={busy === 'run' ? liveRun : null}
             runStale={runStale}
-            runListed={runs.find((item) => item.runId === run?.runId) ?? null}
+            runListed={runListItem}
             comparison={comparison}
             exportResult={exportResult}
             registeredVersion={registeredVersion}
@@ -1679,18 +1735,26 @@ export default function ForgeStudio({ onNotify = () => {} }) {
                 <>
                   <label>
                     <span>Preset de VFX</span>
-                    <select value={vfx.preset} onChange={(event) => setVfx({ ...vfx, preset: event.target.value })}>
+                    <select value={vfx.preset} onChange={(event) => updateVfx({ preset: event.target.value })}>
                       {['explosion', 'fire', 'spark', 'smoke', 'impact', 'lightning'].map((preset) => <option key={preset} value={preset}>{preset}</option>)}
                     </select>
                   </label>
                   <label>
                     <span>Tamanho do frame</span>
-                    <input type="number" min="16" max="512" step="16" value={vfx.size} onChange={(event) => setVfx({ ...vfx, size: event.target.value })} />
+                    <input type="number" min="16" max="512" step="16" value={vfx.size} onChange={(event) => updateVfx({ size: event.target.value })} />
                   </label>
                   <label>
                     <span>Frames</span>
-                    <input type="number" min="1" max="64" value={vfx.frameCount} onChange={(event) => setVfx({ ...vfx, frameCount: event.target.value })} />
+                    <input type="number" min="1" max="64" value={vfx.frameCount} onChange={(event) => updateVfx({ frameCount: event.target.value })} />
                   </label>
+                  <VfxPreview
+                    preset={vfx.preset}
+                    size={Number(vfx.size)}
+                    frameCount={Number(vfx.frameCount)}
+                    preview={vfxPreview}
+                    busy={busy}
+                    onRequest={handleVfxPreview}
+                  />
                 </>
               ) : null}
               <div className="forge-form-actions is-wide">
@@ -1934,14 +1998,14 @@ export default function ForgeStudio({ onNotify = () => {} }) {
                 <button type="button" className="button button-quiet" onClick={handleAttach} disabled={busy === 'attach' || !run.provenance?.length}>
                   {busy === 'attach' ? <span className="spin" /> : <Package size={14} />} Guardar no projeto
                 </button>
-                {['cancelled', 'paused', 'failed'].includes(run.status) ? (
+                {runResumable ? (
                   <button type="button" className="button button-quiet" onClick={handleResumeRun} disabled={busy === 'resume'}>
                     {busy === 'resume' ? <span className="spin" /> : <RotateCcw size={14} />} Retomar do checkpoint
                   </button>
                 ) : null}
                 {run.status === 'running' ? (
                   <button type="button" className="button button-quiet" onClick={() => handleCancelRun(run.runId)} disabled={busy === 'cancel'}>
-                    {busy === 'cancel' ? <span className="spin" /> : <CircleAlert size={14} />} Cancelar
+                    {busy === 'cancel' ? <span className="spin" /> : <CircleAlert size={14} />} {runStale ? 'Corrigir estado' : 'Cancelar'}
                   </button>
                 ) : null}
               </footer>
