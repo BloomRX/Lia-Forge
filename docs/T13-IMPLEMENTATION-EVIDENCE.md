@@ -117,6 +117,38 @@ Correções de honestidade que essa integração revelou:
 - a descoberta dizia "Blender encontrado em `<caminho>`" mesmo quando o caminho era um arquivo indicado pelo usuário e **nenhuma versão tinha sido medida**. O pré-voo confere existência e permissão de execução — ele não executa o arquivo, porque rodar `--version` de um caminho digitado pelo usuário seria executar código arbitrário no pré-voo. A mensagem agora diz o que foi medido e o que não foi: `executableSource` (`user-configuration` ou `path`) e `versionConfirmed: false` saem da descoberta, são repassados por `preflight` e pelo Hub, e o painel **Ferramentas & requisitos** mostra os três (executável, origem dele e "versão detectada: não confirmada — o pré-voo mede existência e permissão de execução, mas não executa o arquivo");
 - `destination-profile` passou a conferir o pacote contra o **perfil publicado** do destino (destino existente no catálogo, fps/eixos/unidades/pivô/formatos idênticos, formatos aceitos por arquivo, bloqueios de compatibilidade). Continua sem afirmar importação real: `verifiedOnDestination` vem do perfil.
 
+### Metadado não é "formato recusado" (correção medida nos seis destinos)
+
+O mesmo run 2D concluído, exportado para cada um dos seis destinos, devolvia:
+
+```
+compatible=false · 7 arquivos · aceitos=2 · bloqueios=5
+bloqueios: layers.json, rig.json, animations.json, spritesheet-manifest.json, manifest.json
+           → 'formato "json" não é aceito por Godot 4.x (png, glb)'
+```
+
+Todo pacote real era declarado incompatível com todo destino, e os "bloqueios" eram os sidecars de metadados. `checkDestinationCompatibility` já tinha a regra de metadado, mas ela exigia `role` em `METADATA_ROLES` (`manifest`, `metadata`, `sidecar`, `report`) — e quem empacota informa o **passo de origem** como `role` (`decompose`, `rig`, `animate`, `render`, `deliver`). Na prática a regra nunca valia, e o efeito não era só um número errado:
+
+- dentro do run, o exportador tem uma rede de segurança que, diante de `compatible: false`, reexporta só o que passa individualmente. Com os JSON contados como bloqueio, o pacote do run saía com **2 arquivos** (as duas imagens) e perdia o manifesto da folha, o rig e as animações — justamente a grade 8×3, o pivô e o fps, sem os quais o destino não sabe o que fazer com as imagens. Nada era dito: a nota falava "2 arquivo(s) empacotado(s)" como se fosse o pacote inteiro;
+- o mesmo run exportado pela rota sob demanda (`POST /runs/{id}/export`) dava 7 arquivos e `compatible: false` — dois caminhos, dois pacotes, nenhuma explicação;
+- a interface não mostrava a compatibilidade: o usuário via o selo "import no destino não verificado" e a lista de arquivos, sem saber que o produto tinha acabado de descartar o manifesto.
+
+O que mudou:
+
+- a classificação de metadado é pelo **formato** (`json/txt/md/csv/yaml`), nunca pelo passo que produziu o arquivo. `METADATA_ROLES` continua publicado (faz parte do contrato do módulo) com o comentário dizendo que não decide mais nada; cada entrada aceita traz `role: 'metadata'` e `sourceRole` (de que passo veio), então nada é escondido;
+- o resultado separa `assets` (importáveis) de `metadata` e publica `summary` contável — "7 arquivos aceitos" escondia que só 2 entram na engine;
+- asset em formato que o destino não importa continua bloqueando (`.psd` no Godot 4.x) e conversão continua sendo conversão (`glb`→`fbx` no Unreal), não bloqueio;
+- a rede de segurança do exportador continua, mas só para asset realmente recusado, e **diz o que ficou de fora**: `metrics.assetFiles`, `metrics.metadataFiles`, `metrics.droppedArtifacts` e a nota com a composição do pacote;
+- o painel de exportação mostra composição, veredicto de compatibilidade, bloqueios e conversões nomeados e a evidência publicada do destino (`bundle.evidence`);
+- no roteiro, o passo 11 diz a composição e, se o destino recusa o pacote, vira **decisão humana** nomeando o arquivo — exportar aconteceu, mas não resolveu, e o painel não diz "tudo concluído".
+
+| Verificação | Resultado medido depois |
+|---|---|
+| `POST /runs/{id}/export` (run 2D concluído, `godot-4`) | `files: 7`, `compatible: true`, `summary {assets: 2, metadata: 5, conversions: 0, blockers: 0}`; assets `part-01.png` + `spritesheet.png`; metadados `layers.json`, `rig.json`, `animations.json`, `spritesheet-manifest.json`, `manifest.json` |
+| Run 2D novo, ponta a ponta (revisões aprovadas) | `deliver` com `files: 6` (`assetFiles: 2`, `metadataFiles: 4`), `droppedArtifacts: []`, validador `destination-profile` = `passed`, nota "6 arquivo(s) empacotado(s) para Godot 4.x (2 asset(s) + 4 metadado(s))" |
+| `.psd` num pacote Godot 4.x | `compatible: false`, `summary.blockers: 1`, bloqueio nomeando o formato |
+| `glb` para `unreal-2d` | `compatible: false`, `conversionsNeeded: [{from: 'glb', to: 'fbx'}]` — conversão, não bloqueio |
+
 ### O que o smoke de integração executa de verdade
 
 `tests/host-integration-smoke.mjs` exercita o caminho completo com **substitutos rotulados** (um executável de teste no lugar do Blender e um servidor HTTP de teste no lugar do ComfyUI — neste ambiente não existe nenhum dos dois):
@@ -142,7 +174,7 @@ A seleção por passo foi medida **por HTTP no dev-server** com o Blender config
 | `3d-object-render` | `render` e `atlas` | `blender-spritesheet` | nenhum candidato descartado (os dois servem; o 3D vem primeiro) |
 | `3d-character-spritesheet` | `animate` (`motion.cycles`) e `render-2d` | `blender-spritesheet` | montante 3D (`rig3d.auto`) qualifica o passo |
 
-E o run completo de `2d-character-parts` no mesmo projeto — que antes parava bloqueado no atlas — chegou a **`succeeded`** com 24 frames, grade 8×3 de 48×48, validadores `animation-loop`, `png-content`, `spritesheet-manifest` e `destination-profile` aprovados, e pacote de exportação com 7 arquivos (`verifiedOnDestination: false`). Na interface, o passo do plano diz na hora qual ferramenta instalada não serve a ele e por quê, sem exigir que o usuário abra a lista de candidatos.
+E o run completo de `2d-character-parts` no mesmo projeto — que antes parava bloqueado no atlas — chegou a **`succeeded`** com 24 frames, grade 8×3 de 48×48, validadores `animation-loop`, `png-content`, `spritesheet-manifest` e `destination-profile` aprovados, e pacote de exportação (`verifiedOnDestination: false`) — 6 arquivos gravados pelo passo de entrega (2 assets + 4 metadados, nada descartado) e 7 na reexportação sob demanda, que inclui o próprio manifesto do pacote. Na interface, o passo do plano diz na hora qual ferramenta instalada não serve a ele e por quê, sem exigir que o usuário abra a lista de candidatos.
 
 Medido também **por HTTP no dev-server** (projeto de preview com um substituto de teste configurado como executável): `GET /overview` devolve, para `blender-spritesheet`, `status: available`, `executableSource: user-configuration`, `versionConfirmed: false` e o detalhe `Caminho configurado por você (/home/user/lia-preview-tools/blender-render.mjs) existe e é executável. A identidade como Blender não foi confirmada: a descoberta não executa o arquivo (nenhum --version foi rodado).` — ou seja, o substituto rotulado aparece como o que é (um caminho executável configurado), nunca como "Blender instalado".
 
@@ -171,7 +203,7 @@ O que passou a existir (mesmo serviço, mesmos gates, dois transportes):
 | `GET /input-file?path=input/sprite.png` | `200 image/png`, 182 B |
 | `GET /input-file?path=../../../etc/passwd` | `403` |
 | `POST /compare` com 2 caminhos válidos + 1 traversal | 2 entradas `ok: true` com dimensões/cores/cobertura/SHA-256 e 1 entrada `ok: false` com "Caminho fora do projeto foi recusado." |
-| Entrada enviada → workflow completo | `POST /run` com `params.sourceImage = 'input/Referencia-Heroi.PNG'` → `blocked` → 2 revisões aprovadas (retomada real) → **`succeeded`** em 5 passos; validações `animation-loop`, `png-content`, `spritesheet-manifest` e `destination-profile` = `passed`; 7 artefatos; export Godot 4.x com 7 arquivos, 60 fps, pivô `bottom-center`, `verifiedOnDestination: false` |
+| Entrada enviada → workflow completo | `POST /run` com `params.sourceImage = 'input/Referencia-Heroi.PNG'` → `blocked` → 2 revisões aprovadas (retomada real) → **`succeeded`** em 5 passos; validações `animation-loop`, `png-content`, `spritesheet-manifest` e `destination-profile` = `passed`; 7 artefatos; export Godot 4.x com 7 arquivos (2 assets + 5 metadados, `compatible: true`), 60 fps, pivô `bottom-center`, `verifiedOnDestination: false` |
 | Artefato final medido | folha **384×144** servida por `/artifact` com **21 cores** — as mesmas 21 cores da referência enviada pelo usuário, ou seja, o pipeline consumiu a entrada de verdade |
 
 O envio de arquivos para **serviços externos** continua fora: nada sai da máquina, e a pendência de upload segue em §14.
@@ -304,7 +336,7 @@ A experiência pedida é "criar projeto → exportar" em 12 passos, mas a interf
 | 8 | Acompanhar (ou cancelar) | o run está encerrado (`summary.finished`) | run gravado como em andamento **sem execução neste processo** (`runStale`): corrigir o estado ou retomar é humano |
 | 9 | Revisar os artefatos | run `succeeded` sem revisão pendente | run `blocked`: a aprovação é humana e fica amarrada ao SHA-256 · run `failed`: nomeia o passo, o código e a mensagem do erro e diz que nada foi entregue como pronto · run `cancelled`: motivo e autoria gravados, com retomar do checkpoint ou recomeçar |
 | 10 | Comparar variações | há comparação medida no Comparison Lab (passo opcional) | — |
-| 11 | Exportar para o destino | existe pacote exportado, com "verificado no destino: não" dito no próprio passo | — |
+| 11 | Exportar para o destino | existe pacote exportado **aceito pelo destino**, com a composição (assets importáveis + metadados) e o "verificado no destino: não" ditos no próprio passo | o destino não aceita o pacote (`compatibility.blockers`/`conversionsNeeded`): escolher outro destino ou converter é humano, com o arquivo recusado nomeado |
 | 12 | Guardar no projeto | com run em foco, há versão de asset registrada **para ele**; sem run, há asset com versões/proveniência no inventário | — |
 
 Quando não há passo atual, a mensagem do painel distingue três situações, porque "tudo concluído" nem sempre é verdade: **há decisão pendente** → "O que depende só do produto está feito até aqui; o restante espera uma decisão sua"; **há pacote exportado sem verificação no destino** → importar na engine e conferir lá é com o usuário; **nada depende do usuário** → aí sim, os passos do produto estão concluídos. O caso concreto que motivou a regra: um run interrompido carregado deixa o passo 8 como decisão humana e o roteiro sem passo atual — dizer "todos concluídos" ali seria falso.
@@ -313,7 +345,7 @@ As decisões humanas aparecem com **título e motivo** no próprio aviso, sem pr
 
 A derivação mora em `shared/ui/journey.mjs` — lógica pura, sem React e sem módulo do Node — e a interface importa de lá: navegador, testes em Node e qualquer consumidor futuro (CLI, processo principal) calculam o roteiro no **mesmo** lugar, sem segunda versão que possa divergir. Junto sai `journeyProgress(steps)`, o resumo que o painel mostra (`total`, `done`, `percent`, `next` e `humanDecisions`), para que a contagem exibida e a conferida nos testes sejam o mesmo cálculo. Dois detalhes que vieram dessa mudança: sem pasta aberta existe **um único** passo atual (abrir o projeto), em vez de dois apontando ao mesmo tempo; e o passo de comparar concluído diz que o Comparison Lab mede e a escolha é do usuário.
 
-Importar na engine **não é passo do produto** e não aparece como concluído: quando o pacote existe e `verifiedOnDestination` é `false`, o roteiro diz que o pacote confere com o perfil publicado do destino e que importar e conferir lá é com o usuário. Da mesma forma, passos que exigem instalação ou autorização aparecem com o ícone de decisão humana e o texto do que só o usuário pode fazer — o produto não instala, não compra e não autoriza nada por conta própria.
+Importar na engine **não é passo do produto** e não aparece como concluído: quando o pacote existe e `verifiedOnDestination` é `false`, o roteiro diz que o pacote confere com o perfil publicado do destino e que importar e conferir lá é com o usuário. O que o produto confere por conta própria — e mostra — é a composição do pacote e a compatibilidade com o perfil publicado: se o destino recusar um arquivo, o passo 11 vira decisão humana em vez de aparecer como concluído. Da mesma forma, passos que exigem instalação ou autorização aparecem com o ícone de decisão humana e o texto do que só o usuário pode fazer — o produto não instala, não compra e não autoriza nada por conta própria.
 
 ### O que foi executado de verdade
 
@@ -370,16 +402,16 @@ Escopar o passo 12 ao run em foco trouxe uma regressão, corrigida em seguida e 
 O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 
 - `tests/ipc-coherence-smoke.cjs` (**novo**): coerência estática entre cliente, preload e processo principal (30 métodos/30 canais), guard de IPC em todos os handlers do Studio, paridade de transporte com o HTTP e janela endurecida (§5).
-- `tests/journey-smoke.mjs` (**novo**, 114 checagens): a jornada de 12 passos percorrida de ponta a ponta com o serviço real, com o roteiro derivado a cada parada e a honestidade verificada removendo uma evidência por vez; run falho e run cancelado produzidos de verdade; derivação com o resumo do `overview()` (a forma que a página usa); e coerência entre o *Retomar* oferecido e os estados que `resumeRun` aceita, medida sobre os runs reais do projeto (§10 e §8).
+- `tests/journey-smoke.mjs` (**novo**, 123 checagens): a jornada de 12 passos percorrida de ponta a ponta com o serviço real, com o roteiro derivado a cada parada e a honestidade verificada removendo uma evidência por vez; run falho e run cancelado produzidos de verdade; derivação com o resumo do `overview()` (a forma que a página usa); coerência entre o *Retomar* oferecido e os estados que `resumeRun` aceita, medida sobre os runs reais do projeto; e pacote de exportação compatível, com a composição no passo 11 e o pacote recusado pelo destino virando decisão humana (§10, §8 e §4).
 - `tests/project-structure-smoke.mjs` (**novo**): leitura que não escreve, criação limitada a `input/` e `.lia-forge/runs/`, `.spriteforge/assets.json`, `.lia.json` e um arquivo do usuário preservados byte a byte, `projectInfo()` coerente com o disco e raízes inválidas (arquivo, symlink, caminho vazio) recusadas — com verificação de que nada foi criado fora do caminho informado (§9).
 - `tests/run-lifecycle-smoke.mjs` (**novo**): progresso gravado antes do fim do run, cancelamento com o processo externo encerrado de verdade, cancelar duas vezes sem reescrever nada, retomada por checkpoint sem reexecutar passo concluído, falha intermediária com código de saída e stderr preservados, retomada depois da falha, retomada de run **interrompido** com plano e checkpoints reais (`interrupted: true`, `checkpointsReused >= 1`, resultado `succeeded`), run sem plano gravado que não oferece retomada, run órfão corrigido sem fingir execução, coerência botão × serviço em toda a lista e recusas nomeadas (§8).
 - `tests/tool-stubs.mjs` (**novo**): os substitutos de ferramenta externa (renderizador, lento e falho) reunidos num módulo só, usados pelo smoke de ciclo de vida e pelo de integração — sem duplicar código e sempre rotulados como substitutos.
 - `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em cenários reais e renderizado (inclusive com `overview.assets`, a forma que a página passa), itens reais da lista de runs nos cinco estados — concluído, bloqueado, interrompido com plano, interrompido sem plano e cancelado depois de `cancelRun` (§10 e §8); prévia de VFX buscada pela API e renderizada com os números medidos, o aviso de prévia vencida e a ausência de imagem quando nada foi gerado (§7) e a nota do plano sobre ferramenta instalada que não serve ao passo (§6); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
 - `tests/studio-service-smoke.mjs` (estendido): seção 11 com medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada a `input/` e Comparison Lab com caminho recusado (§7); passo opcional que produz prévia, passo opcional com erro que vira skip e brief como entrada de texto do passo de conceito.
 - `tests/host-integration-smoke.mjs` (**novo** nesta fase): integração real com processo externo e ComfyUI em loopback, providers, recusas, gates e a descoberta que diz a origem do executável sem afirmar versão não medida (§6).
-- `tests/workflow-coverage-smoke.mjs` (**novo** nesta fase): 11 casos sobre os 8 workflows, com a matriz de evidência impressa (§3).
+- `tests/workflow-coverage-smoke.mjs` (**novo** nesta fase): 11 casos sobre os 8 workflows, com a matriz de evidência impressa (§3); o pacote gravado pelo run leva os metadados e `droppedArtifacts` continua vazio (§4).
 - `tests/orchestrator-engine-smoke.mjs` (estendido): entradas pendentes, `pendingInputs`, bloqueio nomeado por passo e a regressão de seleção com Blender **e** adapters internos prontos (atlas 2D e retexture no renderer interno com motivo no plano; render/atlas 3D e animações do contrato humanoide no Blender; `select` sem contexto inalterado).
-- `tests/preflight-destinations-smoke.mjs` (estendido): conformidade do pacote com o perfil publicado do destino.
+- `tests/preflight-destinations-smoke.mjs` (estendido): conformidade do pacote com o perfil publicado do destino; metadado reconhecido pelo formato mesmo com `role` de passo (`summary` contado, `sourceRole` preservado), asset em formato recusado ainda bloqueando e `glb`→`fbx` ainda como conversão (§4).
 - `tests/adapter-sdk-smoke.mjs` (estendido): caminho de executável inválido não vira ferramenta disponível; contrato do hook `canHandle` (recusa de não-função, veredictos de Blender e renderer 2D por capacidade/origem, adapters sem hook inalterados).
 
 ## 12. O que **não** foi executado (e o que seria necessário)
@@ -436,6 +468,8 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 | `4941892` | correção da quebra ao escopar o passo 12 (`versions` como contagem no overview) + `versionRunIds` (§10) |
 | `31214b4` | documentação da coerência botão × serviço e dos cinco estados no roteiro (§8, §10) |
 | `153f3a8` | prévia de VFX na interface e regra única de retomada no rodapé do run (§7, §8) |
+| `98788ea` | documentação da prévia de VFX e da regra única de retomada (§7, §8) |
+| `a58eb26` | metadado classificado por formato, pacote completo, compatibilidade visível (§4, §10) |
 | `47965f4` | run falho e cancelado no roteiro (revisão como decisão humana, "guardar" escopado ao run) |
 
 ## 14. Pendências que exigem decisão humana
