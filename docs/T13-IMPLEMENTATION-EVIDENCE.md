@@ -71,6 +71,31 @@ Reforços desta fase:
 - `reviewStep` repassa a origem do run gravada em `plan.json` (`fromRun`, `sourceImage`, opções): retomar não perde mais o contexto que só existia na primeira execução;
 - `needsAuthorization` deixou de ser derivado de `protectedActions` (que lista o que o adapter **se recusa** a fazer): adapters locais não geram mais pendências falsas de autorização no plano.
 
+### Revisão humana: a decisão gravada é proveniência (e aparece na tela)
+
+Medido com o serviço real, num run 2D parado no gate de revisão:
+
+```
+rejeitar   → reviews.json {"decompose":{"approved":false,"note":"braço colado no torso","reviewer":"agente",…}}
+reaprovar  → reviews.json {"decompose":{"approved":true,"note":"corrigido, pode seguir","reviewer":"agente",…}}
+```
+
+A rejeição era **sobrescrita**: depois de reaprovar, o run ficava com exatamente a mesma cara de um run aprovado de primeira — nenhum evento, nenhum log, nenhum gate registrando que uma pessoa olhou aquele conteúdo e recusou. E a nota da rejeição é justamente o que diz o que estava errado. Na outra ponta, a aprovação também não aparecia: quando a retomada reaproveita o passo do checkpoint, o snapshot novo vem sem o campo `review`, então o ramo "Aprovado por … em …" que a interface já tinha nunca era alcançado. Na prática, quem aprovou o quê, quando e com que nota não estava em lugar nenhum da tela.
+
+- `reviewStep` preserva o histórico: `reviews.json[passo]` continua trazendo a decisão atual — é o que o gate lê, sem mudança de formato — e ganha `history[]` com as decisões substituídas (hash, autoria, data, nota, com segredos redigidos como sempre).
+- `readRun` junta as decisões gravadas ao snapshot: passo revisado vem com `review.status` (`approved`/`rejected`), `reviewedBy`, `reviewedAt`, `note`, `history` e `matchesArtifact` (a decisão vale para o conteúdo atual do passo?). **O snapshot em disco não muda**: a junção é feita na leitura, sem migração e sem duplicar estado gravado.
+- Precedência honesta: um gate pendente **agora** vale mais do que a decisão gravada antes. Passo que voltou a esperar revisão (o artefato mudou, por exemplo) não aparece como aprovado; a decisão antiga vai em `review.recorded`, e quando o SHA-256 não bate a interface diz que aquela aprovação vale para outro conteúdo — o mesmo princípio do gate `review-invalidated`, agora visível.
+- Interface: a linha do passo mostra aprovação ou rejeição com autoria, data e nota, lista as decisões substituídas e avisa quando a aprovação registrada não vale mais para o conteúdo atual; `timelineFor()` (exportada para os smokes) põe as decisões na aba **Logs**, incluindo as substituídas, marcadas como tais.
+
+| Verificação | Resultado medido |
+|---|---|
+| Rejeitar um passo no gate | `resumed: false`, run continua `blocked`, `reviews.json` com `approved: false` + SHA-256 do artefato + nota do revisor |
+| Ler o run depois de rejeitar | o passo continua `review-missing` (gate pendente vence) e traz `review.recorded.approved: false` com a nota |
+| Reaprovar o mesmo passo | `resumed: true`, o run segue até o próximo gate; `readRun` devolve `review.status: 'approved'`, `reviewedBy: 'smoke-test'`, `matchesArtifact: true` e `history` com a rejeição anterior e a nota dela |
+| Passo seguinte, nunca revisado | continua `review-missing` **sem** `recorded`: nenhuma decisão é inventada para ele |
+| `run.json` no disco | não contém `reviews` nem `review` derivado: a junção é só na leitura |
+| Aba Logs | `timelineFor` produz uma entrada `review` (aprovação com autoria) e uma `review-history` (rejeição substituída), ordenadas por data |
+
 ### Transporte IPC: coerência entre os três lados e guard por canal
 
 O Studio fala com o **mesmo** `createStudioService` por dois transportes (HTTP no navegador/preview, IPC no desktop), e o transporte IPC depende de três arquivos combinarem: `src/lia-forge-api.js` (quem chama), `electron/preload.cjs` (o que é exposto) e `electron/main.cjs` (o que responde). Um método esquecido em um deles não aparece em nenhum teste de serviço — só quebraria no aplicativo empacotado, que é justamente o que não se executa aqui. `tests/ipc-coherence-smoke.cjs` (**novo**, 58 checagens por análise estática, sem abrir janela nem exigir Electron instalado) fecha essa lacuna:
@@ -406,8 +431,8 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 - `tests/project-structure-smoke.mjs` (**novo**): leitura que não escreve, criação limitada a `input/` e `.lia-forge/runs/`, `.spriteforge/assets.json`, `.lia.json` e um arquivo do usuário preservados byte a byte, `projectInfo()` coerente com o disco e raízes inválidas (arquivo, symlink, caminho vazio) recusadas — com verificação de que nada foi criado fora do caminho informado (§9).
 - `tests/run-lifecycle-smoke.mjs` (**novo**): progresso gravado antes do fim do run, cancelamento com o processo externo encerrado de verdade, cancelar duas vezes sem reescrever nada, retomada por checkpoint sem reexecutar passo concluído, falha intermediária com código de saída e stderr preservados, retomada depois da falha, retomada de run **interrompido** com plano e checkpoints reais (`interrupted: true`, `checkpointsReused >= 1`, resultado `succeeded`), run sem plano gravado que não oferece retomada, run órfão corrigido sem fingir execução, coerência botão × serviço em toda a lista e recusas nomeadas (§8).
 - `tests/tool-stubs.mjs` (**novo**): os substitutos de ferramenta externa (renderizador, lento e falho) reunidos num módulo só, usados pelo smoke de ciclo de vida e pelo de integração — sem duplicar código e sempre rotulados como substitutos.
-- `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em cenários reais e renderizado (inclusive com `overview.assets`, a forma que a página passa), itens reais da lista de runs nos cinco estados — concluído, bloqueado, interrompido com plano, interrompido sem plano e cancelado depois de `cancelRun` (§10 e §8); prévia de VFX buscada pela API e renderizada com os números medidos, o aviso de prévia vencida e a ausência de imagem quando nada foi gerado (§7) e a nota do plano sobre ferramenta instalada que não serve ao passo (§6); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
-- `tests/studio-service-smoke.mjs` (estendido): seção 11 com medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada a `input/` e Comparison Lab com caminho recusado (§7); passo opcional que produz prévia, passo opcional com erro que vira skip e brief como entrada de texto do passo de conceito.
+- `tests/studio-ui-render-smoke.mjs` (estendido): roteiro de 12 passos derivado em cenários reais e renderizado (inclusive com `overview.assets`, a forma que a página passa), itens reais da lista de runs nos cinco estados — concluído, bloqueado, interrompido com plano, interrompido sem plano e cancelado depois de `cancelRun` (§10 e §8); prévia de VFX buscada pela API e renderizada com os números medidos, o aviso de prévia vencida e a ausência de imagem quando nada foi gerado (§7); revisão humana pelo transporte HTTP — rejeição, reaprovação, histórico na linha do passo e decisões na timeline (§5) e a nota do plano sobre ferramenta instalada que não serve ao passo (§6); projeto por `GET /project`, `405` em `POST` e `ProjectPanel` nos dois transportes (§9); `GET /runs/active` e `POST /runs/{id}/cancel|resume` (§8); envio de arquivo por HTTP com `400`/`403`, prévia servida, comparação de artefatos, escolha gravada como versão do asset e `InputPicker`/`ComparisonLab` renderizados (§7); rig entre runs pela API, entradas pendentes, validações e o painel de providers na UI (§6).
+- `tests/studio-service-smoke.mjs` (estendido): rejeição que mantém o gate pendente com a decisão visível, reaprovação com histórico/autoria/`matchesArtifact`, passo seguinte sem decisão inventada e `run.json` sem estado derivado (§5); seção 11 com medição de entradas, sanitização de nome, colisão que ignora caixa, recusas de formato/conteúdo/teto, leitura confinada a `input/` e Comparison Lab com caminho recusado (§7); passo opcional que produz prévia, passo opcional com erro que vira skip e brief como entrada de texto do passo de conceito.
 - `tests/host-integration-smoke.mjs` (**novo** nesta fase): integração real com processo externo e ComfyUI em loopback, providers, recusas, gates e a descoberta que diz a origem do executável sem afirmar versão não medida (§6).
 - `tests/workflow-coverage-smoke.mjs` (**novo** nesta fase): 11 casos sobre os 8 workflows, com a matriz de evidência impressa (§3); o pacote gravado pelo run leva os metadados e `droppedArtifacts` continua vazio (§4).
 - `tests/orchestrator-engine-smoke.mjs` (estendido): entradas pendentes, `pendingInputs`, bloqueio nomeado por passo e a regressão de seleção com Blender **e** adapters internos prontos (atlas 2D e retexture no renderer interno com motivo no plano; render/atlas 3D e animações do contrato humanoide no Blender; `select` sem contexto inalterado).
@@ -470,6 +495,8 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 | `153f3a8` | prévia de VFX na interface e regra única de retomada no rodapé do run (§7, §8) |
 | `98788ea` | documentação da prévia de VFX e da regra única de retomada (§7, §8) |
 | `a58eb26` | metadado classificado por formato, pacote completo, compatibilidade visível (§4, §10) |
+| `5b0ec51` | documentação da classificação de metadado e da compatibilidade medida (§4, §10) |
+| `1ec516a` | histórico de revisões humanas, decisões juntadas na leitura e visíveis na interface (§5) |
 | `47965f4` | run falho e cancelado no roteiro (revisão como decisão humana, "guardar" escopado ao run) |
 
 ## 14. Pendências que exigem decisão humana
