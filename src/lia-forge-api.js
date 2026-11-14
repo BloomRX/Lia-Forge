@@ -15,15 +15,103 @@
 
 const PREFIX = '/api/lia-forge/studio';
 
+/**
+ * Token da sessão HTTP (P0 de segurança).
+ *
+ * No Electron o transporte é o IPC e não há token: a autoria vem do canal
+ * verificado. No navegador/preview o token é buscado uma vez no módulo que o
+ * próprio servidor gera (`/@lia-forge/session-token.js`) e enviado no header
+ * `x-lia-forge-token` em toda operação que muda estado. Se o módulo não existir
+ * (servidor antigo, ou Electron), a chamada segue sem token e o servidor decide.
+ */
+const TOKEN_MODULE = '/@lia-forge/session-token.js';
+const TOKEN_HEADER = 'x-lia-forge-token';
+let sessionTokenPromise = null;
+
+/**
+ * `Origin` da própria página.
+ *
+ * O navegador envia este header sozinho em toda requisição same-origin; quem
+ * executa o cliente fora dele (Node em teste, script de integração) não envia, e
+ * o servidor exige `Origin` em operação que muda estado — sem ele a requisição é
+ * indistinguível de uma forjada. Completar o header aqui não enfraquece a regra:
+ * o valor vem de `window.location`, ou seja, da página que o servidor mesmo
+ * serviu, e um site de terceiros não consegue fazê-lo apontar para outro lugar
+ * (o navegador não permite sobrescrever `Origin`).
+ */
+function pageOrigin() {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.location?.origin ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function sessionToken() {
+  if (typeof window === 'undefined') return Promise.resolve(null);
+  if (!sessionTokenPromise) {
+    // `import()` relativo funciona no navegador; em SSR (Node) o módulo é
+    // resolvido pelo pipeline do bundler quando o hospedeiro oferece esse gancho.
+    const loader = typeof window.__liaForgeImport === 'function'
+      ? window.__liaForgeImport(TOKEN_MODULE)
+      : import(/* @vite-ignore */ TOKEN_MODULE);
+    sessionTokenPromise = Promise.resolve(loader)
+      .then((module) => (typeof module?.sessionToken === 'string' ? module.sessionToken : null))
+      .catch(() => null);
+  }
+  return sessionTokenPromise;
+}
+
 function bridge() {
   if (typeof window === 'undefined') return null;
   return window.liaForge?.studio ?? null;
 }
 
+/**
+ * Operação exclusiva do IPC.
+ *
+ * Consulta o servidor e, se ele recusar com `IPC_ONLY_OPERATION`, devolve um
+ * resultado explicável (`{ ipcOnly: true, ok: false, reason }`) em vez de lançar.
+ * Devolve `null` quando o servidor **não** recusou — aí o chamador faz a chamada
+ * normal. Um servidor antigo, que ainda aceite a rota, continua funcionando: a
+ * restrição é do servidor, e o cliente só a explica.
+ */
+async function requestIpcOnly(route, { method = 'POST', body = null } = {}) {
+  try {
+    const token = await sessionToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers[TOKEN_HEADER] = token;
+    const origin = pageOrigin();
+    if (origin && origin !== 'null') headers.Origin = origin;
+    const response = await fetch(`${PREFIX}${route}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (response.status !== 403) return null;
+    const payload = await response.json().catch(() => ({}));
+    if (payload?.code !== 'IPC_ONLY_OPERATION') return null;
+    return Object.freeze({
+      ipcOnly: true,
+      ok: false,
+      reason: String(payload.error ?? 'Esta operação só pode ser feita no aplicativo desktop.'),
+    });
+  } catch {
+    return null;
+  }
+}
+
 async function request(route, { method = 'GET', body = null } = {}) {
+  const token = await sessionToken();
+  const headers = {};
+  if (body) headers['Content-Type'] = 'application/json';
+  if (token) headers[TOKEN_HEADER] = token;
+  const origin = pageOrigin();
+  if (origin && origin !== 'null') headers.Origin = origin;
   const response = await fetch(`${PREFIX}${route}`, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers: Object.keys(headers).length ? headers : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await response.text();
@@ -175,9 +263,21 @@ export const liaForgeApi = {
    * Altera um provider. Segredos são recusados pelo serviço (nunca gravados);
    * endpoint remoto exige `authorization.granted` vindo de decisão humana.
    */
+  /**
+   * Configura um provider (modo, caminho do executável, endpoint, checkpoint).
+   *
+   * **Só no aplicativo desktop.** Pelo transporte HTTP o servidor recusa com
+   * `IPC_ONLY_OPERATION`: gravar caminho de executável é o equivalente a dizer
+   * "rode este binário", e o produto não aceita essa decisão de uma requisição
+   * que não vem do canal verificado do Electron. O cliente devolve
+   * `{ ipcOnly: true, ok: false, reason }` para a interface explicar em vez de
+   * lançar erro cru.
+   */
   async configureProvider(payload) {
     const ipc = bridge();
     if (ipc) return ipc.configureProvider(payload);
+    const refusal = await requestIpcOnly('/providers', { method: 'POST', body: payload });
+    if (refusal) return refusal;
     return request('/providers', { method: 'POST', body: payload });
   },
 
@@ -236,10 +336,21 @@ export const liaForgeApi = {
     return request(`/runs/${encodeURIComponent(runId)}/resume`, { method: 'POST', body: { reason } });
   },
 
+  /**
+   * Registra a decisão humana sobre um passo.
+   *
+   * **Só no aplicativo desktop.** A revisão é proveniência: diz quem aprovou qual
+   * artefato (SHA-256) e quando. Por HTTP a autoria viria do corpo da requisição —
+   * qualquer script local assinaria no lugar da pessoa — então o servidor recusa e
+   * o cliente devolve `{ ipcOnly: true, ok: false, reason }`.
+   */
   async reviewStep(runId, { stepId, approved, reviewer = null, note = null }) {
     const ipc = bridge();
     if (ipc) return ipc.reviewStep({ runId, stepId, approved, reviewer, note });
-    return request(`/runs/${encodeURIComponent(runId)}/review`, {
+    const route = `/runs/${encodeURIComponent(runId)}/review`;
+    const refusal = await requestIpcOnly(route, { method: 'POST', body: { stepId, approved, reviewer, note } });
+    if (refusal) return refusal;
+    return request(route, {
       method: 'POST',
       body: { stepId, approved, reviewer, note },
     });

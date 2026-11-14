@@ -66,8 +66,57 @@ const origin = `http://127.0.0.1:${httpServer.address().port}`;
 const nativeFetch = globalThis.fetch;
 globalThis.fetch = (input, init) => nativeFetch(typeof input === 'string' && input.startsWith('/') ? `${origin}${input}` : input, init);
 
+/**
+ * Operações que mudam estado exigem o token da sessão (P0 de superfície HTTP).
+ * O navegador o obtém importando `/@lia-forge/session-token.js`, que o próprio
+ * servidor gera; em Node o import dinâmico não existe, então o teste busca o
+ * módulo e injeta o header — exatamente o que o cliente faria se rodasse num
+ * navegador. `window` é definido antes de carregar `/src/lia-forge-api.js`.
+ */
+const tokenModule = await nativeFetch(`${origin}/@lia-forge/session-token.js`, { headers: { 'sec-fetch-site': 'same-origin' } });
+assert.equal(tokenModule.status, 200, 'o servidor entrega o token da sessão como módulo same-origin');
+const sessionToken = /export const sessionToken = "([^"]+)"/.exec(await tokenModule.text())?.[1] ?? null;
+assert.ok(sessionToken && sessionToken.length >= 32, 'token de sessão com entropia suficiente');
+// `window.location.origin` é o que o cliente usa para completar o header Origin
+// quando roda fora do navegador (o navegador o envia sozinho).
+globalThis.window = {
+  location: { origin },
+  // O SSR deste teste não monta `#root` nem carrega `/src/main.jsx`; o import do
+  // módulo de token é resolvido pelo pipeline do Vite, como faria o navegador.
+  __liaForgeImport: (specifier) => vite.ssrLoadModule(specifier),
+};
+const authHeaders = Object.freeze({ origin, 'x-lia-forge-token': sessionToken });
+
+/**
+ * Revisão humana pelo canal que a oferece: o IPC.
+ *
+ * Por HTTP o servidor recusa (`IPC_ONLY_OPERATION`), porque a autoria da decisão
+ * tem de vir de um canal verificado — não do corpo de uma requisição que qualquer
+ * processo local pode forjar. O teste chama o mesmo `createStudioService` que o
+ * handler `lia-forge:studio:run:review` do Electron chama, com os mesmos
+ * argumentos; a diferença de transporte é exatamente o que está sendo protegido.
+ * E afirma as duas pontas: que o cliente HTTP devolve a recusa explicável e que o
+ * serviço registra a decisão.
+ */
+let reviewServicePromise = null;
+let studioClient = null;
+async function reviewThroughIpc(runId, payload, client = studioClient) {
+  const viaHttp = await client.reviewStep(runId, payload);
+  assert.equal(viaHttp?.ipcOnly, true, 'revisão por HTTP é recusada e o cliente explica (não lança)');
+  assert.equal(viaHttp?.ok, false, 'e não finge que registrou');
+  if (!reviewServicePromise) {
+    reviewServicePromise = import('../shared/services/studio-service.mjs')
+      .then((module) => module.createStudioService({ projectRoot }));
+  }
+  const ipcService = await reviewServicePromise;
+  return ipcService.reviewStep({ runId, ...payload });
+}
+
 try {
   const { liaForgeApi } = await vite.ssrLoadModule('/src/lia-forge-api.js');
+  // O helper de revisão (definido acima, fora do bloco) precisa do cliente
+  // carregado pelo Vite — o mesmo que o restante do teste usa.
+  studioClient = liaForgeApi;
   assert.equal(liaForgeApi.transport, 'http', 'fora do Electron o transporte é HTTP');
 
   // ------------------------------------------------------- 1. visão geral
@@ -131,7 +180,7 @@ try {
   for (let iteration = 0; iteration < 8; iteration += 1) {
     const pending = snapshot.steps.find((step) => step.state === 'blocked' && step.review?.status === 'review-missing');
     if (!pending) break;
-    const reviewed = await liaForgeApi.reviewStep(runId, {
+    const reviewed = await reviewThroughIpc(runId, {
       stepId: pending.id,
       approved: true,
       reviewer: 'smoke-ui',
@@ -194,7 +243,7 @@ try {
   for (let iteration = 0; iteration < 6; iteration += 1) {
     const pending = animationSnapshot.steps.find((step) => step.state === 'blocked' && step.review?.status === 'review-missing');
     if (!pending) break;
-    const reviewed = await liaForgeApi.reviewStep(animation.runId, { stepId: pending.id, approved: true, reviewer: 'smoke-ui', note: 'ações conferidas' });
+    const reviewed = await reviewThroughIpc(animation.runId, { stepId: pending.id, approved: true, reviewer: 'smoke-ui', note: 'ações conferidas' });
     assert.equal(reviewed.resumed, true, 'aprovar as ações retoma o run de animação');
     animationSnapshot = reviewed.result;
   }
@@ -302,28 +351,41 @@ try {
   assert.match(providers.blender.detail, /não é instalado automaticamente/, 'a interface diz que nada é instalado automaticamente');
   assert.match(providers.note, /Nenhuma ferramenta foi instalada/, 'a nota de provider repete a garantia');
 
-  const secretRefusal = await nativeFetch(`${origin}/api/lia-forge/studio/providers`, {
+  // Configurar provider é operação exclusiva do IPC (P0 de superfície HTTP):
+  // gravar caminho de executável por requisição anônima era o caminho mais curto
+  // para execução de código arbitrário. O servidor recusa com 403 nomeado, e o
+  // cliente devolve um resultado explicável em vez de lançar.
+  const providersRefusal = await nativeFetch(`${origin}/api/lia-forge/studio/providers`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: 'comfyui', token: 'segredo-nunca-gravado' }),
+    headers: { ...authHeaders },
+    body: JSON.stringify({ id: 'blender', mode: 'path', executable: path.join(os.tmpdir(), 'blender-falso') }),
   });
-  assert.equal(secretRefusal.status, 400, 'segredo enviado pela UI é recusado com 400');
-  assert.match(await secretRefusal.text(), /segredo/i, 'a recusa explica por quê');
+  assert.equal(providersRefusal.status, 403, 'POST /providers é recusado mesmo com Origin e token válidos');
+  const providersRefusalBody = await providersRefusal.json();
+  assert.equal(providersRefusalBody.code, 'IPC_ONLY_OPERATION', 'a recusa é nomeada: operação exclusiva do IPC');
+  assert.match(providersRefusalBody.error, /app desktop/i, 'a recusa diz onde a operação pode ser feita');
 
-  const remoteRefusal = await nativeFetch(`${origin}/api/lia-forge/studio/providers`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: 'comfyui', mode: 'local-loopback', endpoint: 'http://10.9.8.7:8188' }),
-  });
-  assert.equal(remoteRefusal.status, 400, 'modo local com endpoint de outra máquina é recusado');
+  const secretRefusal = await liaForgeApi.configureProvider({ id: 'comfyui', token: 'segredo-nunca-gravado' });
+  assert.equal(secretRefusal.ipcOnly, true, 'o cliente traduz a recusa em resultado explicável (não lança)');
+  assert.equal(secretRefusal.ok, false, 'e diz que a operação não aconteceu');
 
   const configured = await liaForgeApi.configureProvider({ id: 'blender', mode: 'path', executable: path.join(os.tmpdir(), 'blender-que-nao-existe') });
-  assert.equal(configured.providers.blender.available, false, 'caminho inexistente não vira ferramenta disponível');
-  assert.match(configured.providers.blender.detail, /não existe ou não é executável/, 'o motivo do caminho inválido aparece na UI');
-  const storedProviders = JSON.parse(await fs.readFile(path.join(projectRoot, '.lia-forge', 'providers.json'), 'utf8'));
-  assert.equal(storedProviders.providers.blender.mode, 'path', 'a escolha fica gravada no projeto');
-  assert.ok(!JSON.stringify(storedProviders).includes('segredo-nunca-gravado'), 'nenhum segredo foi gravado em .lia-forge/providers.json');
-  await liaForgeApi.configureProvider({ id: 'blender', mode: 'auto', executable: null });
+  assert.equal(configured.ipcOnly, true, 'nenhum executável é configurável pelo transporte HTTP');
+
+  const providersFile = await fs.readFile(path.join(projectRoot, '.lia-forge', 'providers.json'), 'utf8').catch(() => null);
+  assert.ok(providersFile === null || !providersFile.includes('blender-falso'), 'nada foi gravado em .lia-forge/providers.json');
+  assert.ok(providersFile === null || !providersFile.includes('segredo-nunca-gravado'), 'nenhum segredo foi gravado em .lia-forge/providers.json');
+
+  // A validação de provider (segredo, endpoint fora de loopback) continua testada
+  // onde ela vive: no serviço, que é o mesmo para os dois transportes.
+  const { createStudioService } = await import('../shared/services/studio-service.mjs');
+  const providerService = createStudioService({ projectRoot });
+  await assert.rejects(
+    () => providerService.configureProvider({ id: 'comfyui', token: 'segredo-nunca-gravado' }),
+    /segredo/i, 'segredo enviado pela UI é recusado pelo serviço');
+  await assert.rejects(
+    () => providerService.configureProvider({ id: 'comfyui', mode: 'local-loopback', endpoint: 'http://10.9.8.7:8188' }),
+    /loopback|127\.0\.0\.1|localhost/i, 'modo local com endpoint de outra máquina é recusado');
 
   const { ProvidersPanel } = await vite.ssrLoadModule('/src/ForgeStudio.jsx');
   const providerMarkup = renderToStaticMarkup(createElement(ProvidersPanel, { providers, busy: null, onConfigure: () => {} }));
@@ -350,16 +412,22 @@ try {
 
   const badExtension = await nativeFetch(`${origin}/api/lia-forge/studio/inputs`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
     body: JSON.stringify({ filename: 'payload.exe', base64: Buffer.from('MZ').toString('base64') }),
   });
   assert.equal(badExtension.status, 400, 'formato não aceito é recusado com 400');
   const badContent = await nativeFetch(`${origin}/api/lia-forge/studio/inputs`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
     body: JSON.stringify({ filename: 'falso.png', base64: Buffer.from('isto não é um png').toString('base64') }),
   });
   assert.equal(badContent.status, 400, 'PNG inválido é recusado com 400');
+  const uploadWithoutToken = await nativeFetch(`${origin}/api/lia-forge/studio/inputs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', origin },
+    body: JSON.stringify({ filename: 'sem-token.png', base64: Buffer.from('x').toString('base64') }),
+  });
+  assert.equal(uploadWithoutToken.status, 401, 'upload sem o token da sessão é recusado antes de chegar ao serviço');
 
   const servedInput = await nativeFetch(`${origin}/api/lia-forge/studio/input-file?path=${encodeURIComponent('input/sprite.png')}`);
   assert.equal(servedInput.status, 200, 'a entrada é servida para a prévia');
@@ -437,16 +505,26 @@ try {
 
   const missingCancel = await nativeFetch(`${origin}/api/lia-forge/studio/runs/run-inexistente/cancel`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
     body: JSON.stringify({ reason: 'teste' }),
   });
   assert.equal(missingCancel.status, 404, 'cancelar run inexistente devolve 404');
   const missingResume = await nativeFetch(`${origin}/api/lia-forge/studio/runs/run-inexistente/resume`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
     body: JSON.stringify({}),
   });
   assert.equal(missingResume.status, 404, 'retomar run inexistente devolve 404');
+
+  // Revisão humana também é exclusiva do IPC: a autoria vem do canal verificado,
+  // não do corpo da requisição.
+  const reviewRefusal = await nativeFetch(`${origin}/api/lia-forge/studio/runs/run-inexistente/review`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: JSON.stringify({ stepId: 'render', approved: true, reviewer: 'qualquer-um' }),
+  });
+  assert.equal(reviewRefusal.status, 403, 'POST /runs/:id/review é recusado por HTTP mesmo autenticado');
+  assert.equal((await reviewRefusal.json()).code, 'IPC_ONLY_OPERATION', 'recusa nomeada');
   const activeRoute = await nativeFetch(`${origin}/api/lia-forge/studio/runs/active`);
   assert.equal(activeRoute.status, 200, 'a rota de execuções em andamento existe no transporte HTTP');
   assert.deepEqual((await activeRoute.json()).active, [], 'sem execução em andamento neste processo');
@@ -462,8 +540,12 @@ try {
   const projectRoute = await nativeFetch(`${origin}/api/lia-forge/studio/project`);
   assert.equal(projectRoute.status, 200, 'a rota /project existe no transporte HTTP');
   assert.equal((await projectRoute.json()).root, project.root, 'a rota devolve a mesma raiz que o cliente');
-  const projectMethod = await nativeFetch(`${origin}/api/lia-forge/studio/project`, { method: 'POST' });
-  assert.equal(projectMethod.status, 405, 'criar/trocar projeto não é permitido por HTTP');
+  const projectMethod = await nativeFetch(`${origin}/api/lia-forge/studio/project`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders },
+    body: '{}',
+  });
+  assert.ok([401, 405].includes(projectMethod.status), `criar/trocar projeto não é permitido por HTTP (${projectMethod.status})`);
   assert.equal(await liaForgeApi.chooseProject({ create: true }), null, 'no navegador não há seletor de pasta: a resposta é null, não um caminho inventado');
 
   const { ProjectPanel } = await vite.ssrLoadModule('/src/ForgeStudio.jsx');
@@ -845,7 +927,7 @@ try {
   assert.ok(approvedMarkup.includes(approvedStep.review.reviewedBy ?? 'smoke-ui'), 'e diz quem aprovou');
   assert.ok(approvedMarkup.includes(String(approvedStep.review.reviewedAt ?? '')), 'e quando aprovou');
 
-  const rejected = await liaForgeApi.reviewStep(reviewRunId, {
+  const rejected = await reviewThroughIpc(reviewRunId, {
     stepId: pendingReviewStep.id,
     approved: false,
     reviewer: 'smoke-ui',
@@ -862,7 +944,7 @@ try {
   assert.ok(rejectedMarkup.includes('Aprovar e continuar') && rejectedMarkup.includes('Rejeitar e parar'),
     'as duas saídas continuam oferecidas depois da rejeição');
 
-  const reapproved = await liaForgeApi.reviewStep(reviewRunId, {
+  const reapproved = await reviewThroughIpc(reviewRunId, {
     stepId: pendingReviewStep.id,
     approved: true,
     reviewer: 'smoke-ui',
@@ -1051,7 +1133,7 @@ try {
   assert.equal(resumedBlocked.result.status, 'blocked', '…e ele para no mesmo gate: retomar não substitui a revisão');
   assert.ok(resumedBlocked.result.steps.some((step) => step.id === blockedStepId && step.state === 'blocked'),
     'o passo que esperava revisão continua esperando (a interface certa em não oferecer o botão)');
-  const unblocked = await liaForgeApi.reviewStep(blockedListed.runId, { stepId: blockedStepId, approved: true, reviewer: 'smoke-ui', note: 'a saída real do run bloqueado' });
+  const unblocked = await reviewThroughIpc(blockedListed.runId, { stepId: blockedStepId, approved: true, reviewer: 'smoke-ui', note: 'a saída real do run bloqueado' });
   assert.equal(unblocked.resumed, true, 'aprovar retoma o run a partir dos checkpoints — é essa a ação que a lista nomeia');
 
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');

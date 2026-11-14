@@ -1,3 +1,14 @@
+/**
+ * Smoke do store de workspace servido pelo Vite (`/api/spriteforge/assets`).
+ *
+ * Desde a correção P0 de superfície HTTP (ver `shared/http/api-policy.mjs` e
+ * `tests/http-api-policy-smoke.mjs`), este endpoint aplica a mesma política do
+ * Studio: `Host` fechado, `Origin` da mesma origem e **token de sessão** em
+ * escrita. Por isso o teste busca o token no módulo que o servidor gera antes de
+ * fazer PUT — e passa a afirmar que PUT sem token é recusado, que é exatamente o
+ * comportamento que faltava antes (qualquer requisição podia sobrescrever o
+ * store do projeto).
+ */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
@@ -64,14 +75,37 @@ try {
   const comfyCrossOrigin = await fetch(`http://127.0.0.1:${port}/api/lia-forge/comfyui/workflows`, { headers: { Origin: 'https://evil.example' } });
   assert.equal(comfyCrossOrigin.status, 403);
 
+  // O token da sessão é entregue pelo servidor como módulo ESM same-origin.
+  const tokenModule = await fetch(`http://127.0.0.1:${port}/@lia-forge/session-token.js`, {
+    headers: { 'sec-fetch-site': 'same-origin' },
+  });
+  assert.equal(tokenModule.status, 200);
+  const sessionToken = /export const sessionToken = "([^"]+)"/.exec(await tokenModule.text())?.[1];
+  assert.ok(sessionToken && sessionToken.length >= 32, 'servidor entrega um token de sessão');
+
   const assets = [{ id: 'test-hero', type: 'character', name: 'Test Hero', completed: [false, false, false, false, false] }];
   const saved = await fetch(url, {
     method: 'PUT',
-    headers: { Origin: `http://127.0.0.1:${port}`, 'Content-Type': 'application/json' },
+    headers: {
+      Origin: `http://127.0.0.1:${port}`,
+      'Content-Type': 'application/json',
+      'x-lia-forge-token': sessionToken,
+    },
     body: JSON.stringify({ assets }),
   });
   assert.equal(saved.status, 200);
   assert.equal((await saved.json()).ok, true);
+
+  // Escrita sem token não pode mais sobrescrever o store do projeto.
+  const savedWithoutToken = await fetch(url, {
+    method: 'PUT',
+    headers: { Origin: `http://127.0.0.1:${port}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assets: [] }),
+  });
+  assert.equal(savedWithoutToken.status, 401);
+  assert.equal((await savedWithoutToken.json()).code, 'TOKEN_REQUIRED');
+  assert.deepEqual((await (await fetch(url, { headers: { Origin: `http://127.0.0.1:${port}` } })).json()).assets, assets,
+    'a escrita recusada não apagou os assets gravados');
 
   const loaded = await fetch(url, { headers: { Origin: `http://127.0.0.1:${port}` } });
   assert.deepEqual((await loaded.json()).assets, assets);
@@ -87,11 +121,17 @@ try {
       const storeFile = path.join(temporaryRoot, '.spriteforge', 'assets.json');
       await fs.rename(storeFile, `${storeFile}.saved`);
       await fs.symlink(outsideFile, storeFile);
-      const symlinkRead = await fetch(url);
+      const symlinkRead = await fetch(url, { headers: { Origin: `http://127.0.0.1:${port}` } });
       assert.equal(symlinkRead.status, 500);
+      // Com token válido (e sem Origin, que o symlink é o alvo da asserção): a
+      // escrita tem de falhar pelo confinamento de caminho, não pela política.
       const symlinkWrite = await fetch(url, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          Origin: `http://127.0.0.1:${port}`,
+          'Content-Type': 'application/json',
+          'x-lia-forge-token': sessionToken,
+        },
         body: JSON.stringify({ assets }),
       });
       assert.equal(symlinkWrite.status, 400);

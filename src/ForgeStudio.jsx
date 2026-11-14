@@ -1571,6 +1571,13 @@ export default function ForgeStudio({ onNotify = () => {} }) {
 
   const handleConfigureProvider = (payload) => runAction('provider', async () => {
     const result = await liaForgeApi.configureProvider(payload);
+    // Configurar provider (caminho de executável, endpoint) é decisão do app
+    // desktop: no navegador/preview o servidor recusa e a interface diz o que
+    // fazer, em vez de mostrar erro cru ou fingir que gravou.
+    if (result?.ipcOnly) {
+      notify(result.reason ?? 'Configurar provider só é possível no aplicativo desktop.', 'info');
+      return result;
+    }
     setProviders(result?.providers ?? null);
     // O estado das ferramentas depende da configuração: relê o panorama inteiro
     // para que nenhum painel continue mostrando o mundo antigo.
@@ -1599,6 +1606,13 @@ export default function ForgeStudio({ onNotify = () => {} }) {
 
   const handleReview = (stepId, approved) => runAction('review', async () => {
     const result = await liaForgeApi.reviewStep(run.runId, { stepId, approved, reviewer: 'usuário do Studio', note: reviewNote.trim() || null });
+    // Aprovar/rejeitar é proveniência com autoria: só o canal verificado do app
+    // desktop pode registrá-la. No preview a decisão não é gravada e a interface
+    // explica por quê (nada de revisão anônima assinada por script local).
+    if (result?.ipcOnly) {
+      notify(result.reason ?? 'A revisão humana é registrada no aplicativo desktop.', 'info');
+      return result;
+    }
     setReviewNote('');
     if (result?.resumed && result.result) {
       setRun(result.result);

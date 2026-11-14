@@ -4,8 +4,25 @@ import path from 'node:path';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { getComfyUiStatus, listComfyUiWorkflows, readComfyUiWorkflow } from './scripts/comfyui-client.mjs';
+import {
+  TOKEN_HEADER,
+  TOKEN_MODULE_ROUTE,
+  createHttpApiPolicy,
+  resolveBindHost,
+  viteAllowedHosts,
+} from './shared/http/api-policy.mjs';
 
 const MAX_STORE_BYTES = 24 * 1024 * 1024;
+
+/**
+ * Política de segurança da superfície HTTP (P0-1 da revisão integrada).
+ *
+ * Uma instância por processo do dev-server: o token vale enquanto este processo
+ * existir e é o mesmo para os três plugins. O bind é loopback por padrão; a
+ * lista de hosts é fechada (nunca `allowedHosts: true`).
+ */
+const HTTP_POLICY = createHttpApiPolicy();
+const HTTP_BIND = resolveBindHost();
 
 function isInside(root, candidate) {
   const relative = path.relative(root, candidate);
@@ -45,23 +62,24 @@ function projectAssetStore() {
           return;
         }
 
-        // Keep browser requests same-origin. Requests without Origin are allowed for local tooling.
-        const origin = request.headers.origin;
-        if (origin) {
-          try {
-            const originHost = new URL(origin).host;
-            const forwardedHost = String(request.headers['x-forwarded-host'] || '').split(',')[0].trim();
-            const requestHost = forwardedHost || request.headers.host;
-            if (!requestHost || originHost.toLowerCase() !== String(requestHost).toLowerCase()) {
-              response.statusCode = 403;
-              response.end('Cross-origin access is not allowed');
-              return;
-            }
-          } catch {
-            response.statusCode = 403;
-            response.end('Invalid Origin header');
-            return;
-          }
+        // PUT grava o store: é operação mutável e exige Origin da mesma origem e
+        // o token da sessão. GET lê dados do projeto e exige Origin — antes a
+        // ausência de Origin era aceita como "ferramenta local", e é justamente o
+        // formato de uma requisição forjada (curl de outra máquina, form POST de
+        // outro site, DNS rebinding).
+        const storeDecision = HTTP_POLICY.classify({
+          method,
+          route: '/assets',
+          origin: request.headers.origin ?? null,
+          host: request.headers.host ?? null,
+          forwardedHost: String(request.headers['x-forwarded-host'] || '').split(',')[0].trim() || null,
+          token: request.headers[TOKEN_HEADER] ?? null,
+        });
+        if (!storeDecision.allow) {
+          response.statusCode = storeDecision.status;
+          response.setHeader('Content-Type', 'application/json; charset=utf-8');
+          response.end(JSON.stringify({ error: storeDecision.reason, code: storeDecision.code }));
+          return;
         }
 
         response.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -169,22 +187,21 @@ function comfyUiApi() {
           response.end('Method not allowed');
           return;
         }
-        const origin = request.headers.origin;
-        if (origin) {
-          try {
-            const originHost = new URL(origin).host;
-            const forwardedHost = String(request.headers['x-forwarded-host'] || '').split(',')[0].trim();
-            const requestHost = forwardedHost || request.headers.host;
-            if (!requestHost || originHost.toLowerCase() !== String(requestHost).toLowerCase()) {
-              response.statusCode = 403;
-              response.end('Cross-origin access is not allowed');
-              return;
-            }
-          } catch {
-            response.statusCode = 403;
-            response.end('Invalid Origin header');
-            return;
-          }
+        // Mesma política do Studio: host fechado + Origin da mesma origem. São
+        // rotas de leitura (o ComfyUI local só é consultado, nunca acionado),
+        // então não exigem token — mas deixaram de aceitar ausência de Origin.
+        const comfyDecision = HTTP_POLICY.classify({
+          method: request.method || 'GET',
+          route: '/read',
+          origin: request.headers.origin ?? null,
+          host: request.headers.host ?? null,
+          forwardedHost: String(request.headers['x-forwarded-host'] || '').split(',')[0].trim() || null,
+        });
+        if (!comfyDecision.allow) {
+          response.statusCode = comfyDecision.status;
+          response.setHeader('Content-Type', 'application/json; charset=utf-8');
+          response.end(JSON.stringify({ error: comfyDecision.reason, code: comfyDecision.code }));
+          return;
         }
 
         response.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -229,20 +246,6 @@ const ARTIFACT_CONTENT_TYPES = {
   '.gltf': 'model/gltf+json',
 };
 
-/** Mesma proteção de origem usada pelos outros plugins (o preview usa proxy). */
-function isSameOriginRequest(request) {
-  const origin = request.headers.origin;
-  if (!origin) return true;
-  try {
-    const originHost = new URL(origin).host;
-    const forwardedHost = String(request.headers['x-forwarded-host'] || '').split(',')[0].trim();
-    const requestHost = forwardedHost || request.headers.host;
-    return Boolean(requestHost) && originHost.toLowerCase() === String(requestHost).toLowerCase();
-  } catch {
-    return false;
-  }
-}
-
 function readJsonBody(request, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -278,7 +281,73 @@ function readJsonBody(request, maxBytes = MAX_BODY_BYTES) {
  * Não é um segundo sistema: é a fachada única acessada por outro transporte.
  * Nada aqui instala, baixa, compra ou envia dados; artefatos só são servidos de
  * dentro de `<projeto>/.lia-forge/runs/`, sem seguir symlink.
+ *
+ * Segurança (P0-1 da revisão integrada): toda requisição passa por
+ * `HTTP_POLICY.classify` antes de qualquer rota — host fechado (DNS rebinding),
+ * `Origin` obrigatório em operação mutável (CSRF) e token de sessão. Três
+ * operações são exclusivas do IPC e devolvem 403 aqui: configurar provider,
+ * autorizar provider e registrar revisão humana. O produto não oferece por HTTP
+ * aquilo que exige decisão verificável da pessoa no app.
  */
+/**
+ * Entrega o token da sessão à página servida por este servidor.
+ *
+ * É um módulo ESM **virtual** na mesma origem (`/@lia-forge/session-token.js`),
+ * não um valor embutido no HTML: assim ele não aparece em snapshot de DOM nem em
+ * log de proxy que registre HTML, e o Electron (que usa IPC, não HTTP) nunca o
+ * pede. Virtual (resolveId + load) em vez de middleware por duas razões: funciona
+ * também em SSR/`middlewareMode`, que é como a interface é testada, e não existe
+ * arquivo no disco para alguém servir por engano em produção.
+ *
+ * Só é servido para `Host` permitido e com `Sec-Fetch-Site` que não indique
+ * navegação vinda de outro site.
+ */
+const TOKEN_MODULE_ID = `\0virtual:${TOKEN_MODULE_ROUTE.slice(1)}`;
+
+function liaForgeSessionToken() {
+  return {
+    name: 'lia-forge-session-token',
+    enforce: 'pre',
+    resolveId(id) {
+      if (id === TOKEN_MODULE_ROUTE || id.endsWith(TOKEN_MODULE_ROUTE)) return TOKEN_MODULE_ID;
+      return null;
+    },
+    load(id) {
+      return id === TOKEN_MODULE_ID ? HTTP_POLICY.tokenModuleSource() : null;
+    },
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        const pathname = (() => {
+          try {
+            return new URL(request.url || '/', 'http://vite.local').pathname;
+          } catch {
+            return '/';
+          }
+        })();
+        if (pathname !== TOKEN_MODULE_ROUTE) return next();
+        if (!HTTP_POLICY.isHostAllowed(String(request.headers['x-forwarded-host'] || '').split(',')[0].trim() || request.headers.host)) {
+          response.statusCode = 421;
+          response.setHeader('Content-Type', 'text/plain; charset=utf-8');
+          response.end('Host not allowed');
+          return undefined;
+        }
+        const site = String(request.headers['sec-fetch-site'] || '').toLowerCase();
+        if (site && site !== 'same-origin' && site !== 'none') {
+          response.statusCode = 403;
+          response.setHeader('Content-Type', 'text/plain; charset=utf-8');
+          response.end('Cross-site request');
+          return undefined;
+        }
+        response.statusCode = 200;
+        response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+        response.setHeader('Cache-Control', 'no-store');
+        response.end(HTTP_POLICY.tokenModuleSource());
+        return undefined;
+      });
+    },
+  };
+}
+
 function liaForgeStudioApi() {
   const projectRoot = path.resolve(process.env.SPRITEFORGE_PROJECT_ROOT || process.cwd());
   const runsRoot = path.join(projectRoot, '.lia-forge', 'runs');
@@ -305,11 +374,23 @@ function liaForgeStudioApi() {
         }
         const pathname = url.pathname;
         if (!pathname.startsWith(LIA_FORGE_STUDIO_PREFIX)) return next();
+        const route = pathname.slice(LIA_FORGE_STUDIO_PREFIX.length) || '/';
 
         const method = request.method || 'GET';
-        if (!isSameOriginRequest(request)) {
-          response.statusCode = 403;
-          response.end('Cross-origin access is not allowed');
+        const forwardedHost = String(request.headers['x-forwarded-host'] || '').split(',')[0].trim() || null;
+        const decision = HTTP_POLICY.classify({
+          method,
+          route,
+          origin: request.headers.origin ?? null,
+          host: request.headers.host ?? null,
+          forwardedHost,
+          token: request.headers[TOKEN_HEADER] ?? null,
+        });
+        if (!decision.allow) {
+          response.statusCode = decision.status;
+          response.setHeader('Content-Type', 'application/json; charset=utf-8');
+          response.setHeader('Cache-Control', 'no-store');
+          response.end(JSON.stringify({ error: decision.reason, code: decision.code }));
           return;
         }
         response.setHeader('Cache-Control', 'no-store');
@@ -320,7 +401,6 @@ function liaForgeStudioApi() {
           response.end(JSON.stringify(payload));
         };
 
-        const route = pathname.slice(LIA_FORGE_STUDIO_PREFIX.length) || '/';
         try {
           const service = await studio();
 
@@ -564,10 +644,25 @@ function liaForgeStudioApi() {
 }
 
 export default defineConfig({
-  plugins: [react(), projectAssetStore(), comfyUiApi(), liaForgeStudioApi()],
+  plugins: [react(), liaForgeSessionToken(), projectAssetStore(), comfyUiApi(), liaForgeStudioApi()],
   server: {
-    host: '0.0.0.0',
-    // The Arena preview uses a per-session proxy hostname rather than localhost.
-    allowedHosts: true,
+    // Loopback por padrão; expor na rede exige LIA_FORGE_HTTP_EXPOSE=1. O
+    // preview desta estação funciona porque o proxy fala com o servidor em
+    // loopback e o host dele está na lista fechada da política.
+    host: HTTP_BIND.host,
+    // Lista fechada (nunca `true`): qualquer outro Host é recusado com 421,
+    // o que impede que um nome de domínio apontado para esta máquina seja
+    // atendido (DNS rebinding).
+    allowedHosts: viteAllowedHosts(HTTP_POLICY),
+  },
+  preview: {
+    host: HTTP_BIND.host,
+    allowedHosts: viteAllowedHosts(HTTP_POLICY),
   },
 });
+
+// O motivo do bind fica registrado no início do servidor: exposição de rede é
+// decisão explícita, nunca padrão silencioso.
+if (HTTP_BIND.exposed) {
+  process.stderr.write(`[lia-forge] ${HTTP_BIND.reason}\n`);
+}
