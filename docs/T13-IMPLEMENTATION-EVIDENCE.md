@@ -255,10 +255,10 @@ A experiência pedida é "criar projeto → exportar" em 12 passos, mas a interf
 | 6 | Ler o plano antes de executar | `plan` está na tela | — |
 | 7 | Executar | existe run | — |
 | 8 | Acompanhar (ou cancelar) | o run está encerrado (`summary.finished`) | run gravado como em andamento **sem execução neste processo** (`runStale`): corrigir o estado ou retomar é humano |
-| 9 | Revisar os artefatos | run encerrado sem revisão pendente | run `blocked`: a aprovação é humana e fica amarrada ao SHA-256 |
+| 9 | Revisar os artefatos | run `succeeded` sem revisão pendente | run `blocked`: a aprovação é humana e fica amarrada ao SHA-256 · run `failed`: nomeia o passo, o código e a mensagem do erro e diz que nada foi entregue como pronto · run `cancelled`: motivo e autoria gravados, com retomar do checkpoint ou recomeçar |
 | 10 | Comparar variações | há comparação medida no Comparison Lab (passo opcional) | — |
 | 11 | Exportar para o destino | existe pacote exportado, com "verificado no destino: não" dito no próprio passo | — |
-| 12 | Guardar no projeto | há versão registrada no asset ou asset com versões/proveniência | — |
+| 12 | Guardar no projeto | com run em foco, há versão de asset registrada **para ele**; sem run, há asset com versões/proveniência no inventário | — |
 
 Quando não há passo atual, a mensagem do painel distingue três situações, porque "tudo concluído" nem sempre é verdade: **há decisão pendente** → "O que depende só do produto está feito até aqui; o restante espera uma decisão sua"; **há pacote exportado sem verificação no destino** → importar na engine e conferir lá é com o usuário; **nada depende do usuário** → aí sim, os passos do produto estão concluídos. O caso concreto que motivou a regra: um run interrompido carregado deixa o passo 8 como decisão humana e o roteiro sem passo atual — dizer "todos concluídos" ali seria falso.
 
@@ -270,7 +270,7 @@ Importar na engine **não é passo do produto** e não aparece como concluído: 
 
 ### O que foi executado de verdade
 
-Dois testes cobrem o roteiro. `tests/journey-smoke.mjs` (**novo**, 74 checagens) **percorre a jornada inteira** com o serviço real sobre um projeto temporário, derivando o roteiro a cada parada com a mesma função da interface:
+Dois testes cobrem o roteiro. `tests/journey-smoke.mjs` (**novo**, 88 checagens) **percorre a jornada inteira** com o serviço real sobre um projeto temporário, derivando o roteiro a cada parada com a mesma função da interface:
 
 | Parada | Progresso medido |
 |---|---|
@@ -284,7 +284,7 @@ Dois testes cobrem o roteiro. `tests/journey-smoke.mjs` (**novo**, 74 checagens)
 | Pacote exportado (`verifiedOnDestination: false`) | `11 de 12`; próximo = guardar |
 | Versão registrada no asset | **`12 de 12`**, nenhum passo atual pendente, nenhuma decisão humana sobrando |
 
-Trilha medida: `0 → 1 → 2 → 6 → 8 → 9 → 10 → 11 → 12`, com a checagem de que o progresso nunca avançou sem a evidência correspondente. Os dois cenários alternativos (objetivo `3d-character-spritesheet` sem provider nesta máquina e run interrompido com `runStale`) são registrados **fora da trilha**, como decisão humana — não como progresso. No caso do run interrompido, o mesmo passo volta a ser o passo atual quando há execução viva (`liveRun`) e run encerrado não vira interrompido só porque o sinal chegou. A honestidade foi verificada tirando uma evidência por vez do estado completo: sem pacote, o passo 11 sai da contagem (e só ele); sem comparação, o passo 10 volta a `optional`; sem run, `execute`/`follow`/`review` saem; sem versão guardada, o passo 12 sai; sem pasta, o passo 1 volta a ser o atual; sem brief, o passo 4 sai; estado vazio = `0 de 12`. No fim, o atlas do run é medido no disco: **384×144**, grade 8×3, 24 frames, com conteúdo.
+Trilha medida: `0 → 1 → 2 → 6 → 8 → 9 → 10 → 11 → 12`, com a checagem de que o progresso nunca avançou sem a evidência correspondente. Os quatro cenários alternativos (objetivo `3d-character-spritesheet` sem provider nesta máquina, run interrompido com `runStale`, run `failed` e run `cancelled`) são registrados **fora da trilha**, como decisão humana — não como progresso. Os dois últimos são produzidos de verdade no teste (substituto de teste que falha e substituto lento cancelado no meio, com fixture GLB válido; nada disso é Blender). No caso do run interrompido, o mesmo passo volta a ser o passo atual quando há execução viva (`liveRun`) e run encerrado não vira interrompido só porque o sinal chegou. A honestidade foi verificada tirando uma evidência por vez do estado completo: sem pacote, o passo 11 sai da contagem (e só ele); sem comparação, o passo 10 volta a `optional`; sem run, `execute`/`follow`/`review` saem; sem versão guardada, o passo 12 sai; sem pasta, o passo 1 volta a ser o atual; sem brief, o passo 4 sai; estado vazio = `0 de 12`. No fim, o atlas do run é medido no disco: **384×144**, grade 8×3, 24 frames, com conteúdo.
 
 `tests/studio-ui-render-smoke.mjs` deriva o roteiro três vezes, com dados reais vindos da API (projeto, entradas, plano com passos bloqueados, run `succeeded`, pacote exportado, versão de asset):
 
@@ -295,6 +295,18 @@ Trilha medida: `0 → 1 → 2 → 6 → 8 → 9 → 10 → 11 → 12`, com a che
 | Jornada completa (run `succeeded` + export + versão gravada) | 11 passos concluídos, nenhum passo atual pendente, exportação dizendo "verificado no destino: não" |
 | Render | o painel aparece com "Roteiro de produção", "2 de 12 passos", "Passo 3 — Escolher o objetivo" e a lista completa a um clique |
 | Render com run interrompido | o roteiro diz "não há execução neste processo", apresenta a recuperação como decisão do usuário, **não** mostra o texto de execução viva e **não** diz que a jornada terminou ("o restante espera uma decisão sua") |
+| Render com run falho | nomeia o passo (`render`), mostra o código (`ADAPTER_EXECUTION_FAILED`), mantém a mensagem de decisão pendente e não mostra a frase de jornada concluída |
+
+Com os quatro runs gravados no projeto de preview (um de cada estado), o roteiro derivado pela mesma função que a interface usa devolveu:
+
+| Run no foco | Progresso | Próximo passo | Decisões humanas |
+|---|---|---|---|
+| `succeeded` (atlas exportável) | 9 de 12 | 11 · Exportar para `godot-4` | nenhuma |
+| `blocked` (gate de revisão) | 7 de 12 | 9 · Revisar os artefatos | nenhuma |
+| `failed` (ferramenta que falha) | 7 de 12 | nenhum | 9 · Revisar os artefatos (nomeia a falha) |
+| `running` interrompido (sem execução no processo) | 6 de 12 | nenhum | 8 · Acompanhar (corrigir estado ou retomar) |
+
+Antes desta rodada, o run `failed` aparecia com 9 de 12, "Revisar os artefatos" como concluído e a frase "Todos os passos que dependem só do produto estão concluídos" — ou seja, o painel apresentava como terminada uma jornada que tinha falhado no meio. O mesmo valia para run cancelado, e "Guardar no projeto" contava qualquer asset do inventário, ainda que fosse de outro run.
 
 ## 11. Testes que provam o acima
 
@@ -366,6 +378,8 @@ O que cada smoke prova, por arquivo (novos ou estendidos na fase T13):
 | `9c23d48` | seleção por passo: hook `canHandle`, Hub e planner conscientes do contexto, Blender fora do atlas 2D e nota visível no plano |
 | `a4e4a32` | documentação da seleção por passo (§6) |
 | `82ad851` | roteiro sem passo atual mas com decisão pendente não diz "tudo concluído" |
+| `8a9e363` | documentação da mensagem do roteiro quando só resta decisão humana (§10) |
+| `47965f4` | run falho e cancelado no roteiro (revisão como decisão humana, "guardar" escopado ao run) |
 
 ## 14. Pendências que exigem decisão humana
 
