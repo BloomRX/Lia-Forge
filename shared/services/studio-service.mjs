@@ -110,6 +110,73 @@ async function pathExists(target) {
  * @param {Function} [options.validateStageOutputs] validação de estágio legada
  * @param {{maxConcurrent?:number, ramMb?:number}} [options.limits]
  */
+/**
+ * `validated` derivado de evidência, não declarado (P0-4).
+ *
+ * Só é `true` quando o passo concluiu, tem ao menos um validador **aprovado**,
+ * nenhum reprovado, e a validação rodou sobre estes bytes — o que é conferido
+ * comparando o SHA-256 que o engine gravou para o passo com o do arquivo. Um
+ * passo com várias saídas tem um hash gravado (o do artefato principal): para as
+ * demais saídas não há como afirmar que a validação as cobriu, e o registro diz
+ * isso em vez de marcar `true`.
+ *
+ * @param {{step:object|null, sha256:string, emittedCount:number}} args
+ * @returns {{validated:boolean, validator:string|null, contentMetrics:object|null, validation:object}}
+ */
+export function deriveArtifactValidation({ step, sha256, emittedCount = 1 }) {
+  const validations = step?.validations ?? [];
+  const passed = validations.filter((item) => item.status === 'passed');
+  const failed = validations.filter((item) => item.status === 'failed');
+  const skipped = validations.filter((item) => item.status === 'skipped');
+  const validators = validations.map((item) => `${item.validator}=${item.status}`);
+  const at = step?.finishedAt ?? null;
+  const evidence = (status, reason) => Object.freeze({
+    validated: false,
+    validator: null,
+    contentMetrics: null,
+    validation: Object.freeze({
+      status,
+      reason,
+      validators: Object.freeze(validators),
+      sha256: sha256 ?? null,
+      stepId: step?.id ?? null,
+      stepState: step?.state ?? null,
+      at,
+    }),
+  });
+
+  if (!step || step.state !== 'succeeded') {
+    return evidence('step-not-succeeded', `O passo ${step ? `"${step.id}" está "${step.state}"` : 'não existe no run'}; nenhuma validação aprovada pode ser atribuída a este arquivo.`);
+  }
+  if (failed.length > 0) {
+    return evidence('validation-failed', `Validação reprovada: ${(failed[0].problems ?? []).join('; ') || failed[0].validator}.`);
+  }
+  if (passed.length === 0) {
+    return evidence('not-validated', skipped.length > 0
+      ? `Validadores pulados por falta de entrada: ${skipped.map((item) => `${item.validator} (${item.reason ?? 'sem entrada'})`).join('; ')}.`
+      : 'O passo não declara validador: nada foi conferido sobre este arquivo.');
+  }
+  if (!step.sha256 || step.sha256 !== sha256) {
+    return evidence('hash-diverged', emittedCount > 1
+      ? 'O passo gravou um único SHA-256 (o do artefato principal) para várias saídas: não há como afirmar que a validação aprovada cobriu este arquivo.'
+      : `A validação aprovada não corresponde a estes bytes (passo gravou ${String(step.sha256).slice(0, 12)}…, arquivo é ${String(sha256).slice(0, 12)}…).`);
+  }
+  return Object.freeze({
+    validated: true,
+    validator: passed.map((item) => item.validator).join(','),
+    contentMetrics: passed.find((item) => item.metrics)?.metrics ?? null,
+    validation: Object.freeze({
+      status: 'validated',
+      reason: `Validado por ${passed.map((item) => item.validator).join(', ')} sobre o SHA-256 gravado pelo passo.`,
+      validators: Object.freeze(validators),
+      sha256,
+      stepId: step.id,
+      stepState: step.state,
+      at,
+    }),
+  });
+}
+
 export function createStudioService(options = {}) {
   const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
   const limits = { maxConcurrent: 1, ...(options.limits ?? {}) };
@@ -1359,17 +1426,68 @@ export function createStudioService(options = {}) {
     },
 
     /** Exporta artefatos de um run para um destino (perfil + SHA-256 + notas). */
+    /**
+     * Exporta o pacote de um run para um destino.
+     *
+     * Gates (P0-3 da revisão integrada). Antes desta correção `exportRun` não
+     * consultava direitos, estado do run nem revisão pendente: um asset com
+     * licença declarada como desconhecida (`NOASSERTION` ⇒ estado
+     * `license-pending`) era exportado normalmente — medido antes de corrigir.
+     * Direitos existem no modelo (`classifyRights` já calcula `redistributable`),
+     * só não eram gate.
+     *
+     *   1. run concluído: `failed`/`cancelled`/`blocked`/`running` não exportam.
+     *      Exportar artefato de run que não terminou é entregar conteúdo que o
+     *      produto não garante;
+     *   2. nenhuma revisão pendente nem revisão sobre hash diferente: a revisão
+     *      humana vale para os bytes que a pessoa viu;
+     *   3. direitos: se algum asset vinculado a este run (o `asset` informado ou
+     *      os que têm proveniência deste runId) não é redistribuível
+     *      (`restricted`, `blocked`, `license-pending`, `unknown`), a exportação
+     *      é recusada com o estado e os bloqueios nomeados.
+     *
+     * Quando nenhum asset está vinculado não há declaração nenhuma para conferir:
+     * a exportação segue, mas o manifesto grava `rights: null` e a resposta diz
+     * `rightsState: 'not-declared'`. Não é "liberado" — é "nada foi declarado",
+     * e quem recebe o pacote vê isso.
+     */
     async exportRun({ runId, destination, asset = null }) {
       const snapshot = await this.readRun(runId);
       if (!snapshot) throw new Error(`exportRun: run "${runId}" não encontrado`);
+      // Ordem dos gates: o motivo mais acionável primeiro. "Revisão pendente no
+      // passo X" diz o que a pessoa tem de fazer; "o run está blocked" só
+      // descreve o sintoma (e é o estado em que um run com revisão pendente fica).
+      const pendingReview = (snapshot.steps ?? []).filter((step) => step.review?.status === 'review-missing');
+      if (pendingReview.length > 0) {
+        throw new Error(`exportRun: revisão humana pendente no(s) passo(s) ${pendingReview.map((step) => `"${step.id}"`).join(', ')}. Nada foi gravado.`);
+      }
+      const reviewDiverged = (snapshot.steps ?? []).filter((step) => step.review?.approved === true && step.review?.sha256 && step.sha256 && step.review.sha256 !== step.sha256);
+      if (reviewDiverged.length > 0) {
+        throw new Error(`exportRun: o artefato do(s) passo(s) ${reviewDiverged.map((step) => `"${step.id}"`).join(', ')} mudou depois da revisão (SHA-256 diferente). Aprove novamente o conteúdo atual.`);
+      }
+      if (snapshot.status !== 'succeeded') {
+        throw new Error(`exportRun: o run "${runId}" está "${snapshot.status}"; exportar exige run concluído. Nada foi gravado.`);
+      }
+      const rightsGate = await this.exportRightsGate({ runId, asset });
+      if (!rightsGate.allowed) {
+        throw new Error(`exportRun: direitos ${rightsGate.state} bloqueiam a exportação de "${runId}": ${rightsGate.blockers.join('; ')}. Nada foi gravado.`);
+      }
       const runDirectory = path.join(projectRoot, RUNS_DIRECTORY, runId);
       const artifacts = [];
       for (const step of snapshot.steps) {
-        for (const relative of step.outputs ?? []) {
+        const emitted = step.outputs ?? [];
+        for (const [index, relative] of emitted.entries()) {
           const absolute = path.isAbsolute(relative) ? relative : path.join(projectRoot, relative);
           if (!absolute.startsWith(runDirectory) && !absolute.startsWith(projectRoot)) continue;
           if (!await pathExists(absolute)) continue;
           const bytes = await fs.readFile(absolute);
+          // Integridade do byte exportado. O engine grava o SHA-256 da primeira
+          // saída do passo (é o hash que a revisão humana aprovou); se o arquivo
+          // em disco não bate com ele, o conteúdo mudou depois do run — exportar
+          // seria entregar algo diferente do que foi revisado. Fail-closed.
+          if (index === 0 && step.sha256 && hash(bytes) !== step.sha256) {
+            throw new Error(`exportRun: o artefato "${path.basename(absolute)}" do passo "${step.id}" mudou depois do run (SHA-256 ${String(step.sha256).slice(0, 12)}… gravado, ${hash(bytes).slice(0, 12)}… em disco). Nada foi gravado.`);
+          }
           artifacts.push({
             id: `${step.id}:${path.basename(absolute)}`,
             format: path.extname(absolute).slice(1).toLowerCase(),
@@ -1381,11 +1499,62 @@ export function createStudioService(options = {}) {
       }
       if (!artifacts.length) throw new Error('exportRun: o run não produziu artefatos gravados');
       const compatibility = checkDestinationCompatibility({ destinationId: destination, artifacts });
-      const bundle = buildExportBundle({ destinationId: destination, artifacts, hash, asset, workflowRunId: runId });
+      const bundle = buildExportBundle({ destinationId: destination, artifacts, hash, asset: rightsGate.asset, rights: rightsGate.rights, workflowRunId: runId });
       const target = path.join(runDirectory, 'export', destination, 'manifest.json');
       await fs.mkdir(path.dirname(target), { recursive: true });
       await fs.writeFile(target, `${JSON.stringify(bundle, null, 2)}\n`, 'utf8');
-      return Object.freeze({ bundle, compatibility, path: path.relative(projectRoot, target).split(path.sep).join('/') });
+      return Object.freeze({
+        bundle,
+        compatibility,
+        path: path.relative(projectRoot, target).split(path.sep).join('/'),
+        rightsState: rightsGate.state,
+        rightsNote: rightsGate.note,
+      });
+    },
+
+    /**
+     * Direitos que governam a exportação de um run.
+     *
+     * Considera o asset informado e **todos** os assets que têm proveniência deste
+     * run: vincular o run a um asset depois não pode servir para exportar sem o
+     * gate, e declarar direitos só no asset "errado" também não.
+     *
+     * @returns {Promise<{allowed:boolean, state:string, blockers:string[], rights:object|null, asset:object|null, note:string}>}
+     */
+    async exportRightsGate({ runId, asset = null }) {
+      const manager = await assets();
+      const wantedId = typeof asset === 'string' ? asset : (asset?.id ?? null);
+      const linked = (manager.list() ?? []).filter((entry) => (wantedId ? entry.id === wantedId : (entry.provenance ?? []).some((item) => item.runId === runId)));
+      if (!linked.length) {
+        return Object.freeze({
+          allowed: true,
+          state: 'not-declared',
+          blockers: Object.freeze([]),
+          rights: null,
+          asset: null,
+          note: 'Nenhum asset vinculado a este run: nenhuma licença foi declarada, então nada aqui afirma que o conteúdo está liberado.',
+        });
+      }
+      const blocking = linked.filter((entry) => entry.rights?.redistributable !== true);
+      if (blocking.length) {
+        return Object.freeze({
+          allowed: false,
+          state: blocking.length === 1 ? String(blocking[0].rights?.state ?? 'unknown') : 'mixed',
+          blockers: Object.freeze(blocking.flatMap((entry) => (entry.rights?.blockers ?? []).map((blocker) => `${entry.id}: ${blocker}`))),
+          rights: null,
+          asset: null,
+          note: 'Direitos não redistribuíveis bloqueiam a exportação até uma pessoa declarar a licença.',
+        });
+      }
+      const primary = linked.find((entry) => entry.id === wantedId) ?? linked[0];
+      return Object.freeze({
+        allowed: true,
+        state: String(primary.rights?.state ?? 'unknown'),
+        blockers: Object.freeze([]),
+        rights: primary.rights ?? null,
+        asset: primary,
+        note: 'Direitos declarados por uma pessoa; a declaração vai no manifesto.',
+      });
     },
 
     // ------------------------------------------------------------- assets
@@ -1409,29 +1578,60 @@ export function createStudioService(options = {}) {
       return (await assets()).rightsReport();
     },
 
-    /** Registra provenência de um run inteiro no asset (direitos recalculados). */
+    /**
+     * Registra a proveniência de um run inteiro no asset.
+     *
+     * Gates (P0-4 da revisão integrada). Antes: qualquer run virava versão de
+     * asset e **todo** artefato recebia `validated: true` como literal, sem ler
+     * `step.validations`, o estado do run ou a revisão — o oposto de "sem outputs
+     * ou progresso simulados".
+     *
+     *   1. só run concluído vira versão (nada de `failed`/`blocked`/`cancelled`);
+     *   2. nenhum passo reprovado, sem revisão pendente, nem revisão registrada
+     *      sobre outro hash: a versão herda a integridade do run, não a substitui;
+     *   3. `validated` é derivado da validação realmente executada, e só é `true`
+     *      quando há validador aprovado **sobre estes bytes** (o SHA-256 que o
+     *      passo gravou). Sem evidência, `validated: false` com o motivo escrito.
+     */
     async attachRunToAsset({ assetId, runId }) {
       const snapshot = await this.readRun(runId);
       if (!snapshot) throw new Error(`attachRunToAsset: run "${runId}" não encontrado`);
       const manager = await assets();
       if (!manager.get(assetId)) throw new Error(`attachRunToAsset: asset "${assetId}" não encontrado`);
+      // Mesma ordem de exportRun: motivo acionável primeiro.
+      const pendingReview = (snapshot.steps ?? []).filter((step) => step.review?.status === 'review-missing');
+      if (pendingReview.length > 0) {
+        throw new Error(`attachRunToAsset: revisão humana pendente no(s) passo(s) ${pendingReview.map((step) => `"${step.id}"`).join(', ')}. Nada foi gravado.`);
+      }
+      const reviewDiverged = (snapshot.steps ?? []).filter((step) => step.review?.approved === true && step.review?.sha256 && step.sha256 && step.review.sha256 !== step.sha256);
+      if (reviewDiverged.length > 0) {
+        throw new Error(`attachRunToAsset: o artefato do(s) passo(s) ${reviewDiverged.map((step) => `"${step.id}"`).join(', ')} mudou depois da revisão (SHA-256 diferente). Nada foi gravado.`);
+      }
+      const failedSteps = (snapshot.steps ?? []).filter((step) => step.state === 'failed');
+      if (failedSteps.length > 0) {
+        throw new Error(`attachRunToAsset: o passo ${failedSteps.map((step) => `"${step.id}"`).join(', ')} falhou; o run não é íntegro o bastante para virar versão de asset. Nada foi gravado.`);
+      }
+      if (snapshot.status !== 'succeeded') {
+        throw new Error(`attachRunToAsset: o run "${runId}" está "${snapshot.status}"; versão de asset exige run concluído. Nada foi gravado.`);
+      }
       const artifacts = [];
       for (const provenance of snapshot.provenance ?? []) {
         const emitted = provenance.outputs ?? [];
+        const step = (snapshot.steps ?? []).find((item) => item.id === provenance.stepId) ?? null;
         for (const relative of emitted) {
           const absolute = path.join(projectRoot, relative);
           if (!await pathExists(absolute)) continue;
           const bytes = await fs.readFile(absolute);
+          // o hash gravado pelo run vale para o artefato principal do passo;
+          // com mais de uma saída, cada arquivo é hasheado individualmente
+          const sha256 = emitted.length === 1 ? (provenance.sha256 ?? hash(bytes)) : hash(bytes);
           artifacts.push({
             path: relative,
             role: provenance.stepId,
             format: path.extname(relative).slice(1).toLowerCase() || null,
             bytes: bytes.length,
-            // o hash gravado pelo run vale para o artefato principal do passo;
-            // com mais de uma saída, cada arquivo é hasheado individualmente
-            sha256: emitted.length === 1 ? (provenance.sha256 ?? hash(bytes)) : hash(bytes),
-            validated: true,
-            contentMetrics: null,
+            sha256,
+            ...deriveArtifactValidation({ step, sha256, emittedCount: emitted.length }),
           });
         }
         await manager.addProvenance(assetId, {

@@ -89,6 +89,17 @@ export function classifyRights({ declarations = [], generatedBy = null, thirdPar
     blockers.push('declaração explícita de bloqueio');
   }
 
+  const redistributable = state === 'owned' || (state === 'licensed' && !restricted.length);
+  // Estado que não permite redistribuição sempre diz por quê. Antes um
+  // `license-pending` podia sair sem bloqueio nenhum na lista: o gate recusava a
+  // exportação sem ter o que mostrar à pessoa, e a interface não sabia o que
+  // pedir (medido: `blockers: []` com `redistributable: false`).
+  if (!redistributable && blockers.length === 0) {
+    blockers.push(state === 'license-pending'
+      ? `licença(s) declarada(s) não reconhecida(s) como permissiva(s): ${licenses.join(', ') || '(nenhuma)'} — uso e redistribuição exigem decisão humana`
+      : `estado de direitos "${state}": uso e redistribuição exigem decisão humana`);
+  }
+
   return Object.freeze({
     state,
     licenses: Object.freeze(licenses),
@@ -97,7 +108,7 @@ export function classifyRights({ declarations = [], generatedBy = null, thirdPar
     permissive: Object.freeze(permissive),
     inheritRestriction: restricted.length > 0,
     blockers: Object.freeze(blockers),
-    redistributable: state === 'owned' || (state === 'licensed' && !restricted.length),
+    redistributable,
     note: 'Direitos não são inferidos: apenas o que foi declarado por uma pessoa conta.',
   });
 }
@@ -141,6 +152,10 @@ export function normalizeAssetRecord(record) {
         sha256: artifact.sha256 ?? null,
         validator: artifact.validator ?? null,
         validated: artifact.validated === true,
+        // Evidência da validação (P0-4 da revisão integrada): o que foi executado,
+        // sobre qual hash, e por que `validated` é true ou false. `null` em registros
+        // anteriores a este campo — ausência é "sem evidência", nunca "ok".
+        validation: artifact.validation ? Object.freeze({ ...artifact.validation }) : null,
         contentMetrics: artifact.contentMetrics ?? null,
       }))),
       runId: version.runId ?? null,
@@ -236,6 +251,10 @@ export function createAssetManager({ store = null, save = null, now = () => new 
           sha256: artifact.sha256 ?? null,
           validator: artifact.validator ?? null,
           validated: artifact.validated === true,
+          // Evidência da validação (P0-4 da revisão integrada): o que foi executado,
+          // sobre qual hash, e por que `validated` é true ou false. `null` em registros
+          // anteriores a este campo — ausência é "sem evidência", nunca "ok".
+          validation: artifact.validation ? Object.freeze({ ...artifact.validation }) : null,
           contentMetrics: artifact.contentMetrics ?? null,
         }))),
         runId: version.runId ?? null,
@@ -264,12 +283,57 @@ export function createAssetManager({ store = null, save = null, now = () => new 
         at: entry.at ?? now().toISOString(),
       });
       const provenance = Object.freeze([...asset.provenance, record]);
+      // A decisão humana não é sobrescrita pela proveniência da ferramenta.
+      //
+      // Antes `addProvenance` recalculava os direitos só com as licenças vindas
+      // dos adapters, e o resultado substituía o que uma pessoa tinha declarado:
+      // um asset marcado `BLOCKED` (ex.: runtime Spine, que exige licença de
+      // editor por usuário) voltava para `license-pending` ao anexar um run — e,
+      // com qualquer licença permissiva na proveniência, viraria `licensed` e
+      // redistribuível, ou seja, exportável. Medido antes desta correção.
+      //
+      // As declarações anteriores entram no cálculo junto com as novas, e
+      // `classifyRights` já escolhe o estado mais restritivo: anexar proveniência
+      // só pode endurecer os direitos, nunca afrouxá-los. Autoria e data da
+      // declaração humana são preservadas.
+      const prior = asset.rights ?? null;
+      const priorDeclarations = (prior?.licenses ?? []).map((license) => ({
+        license,
+        blocked: prior?.state === 'blocked',
+      }));
+      // Só o que uma pessoa declarou conta para o estado de direitos.
+      //
+      // `entry.license` é a licença do **código** do adapter ("mesma licença do
+      // repositório", "MIT"…), não a licença da saída: usá-la como declaração de
+      // direitos era erro de categoria e produzia dois efeitos medidos antes
+      // desta correção — (a) sobrescrevia a decisão humana (asset `BLOCKED`
+      // voltava a `license-pending` ao anexar um run) e (b) podia afrouxar os
+      // direitos sem ninguém decidir (proveniência com licença permissiva virava
+      // `licensed` + redistribuível, ou seja, exportável). A licença da
+      // ferramenta continua gravada na proveniência como evidência; o estado de
+      // direitos vem da declaração humana, e sem ela permanece `unknown` (não
+      // redistribuível). `outputRights` do adapter é texto descritivo e também não
+      // é classificado: nada é inferido.
+      // Licença de **pesos/modelo** de terceiro continua entrando no cálculo:
+      // dela o resultado é derivado, e derivado de restrito herda a restrição.
+      const weightsDeclarations = provenance
+        .map((item) => item.weightsLicense)
+        .filter((license) => typeof license === 'string' && license.trim())
+        .map((license) => ({ license }));
       const rights = classifyRights({
-        declarations: provenance.map((item) => ({ license: item.license ?? item.weightsLicense ?? null })),
-        generatedBy: provenance.length ? 'tool' : 'user',
+        declarations: [...priorDeclarations, ...weightsDeclarations],
+        generatedBy: priorDeclarations.length + weightsDeclarations.length > 0 ? 'user' : null,
         thirdPartyInputs: entry.thirdPartyInputs ?? [],
       });
-      state.assets[position] = { ...asset, provenance, rights, updatedAt: record.at };
+      const merged = prior?.declaredBy
+        ? Object.freeze({
+          ...rights,
+          declaredBy: prior.declaredBy,
+          declaredAt: prior.declaredAt ?? record.at,
+          note: prior.note ?? rights.note,
+        })
+        : rights;
+      state.assets[position] = { ...asset, provenance, rights: merged, updatedAt: record.at };
       await commit();
       return { provenance: record, rights };
     },

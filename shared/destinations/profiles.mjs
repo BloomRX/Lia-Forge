@@ -214,7 +214,7 @@ export function checkDestinationCompatibility({ destinationId, artifacts = [] })
  * Monta o pacote de exportação (manifesto + arquivos + notas de importação).
  * `hash` é injetado: `(bytes) => hex` (Node: SHA-256).
  */
-export function buildExportBundle({ destinationId, artifacts = [], hash, asset = null, workflowRunId = null, generatedAt = new Date().toISOString() }) {
+export function buildExportBundle({ destinationId, artifacts = [], hash, asset = null, workflowRunId = null, rights = null, generatedAt = new Date().toISOString() }) {
   const profile = resolveDestination(destinationId);
   if (typeof hash !== 'function') throw new TypeError('buildExportBundle: hash function is required (SHA-256 in Node)');
   const compatibility = checkDestinationCompatibility({ destinationId, artifacts });
@@ -248,6 +248,20 @@ export function buildExportBundle({ destinationId, artifacts = [], hash, asset =
       rootMotion: profile.rootMotion,
     }),
     asset: asset ? Object.freeze({ id: asset.id ?? null, name: asset.name ?? null, type: asset.type ?? null }) : null,
+    // Direitos que autorizaram esta exportação (P0-3 da revisão integrada).
+    // `null` = nenhum asset vinculado ao run, ou seja, nada foi declarado: o
+    // manifesto diz isso em vez de deixar quem recebe supor que está liberado.
+    rights: rights
+      ? Object.freeze({
+        state: rights.state ?? null,
+        licenses: Object.freeze([...(rights.licenses ?? [])]),
+        redistributable: rights.redistributable === true,
+        declaredBy: rights.declaredBy ?? null,
+        declaredAt: rights.declaredAt ?? null,
+        blockers: Object.freeze([...(rights.blockers ?? [])]),
+        note: rights.note ?? null,
+      })
+      : null,
     workflowRunId,
     files: Object.freeze(files),
     compatibility,

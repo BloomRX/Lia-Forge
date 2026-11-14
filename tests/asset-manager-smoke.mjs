@@ -161,11 +161,44 @@ const provenance = await manager.addProvenance('aiko', {
   runId: 'run-teste-1',
 });
 check(provenance.provenance.adapter === 'rig2d-software', 'proveniência registra o adapter');
-check(provenance.rights.state === 'license-pending',
-  `ferramenta com licença declarada mas não permissiva = license-pending (obtido: ${provenance.rights.state})`);
-check(provenance.rights.redistributable === false, 'proveniência não permissiva não libera redistribuição');
+check(provenance.provenance.license === 'GPL-3.0-or-later', 'a licença da ferramenta fica gravada como evidência');
+// A licença do **código** do adapter não é declaração de direitos da **saída**
+// (GPL do rig não licencia o PNG). Tratá-la como declaração era erro de categoria
+// e tinha dois efeitos medidos: sobrescrevia a decisão humana (asset BLOCKED
+// voltava a license-pending ao anexar um run) e podia afrouxar direitos sem
+// ninguém decidir (proveniência permissiva virava licensed + redistribuível).
+// Sem declaração humana o estado permanece unknown — que também não redistribui.
+check(provenance.rights.state === 'unknown',
+  `licença da ferramenta não vira estado de direitos: sem declaração humana fica unknown (obtido: ${provenance.rights.state})`);
+check(provenance.rights.redistributable === false, 'e unknown não libera redistribuição (fail-closed)');
+check(provenance.rights.blockers.length > 0, 'e diz o que falta: nenhuma licença declarada');
 check(manager.get('aiko').provenance.length === 1, 'proveniência anexada ao asset');
 
+// Licença de pesos/modelo de terceiro é outra coisa: dela a saída é derivada,
+// então entra no cálculo e endurece o estado.
+const weighted = await manager.addProvenance('aiko', {
+  source: 'run', tool: 'modelo de terceiro (copyleft)', adapter: 'model3d-generate',
+  weightsLicense: 'GPL-3.0-or-later', runId: 'run-teste-2',
+});
+check(weighted.rights.state === 'license-pending',
+  `pesos com licença não reconhecida como permissiva deixam os direitos pendentes (obtido: ${weighted.rights.state})`);
+check(weighted.rights.redistributable === false, 'derivado de pesos não permissivos não é redistribuível');
+check(weighted.rights.blockers.some((item) => item.includes('GPL-3.0-or-later')), 'e o bloqueio nomeia a licença herdada');
+
+// CC-BY-NC tem cláusula não comercial: o hint "nc" casa como token e o estado é
+// restrito, não apenas pendente. Derivado de restrito herda a restrição.
+const restrictedWeights = await manager.addProvenance('aiko', {
+  source: 'run', tool: 'modelo com pesos não comerciais', adapter: 'model3d-generate',
+  weightsLicense: 'CC-BY-NC-4.0', runId: 'run-teste-3',
+});
+check(restrictedWeights.rights.state === 'restricted',
+  `pesos não comerciais tornam o asset restrito (obtido: ${restrictedWeights.rights.state})`);
+check(restrictedWeights.rights.inheritRestriction === true, 'derivado de restrito herda a restrição');
+check(restrictedWeights.rights.blockers.some((item) => item.includes('CC-BY-NC-4.0')), 'e o bloqueio nomeia a licença restritiva');
+
+// `declareRights` é a decisão humana sobre o asset: vale por si. A restrição
+// herdada de pesos de terceiro continua visível na proveniência — declarar CC0
+// sobre a própria arte não é o mesmo que ter licença dos pesos usados.
 const declared = await manager.declareRights('aiko', {
   license: 'CC0-1.0',
   declaredBy: 'usuario-teste',
@@ -174,10 +207,12 @@ const declared = await manager.declareRights('aiko', {
 check(declared.state === 'licensed', 'declaração humana de CC0 muda o estado');
 check(declared.declaredBy === 'usuario-teste', 'quem declarou fica registrado');
 check(declared.redistributable === true, 'CC0 é redistribuível');
+check(manager.get('aiko').provenance.some((item) => item.weightsLicense === 'CC-BY-NC-4.0'),
+  'a restrição herdada permanece registrada na proveniência (não some com a declaração)');
 
 const report = manager.rightsReport();
 check(report.total === 1, 'relatório conta os assets');
-check(report.byState.licensed === 1, 'relatório agrupa por estado');
+check(report.byState.licensed === 1, `relatório agrupa por estado (obtido: ${JSON.stringify(report.byState)})`);
 check(report.redistributable.includes('aiko'), 'asset redistribuível listado');
 check(typeof report.note === 'string' && report.note.length > 0, 'relatório explica o significado de unknown');
 
@@ -189,7 +224,7 @@ check(store.schemaVersion === 1 && store.assets.length === 1 && typeof store.upd
 const reloaded = createAssetManager({ store: store });
 check(reloaded.count() === 1, 'store recarregado mantém o asset');
 check(reloaded.get('aiko').versions.length === 1, 'versões sobrevivem ao round-trip');
-check(reloaded.get('aiko').provenance.length === 1, 'proveniência sobrevive ao round-trip');
+check(reloaded.get('aiko').provenance.length === 3, `as três entradas de proveniência sobrevivem ao round-trip (obtido: ${reloaded.get('aiko').provenance.length})`);
 check(reloaded.get('aiko').rights.state === 'licensed', 'direitos declarados sobrevivem ao round-trip');
 
 check(await manager.remove('aiko') === true, 'remove devolve true quando removeu');
