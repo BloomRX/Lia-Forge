@@ -1,0 +1,28 @@
+{
+  "arquivos_enumerados": 15143,
+  "por_raiz": [
+    14195,
+    940,
+    8
+  ],
+  "pacotes_fisicos_triagem": 238,
+  "pacotes_fisicos_sha256": 61,
+  "pacotes_fisicos_listagem_parcial_ou_falha": 53,
+  "pacotes_internos": 92,
+  "python_avulsos": 33,
+  "manifestos_avulsos": 1,
+  "addons": 38,
+  "blends_avulsos": 16,
+  "blend_total": 580,
+  "blend_estrutura_lida": 580,
+  "blend_hashes_com_estrutura": 506,
+  "sha256_unicos": 651,
+  "sha256_repetidos": {
+    "pacote": 37,
+    "blend": 67
+  },
+  "membros_python_manifesto_ou_licenca_sha256": 4339,
+  "membros_python_manifesto_ou_licenca_pendentes": 25,
+  "hashes_unicos_geral": 3025,
+  "arquivos_fisicos_sha256": 111
+}
