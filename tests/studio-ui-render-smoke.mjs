@@ -579,6 +579,10 @@ try {
   assert.ok(staleJourneyMarkup.includes('não há execução neste processo'), 'o roteiro diz que o run interrompido não está executando');
   assert.ok(staleJourneyMarkup.includes('decisões suas'), 'e apresenta a recuperação como decisão do usuário');
   assert.ok(!staleJourneyMarkup.includes('Execução em andamento: o progresso é gravado'), 'não apresenta o run interrompido como execução viva');
+  assert.ok(staleJourneyMarkup.includes('o restante espera uma decisão sua'),
+    'sem passo atual mas com decisão pendente, não diz que está tudo concluído');
+  assert.ok(!staleJourneyMarkup.includes('Todos os passos que dependem só do produto estão concluídos'),
+    'e a frase de jornada terminada não aparece enquanto houver decisão pendente');
 
   // O plano mostra quem não serve ao passo e por quê (Blender instalado não pode
   // aparecer como opção para um atlas que vem do rig 2D interno).

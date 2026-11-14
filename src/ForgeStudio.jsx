@@ -784,9 +784,14 @@ export function JourneyChecklist(props) {
         <p className="forge-note is-now"><strong>Passo {now.index} — {now.title}.</strong> {now.detail}</p>
       ) : (
         <p className="forge-note">
-          {props.exportResult && !verifiedOnDestination
-            ? 'Até onde o produto pode ir, está feito: o pacote confere com o perfil do destino. Importar na engine e conferir lá é o passo que só você pode executar.'
-            : 'Todos os passos que dependem só do produto estão concluídos.'}
+          {human.length
+            // Sem passo atual mas com decisão pendente: dizer "tudo concluído"
+            // aqui seria falso (ex.: run interrompido esperando você corrigir o
+            // estado ou retomar).
+            ? 'O que depende só do produto está feito até aqui; o restante espera uma decisão sua (lista acima).'
+            : props.exportResult && !verifiedOnDestination
+              ? 'Até onde o produto pode ir, está feito: o pacote confere com o perfil do destino. Importar na engine e conferir lá é o passo que só você pode executar.'
+              : 'Todos os passos que dependem só do produto estão concluídos.'}
         </p>
       )}
       {human.length ? (
