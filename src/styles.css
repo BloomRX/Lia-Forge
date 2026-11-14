@@ -444,6 +444,10 @@
 .forge-list.is-runs li.is-resumable{border-color:#4d5a6b;background:#151a1e}
 .forge-list.is-runs li.is-resumable .forge-run-recover{background:#161c22}
 .forge-list.is-runs li.is-resumable .forge-run-recover>span{color:#bcd6ea}
+/* Run que espera revisão humana: sem botão de retomada, com a saída nomeada */
+.forge-list.is-runs li.is-waiting-review{border-color:#5c4a6b;background:#1a1620}
+.forge-list.is-runs li.is-waiting-review .forge-run-recover{background:#1d1824}
+.forge-list.is-runs li.is-waiting-review .forge-run-recover>span{color:#d7c3e6}
 /* Prévia de VFX: gerada aqui mesmo, medida e descartada quando o ajuste muda */
 .forge-vfx-preview{display:flex;flex-direction:column;gap:6px;margin-top:2px}
 .forge-vfx-preview-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}

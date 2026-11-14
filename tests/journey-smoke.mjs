@@ -28,7 +28,7 @@ import path from 'node:path';
 
 import { createStudioService } from '../shared/services/studio-service.mjs';
 import { ensureProjectStructure } from '../shared/integrations/project-structure.mjs';
-import { buildJourneySteps, journeyProgress, isResumableRun } from '../shared/ui/journey.mjs';
+import { buildJourneySteps, journeyProgress, isResumableRun, runItemActions, RUN_ACTION_LABELS } from '../shared/ui/journey.mjs';
 import { RESUMABLE_RUN_STATES } from '../shared/engine/run-states.mjs';
 import { encodePngRgba, analyzePngContent } from '../shared/qa/png-codec.mjs';
 import { buildGlbFixture } from './glb-fixtures.mjs';
@@ -352,8 +352,8 @@ try {
   const followStep = interrupted.steps.find((step) => step.id === 'follow');
   check(followStep.state === 'human', 'run interrompido vira decisão humana no passo de acompanhar');
   check(/não há execução neste processo/.test(followStep.detail), 'e o passo diz que não há execução neste processo');
-  check(/"Corrigir estado"/.test(followStep.detail) && /"Retomar"/.test(followStep.detail),
-    'o passo nomeia as duas ações que a lista de execuções oferece de verdade');
+  check(/"Corrigir estado"/.test(followStep.detail) && /"Retomar do checkpoint"/.test(followStep.detail),
+    'o passo nomeia as duas ações que a lista de execuções oferece de verdade, com o nome que cada uma tem no botão');
   check(isResumableRun({ runId: interruptedRun.runId, status: 'running', stale: true, active: false }),
     'o run interrompido é retomável pelo serviço: o botão oferecido não devolve erro');
   check(!isResumableRun({ runId: interruptedRun.runId, status: 'running', active: true }),
@@ -492,6 +492,41 @@ try {
     'o run cancelado aparece na lista com saída de retomada');
   check(listed.some((item) => item.status === 'succeeded' && !isResumableRun(item)),
     'e o run concluído aparece sem ela');
+
+  // ------- 12.4 um nome só para cada ação: lista, rodapé e roteiro combinam
+  // O mesmo botão aparece em três lugares. Se o roteiro manda procurar "Retomar"
+  // e a lista mostra "Retomar do checkpoint", o usuário procura um botão que não
+  // existe com aquele nome — por isso os rótulos saem de `RUN_ACTION_LABELS`.
+  const labelCases = [
+    ['concluído', { status: 'succeeded', stale: false, active: false, planStored: true }, null, null],
+    ['bloqueado na revisão', { status: 'blocked', stale: false, active: false, planStored: true }, null, null],
+    ['falhou', { status: 'failed', stale: false, active: false, planStored: true }, null, RUN_ACTION_LABELS.resumeFinished],
+    ['cancelado', { status: 'cancelled', stale: false, active: false, planStored: true }, null, RUN_ACTION_LABELS.resumeFinished],
+    ['pausado', { status: 'paused', stale: false, active: false, planStored: true }, null, RUN_ACTION_LABELS.resumeFinished],
+    ['em execução agora', { status: 'running', stale: false, active: true, planStored: true }, null, null],
+    ['interrompido', { status: 'running', stale: true, active: false, planStored: true }, RUN_ACTION_LABELS.recoverState, RUN_ACTION_LABELS.resumeInterrupted],
+    ['interrompido sem plano', { status: 'running', stale: true, active: false, planStored: false }, RUN_ACTION_LABELS.recoverState, null],
+    ['encerrado sem plano', { status: 'failed', stale: false, active: false, planStored: false }, null, null],
+  ];
+  for (const [label, item, expectedCorrect, expectedResume] of labelCases) {
+    const actions = runItemActions(item);
+    check((actions.correct?.label ?? null) === expectedCorrect,
+      `run ${label}: corrigir estado ${expectedCorrect ? `é oferecido como "${expectedCorrect}"` : 'não é oferecido'} (${actions.correct?.label ?? 'nenhum'})`);
+    check((actions.resume?.label ?? null) === expectedResume,
+      `run ${label}: retomada ${expectedResume ? `é oferecida como "${expectedResume}"` : 'não é oferecida'} (${actions.resume?.label ?? 'nenhuma'})`);
+    check(actions.interrupted === (item.stale === true),
+      `run ${label}: "interrompido" é exatamente o que a lista marca como tal (sem segundo critério)`);
+  }
+  check(runItemActions({ status: 'blocked', stale: false, active: false, planStored: true }).note.includes('abra o run para aprovar ou rejeitar'),
+    'run bloqueado não ganha botão: ganha o nome da saída real (aprovar ou rejeitar no painel do run)');
+  check(runItemActions({ status: 'failed', stale: false, active: false, planStored: true }).note.includes('Corrija a causa antes'),
+    'run falho avisa que retomar sem corrigir a causa repete a falha (medido no ciclo de vida)');
+  for (const item of listed) {
+    const actions = runItemActions(item);
+    check(actions.interrupted === (item.stale === true),
+      `no run real ${item.runId} (${item.status}), a regra e a lista concordam sobre ser interrompido`);
+    check(!actions.resume || isResumableRun(item), 'nenhum rótulo de retomada existe sem a retomada ser aceita');
+  }
 
   // ------------------------------------------------ honestidade do roteiro
   // Tirar a evidência tem que tirar o "concluído": o estado nunca é decorativo.

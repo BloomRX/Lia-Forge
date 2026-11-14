@@ -1152,13 +1152,23 @@ export function createStudioService(options = {}) {
      * arquivo diz que está em andamento, mas não há execução aqui — o aplicativo
      * foi fechado, por exemplo). Sem isso, um run interrompido ficaria para
      * sempre "em andamento" na interface.
+     *
+     * `stale` cobre só `running`/`planned`, que são os estados que **contradizem**
+     * a realidade quando não há execução neste processo — os mesmos que
+     * `resumeRun` reporta como `interrupted: true`. `paused` fica de fora: é o
+     * estado que o engine grava quando a execução terminou com passos pendentes
+     * (sem falha, bloqueio ou cancelamento), ou seja, um registro verdadeiro de
+     * uma parada, não uma mentira a corrigir. Tratá-lo como interrompido fazia a
+     * lista oferecer "Corrigir estado" — que grava `cancelled` com o motivo "não
+     * havia execução neste processo" — para um run cujo estado já estava certo, e
+     * ainda contradizia `resumeRun`, que responde `interrupted: false` para ele.
      */
     async listRuns() {
       const root = path.join(projectRoot, RUNS_DIRECTORY);
       if (!await pathExists(root)) return [];
       const entries = await fs.readdir(root, { withFileTypes: true });
       const running = new Set(activeRuns.keys());
-      const unfinished = new Set(['running', 'planned', 'paused']);
+      const unfinished = new Set(['running', 'planned']);
       const runs = [];
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;

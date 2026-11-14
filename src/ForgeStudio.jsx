@@ -54,7 +54,7 @@ import {
 import { liaForgeApi } from './lia-forge-api.js';
 // Roteiro de 12 passos: a derivação dos estados mora em shared/ui/journey.mjs
 // (lógica pura, sem React), compartilhada com os testes e com o resumo usado aqui.
-import { buildJourneySteps, journeyProgress, isResumableRun } from '../shared/ui/journey.mjs';
+import { buildJourneySteps, journeyProgress, isResumableRun, runItemActions, RUN_ACTION_LABELS } from '../shared/ui/journey.mjs';
 
 // Escolha real de backend (§9). Nada aqui instala, baixa, compra ou envia:
 // são só as preferências gravadas em `.lia-forge/providers.json`.
@@ -771,7 +771,7 @@ export function ArtifactThumb({ path: relativePath, kind = 'image', alt = null }
 
 // Reexportado para manter o mesmo ponto de acesso de antes (os testes e qualquer
 // consumidor da interface importam daqui); a implementação é a de shared/.
-export { buildJourneySteps, journeyProgress, isResumableRun };
+export { buildJourneySteps, journeyProgress, isResumableRun, runItemActions, RUN_ACTION_LABELS };
 
 
 /**
@@ -782,18 +782,30 @@ export { buildJourneySteps, journeyProgress, isResumableRun };
  */
 /**
  * Run gravado na lista. As ações oferecidas são exatamente as que o serviço
- * aceita (`isResumableRun`, a mesma regra usada pelo roteiro): um botão que
- * devolve "não precisa de retomada" para um run interrompido ensina o usuário a
- * desconfiar da interface. "Corrigir estado" só existe para run interrompido —
- * é o caso em que o estado gravado (`running`) não corresponde à realidade.
+ * aceita (`runItemActions`, a mesma regra usada pelo rodapé e pelo roteiro): um
+ * botão que devolve "não precisa de retomada" ensina o usuário a desconfiar da
+ * interface, e um run retomável sem saída visível fica para sempre com cara de
+ * terminado.
+ *
+ * Cada estado tem a sua saída, com o nome que o serviço dá à ação:
+ *   · `running`/`planned` sem execução aqui → "Corrigir estado" (grava o estado
+ *     real, não executa nada) e "Retomar do checkpoint" (segue dos checkpoints);
+ *   · `failed`/`cancelled`/`paused` → "Retomar", e no falho o texto diz para
+ *     corrigir a causa antes (retomar sem corrigir repete a falha — medido);
+ *   · `blocked` → nenhum botão: o que ele espera é aprovar ou rejeitar no painel
+ *     do run, e retomar sem revisar repetiria o mesmo bloqueio;
+ *   · `succeeded` e run em execução agora → nenhum botão (nada a corrigir);
+ *   · sem `plan.json` gravado → nenhum "Retomar" (o serviço recusaria) e o motivo
+ *     dito no item.
  */
 export function SavedRunItem({ item, currentRunId = null, busy = null, onOpen, onRecover, onResume }) {
-  const resumable = isResumableRun(item);
-  const noPlan = item.planStored === false;
-  const showRecover = item.stale || resumable || noPlan;
+  // Quem decide o que aparece é `runItemActions` (shared/ui/journey.mjs): a mesma
+  // regra e os mesmos nomes usados pelo rodapé do run e pelo roteiro. Botão com
+  // nome diferente do que o roteiro manda procurar é botão que o usuário não acha.
+  const actions = runItemActions(item);
   const stateLabel = item.active ? 'Em execução agora' : item.stale ? 'Interrompido' : RUN_STATE_LABELS[item.status] ?? item.status;
   return (
-    <li className={item.stale ? 'is-stale' : resumable ? 'is-resumable' : undefined}>
+    <li className={item.stale ? 'is-stale' : actions.resumable ? 'is-resumable' : actions.waitingReview ? 'is-waiting-review' : undefined}>
       <button
         type="button"
         className={`forge-run-link ${currentRunId === item.runId ? 'is-active' : ''}`}
@@ -803,23 +815,18 @@ export function SavedRunItem({ item, currentRunId = null, busy = null, onOpen, o
         <StateBadge state={item.status} label={stateLabel} />
         <span>{item.planTitle ?? item.planId}</span>
       </button>
-      {showRecover ? (
+      {actions.visible ? (
         <div className="forge-run-recover">
-          <span>
-            {item.stale
-              ? 'Consta como em andamento, mas não há execução neste processo.'
-              : `Terminou como ${String(stateLabel).toLowerCase()}: ${resumable ? 'os passos concluídos ficaram em checkpoint.' : 'nada foi entregue como pronto.'}`}
-            {noPlan ? ' O plano original não está gravado neste projeto, então não há como retomar com as mesmas entradas.' : ''}
-          </span>
+          <span>{actions.note}</span>
           <div className="forge-picker-actions">
-            {item.stale ? (
+            {actions.correct ? (
               <button type="button" className="button button-quiet" disabled={busy !== null} onClick={() => onRecover(item.runId)}>
-                {busy === 'recover' ? <span className="spin" /> : <RotateCcw size={12} strokeWidth={2} />} Corrigir estado
+                {busy === 'recover' ? <span className="spin" /> : <RotateCcw size={12} strokeWidth={2} />} {actions.correct.label}
               </button>
             ) : null}
-            {resumable ? (
+            {actions.resume ? (
               <button type="button" className="button button-quiet" disabled={busy !== null} onClick={() => onResume(item.runId)}>
-                {busy === 'resume' ? <span className="spin" /> : <RotateCcw size={12} strokeWidth={2} />} Retomar
+                {busy === 'resume' ? <span className="spin" /> : <RotateCcw size={12} strokeWidth={2} />} {actions.resume.label}
               </button>
             ) : null}
           </div>
@@ -1269,7 +1276,10 @@ export default function ForgeStudio({ onNotify = () => {} }) {
   // original continua gravado?). É dele que sai a decisão de oferecer retomada —
   // a mesma regra da lista lateral e do roteiro, sem segunda lista de estados.
   const runListItem = run?.runId ? (runs ?? []).find((item) => item.runId === run.runId) ?? null : null;
-  const runResumable = isResumableRun(runListItem ?? (run ? { runId: run.runId, status: run.status, stale: runStale, active: busy === 'run' } : null));
+  // Rótulo e disponibilidade do botão de retomada vêm da mesma regra da lista
+  // (`runItemActions`): run interrompido retoma "do checkpoint", run encerrado sem
+  // entregar apenas "retoma", run bloqueado não oferece retomada.
+  const runActions = runItemActions(runListItem ?? (run ? { runId: run.runId, status: run.status, stale: runStale, active: busy === 'run', planStored: true } : null));
 
   const runAction = useCallback(async (label, action) => {
     setBusy(label);
@@ -2046,14 +2056,14 @@ export default function ForgeStudio({ onNotify = () => {} }) {
                 <button type="button" className="button button-quiet" onClick={handleAttach} disabled={busy === 'attach' || !run.provenance?.length}>
                   {busy === 'attach' ? <span className="spin" /> : <Package size={14} />} Guardar no projeto
                 </button>
-                {runResumable ? (
+                {runActions.resume ? (
                   <button type="button" className="button button-quiet" onClick={handleResumeRun} disabled={busy === 'resume'}>
-                    {busy === 'resume' ? <span className="spin" /> : <RotateCcw size={14} />} Retomar do checkpoint
+                    {busy === 'resume' ? <span className="spin" /> : <RotateCcw size={14} />} {runActions.resume.label}
                   </button>
                 ) : null}
                 {run.status === 'running' ? (
                   <button type="button" className="button button-quiet" onClick={() => handleCancelRun(run.runId)} disabled={busy === 'cancel'}>
-                    {busy === 'cancel' ? <span className="spin" /> : <CircleAlert size={14} />} {runStale ? 'Corrigir estado' : 'Cancelar'}
+                    {busy === 'cancel' ? <span className="spin" /> : <CircleAlert size={14} />} {runStale ? RUN_ACTION_LABELS.recoverState : 'Cancelar'}
                   </button>
                 ) : null}
               </footer>

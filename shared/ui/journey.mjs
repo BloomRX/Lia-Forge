@@ -39,6 +39,71 @@ export function isResumableRun(item) {
   return isResumableRunState(item.status);
 }
 
+/**
+ * Rótulos das ações de retomada e de estado. Ficam aqui — e não espalhados pela
+ * interface — porque o mesmo botão aparece em três lugares (lista de execuções,
+ * rodapé do run e texto do roteiro) e nome diferente para a mesma ação faz o
+ * usuário procurar um botão que não existe com aquele nome.
+ */
+export const RUN_ACTION_LABELS = Object.freeze({
+  /** Run gravado como em andamento sem execução neste processo. */
+  resumeInterrupted: 'Retomar do checkpoint',
+  /** Run encerrado sem entregar o resultado (falhou, foi cancelado ou pausou). */
+  resumeFinished: 'Retomar',
+  /** Grava o estado real de um run interrompido, sem executar nada. */
+  recoverState: 'Corrigir estado',
+});
+
+/**
+ * As ações que um item de run autoriza, derivadas dos mesmos dados que o serviço
+ * usa para aceitá-las (`isResumableRun` + `planStored` + `stale`).
+ *
+ * Dois rótulos de retomada porque são duas situações diferentes:
+ *   · interrompido — a execução nunca terminou e o estado gravado não corresponde
+ *     à realidade; o serviço responde `interrupted: true` e existem duas saídas
+ *     (corrigir o estado ou retomar), então o nome diz de onde vem a retomada;
+ *   · encerrado sem entregar — o run terminou; retomar reaproveita os checkpoints,
+ *     mas repetir sem corrigir a causa repete a falha (medido em
+ *     `tests/run-lifecycle-smoke.mjs`), e o texto do item diz isso.
+ *
+ * Run `blocked` não ganha botão de retomada (ver `isResumableRun`): ganha texto
+ * nomeando a saída real, que é aprovar ou rejeitar no painel do run.
+ */
+export function runItemActions(item) {
+  const resumable = isResumableRun(item);
+  const noPlan = item?.planStored === false;
+  const stale = item?.stale === true;
+  const status = String(item?.status ?? '');
+  const interrupted = stale || (['running', 'planned'].includes(status) && item?.active !== true);
+  const waitingReview = status === 'blocked';
+  const correct = stale ? Object.freeze({ action: 'recover', label: RUN_ACTION_LABELS.recoverState }) : null;
+  const resume = resumable
+    ? Object.freeze({ action: 'resume', label: interrupted ? RUN_ACTION_LABELS.resumeInterrupted : RUN_ACTION_LABELS.resumeFinished })
+    : null;
+  let note = '';
+  if (stale) {
+    note = 'Consta como em andamento, mas não há execução neste processo.';
+  } else if (waitingReview) {
+    note = 'Espera sua revisão: abra o run para aprovar ou rejeitar o artefato. Aprovar retoma dos checkpoints gravados; retomar sem revisar repetiria o mesmo bloqueio.';
+  } else if (resumable) {
+    note = 'Terminou sem entregar o resultado: os passos concluídos ficaram em checkpoint.'
+      + (status === 'failed' ? ' Corrija a causa antes: retomar sem corrigir repete a mesma falha.' : '');
+  } else if (noPlan) {
+    note = 'Nada foi entregue como pronto.';
+  }
+  if (noPlan) note += ' O plano original não está gravado neste projeto, então não há como retomar com as mesmas entradas.';
+  return Object.freeze({
+    visible: Boolean(correct || resume || noPlan || waitingReview),
+    resumable,
+    interrupted,
+    noPlan,
+    waitingReview,
+    correct,
+    resume,
+    note: note.trim(),
+  });
+}
+
 export function buildJourneySteps({
   project = null,
   inputs = [],
@@ -157,7 +222,7 @@ export function buildJourneySteps({
       title: 'Acompanhar (ou cancelar)',
       state: stale ? 'human' : liveRun ? 'now' : finished ? 'done' : run ? 'now' : 'todo',
       detail: stale
-        ? `Este run consta como em andamento, mas não há execução neste processo (o aplicativo pode ter sido fechado). Na lista de execuções, "Corrigir estado" grava o run como cancelado${resumable ? ' e "Retomar" continua dos checkpoints gravados' : ''} — ${resumable ? 'qual dos dois é' : 'corrigir o estado é'} decisão sua.${resumable ? '' : ' O plano original não está gravado neste projeto, então não há como retomar com as mesmas entradas.'}`
+        ? `Este run consta como em andamento, mas não há execução neste processo (o aplicativo pode ter sido fechado). Na lista de execuções, "${RUN_ACTION_LABELS.recoverState}" grava o run como cancelado${resumable ? ` e "${RUN_ACTION_LABELS.resumeInterrupted}" continua dos checkpoints gravados` : ''} — ${resumable ? 'qual dos dois é' : 'corrigir o estado é'} decisão sua.${resumable ? '' : ' O plano original não está gravado neste projeto, então não há como retomar com as mesmas entradas.'}`
         : liveRun
         ? 'Execução em andamento: o progresso é gravado a cada passo e pode ser cancelado.'
         : finished
@@ -177,9 +242,9 @@ export function buildJourneySteps({
       detail: run?.status === 'blocked'
         ? 'Um passo parou de propósito esperando o seu olhar; a aprovação fica amarrada ao SHA-256 do arquivo.'
         : run?.status === 'failed'
-          ? `O run terminou com falha em "${failedStep?.id ?? 'um passo'}"${failedStep?.error?.code ? ` (${failedStep.error.code})` : ''}: ${String(failedStep?.error?.message ?? 'veja o log do run').slice(0, 200)} Corrija a causa e ${resumable ? 'use "Retomar" na lista de execuções (reaproveita os passos já concluídos) ou execute' : 'execute'} de novo — nada aqui foi entregue como pronto.`
+          ? `O run terminou com falha em "${failedStep?.id ?? 'um passo'}"${failedStep?.error?.code ? ` (${failedStep.error.code})` : ''}: ${String(failedStep?.error?.message ?? 'veja o log do run').slice(0, 200)} Corrija a causa e ${resumable ? `use "${RUN_ACTION_LABELS.resumeFinished}" na lista de execuções (reaproveita os passos já concluídos) ou execute` : 'execute'} de novo — nada aqui foi entregue como pronto.`
           : run?.status === 'cancelled'
-            ? `Run cancelado${cancellation?.reason ? `: ${String(cancellation.reason).slice(0, 160)}` : ''}${cancellation?.cancelledBy ? ` (por ${cancellation.cancelledBy})` : ''}. ${resumable ? 'Os passos concluídos continuam em checkpoint: "Retomar" na lista de execuções segue dali, executar de novo recomeça do zero.' : 'O plano original não está gravado neste projeto: para seguir é executar de novo.'}`
+            ? `Run cancelado${cancellation?.reason ? `: ${String(cancellation.reason).slice(0, 160)}` : ''}${cancellation?.cancelledBy ? ` (por ${cancellation.cancelledBy})` : ''}. ${resumable ? `Os passos concluídos continuam em checkpoint: "${RUN_ACTION_LABELS.resumeFinished}" na lista de execuções segue dali, executar de novo recomeça do zero.` : 'O plano original não está gravado neste projeto: para seguir é executar de novo.'}`
             : run && finished
               ? 'Revisões gravadas com o hash dos artefatos.'
               : 'Revisão humana é gate: nenhum arquivo é entregue como pronto sem ela.',

@@ -674,6 +674,8 @@ try {
   const blockedItemMarkup = renderRunItem(blockedItem);
   assert.ok(!blockedItemMarkup.includes('Retomar'), 'run bloqueado não oferece retomada: o que ele espera é a revisão');
   assert.ok(blockedItemMarkup.includes('Aguardando você'), 'e mostra o estado real do run');
+  assert.ok(blockedItemMarkup.includes('Espera sua revisão'), 'o item nomeia a saída real em vez de só dizer que nada foi entregue');
+  assert.ok(blockedItemMarkup.includes('is-waiting-review'), 'e o estado de espera tem marcação própria na lista');
 
   // Run interrompido de verdade: gravado como em andamento, sem execução neste
   // processo, com o plano original copiado de um run real do mesmo projeto.
@@ -701,8 +703,8 @@ try {
   assert.equal(orphanItem?.stale, true, 'o run gravado como em andamento sem execução aqui chega à lista como interrompido');
   assert.equal(orphanItem?.planStored, true, 'e a lista confirma que o plano original está gravado');
   const orphanMarkup = renderRunItem(orphanItem);
-  assert.ok(orphanMarkup.includes('Corrigir estado') && orphanMarkup.includes('Retomar'),
-    'o item interrompido oferece as duas saídas que o serviço aceita');
+  assert.ok(orphanMarkup.includes('Corrigir estado') && orphanMarkup.includes('Retomar do checkpoint'),
+    'o item interrompido oferece as duas saídas que o serviço aceita, com o nome que cada ação tem');
 
   // Sem o plano gravado, o botão de retomar não aparece: melhor dizer por quê do
   // que oferecer um botão que devolve erro.
@@ -727,6 +729,8 @@ try {
   assert.equal(cancelledItem?.stale, false, 'e ele deixa de constar como interrompido');
   const cancelledMarkup = renderRunItem(cancelledItem);
   assert.ok(cancelledMarkup.includes('Retomar'), 'run cancelado real oferece a retomada que o serviço aceita');
+  assert.ok(!cancelledMarkup.includes('Retomar do checkpoint'),
+    'run encerrado não é interrompido: o rótulo é "Retomar", não "Retomar do checkpoint"');
   assert.ok(cancelledMarkup.includes('checkpoint'), 'o item diz que os passos concluídos ficaram em checkpoint');
   assert.ok(!cancelledMarkup.includes('Corrigir estado'), 'com o estado já corrigido, não oferece corrigir de novo');
 
@@ -742,7 +746,8 @@ try {
   }));
   assert.ok(staleMarkup.includes('Interrompido'), 'o estado interrompido é dito com todas as letras');
   assert.ok(staleMarkup.includes('não há execução neste processo'), 'o item explica por que está interrompido');
-  assert.ok(staleMarkup.includes('Corrigir estado') && staleMarkup.includes('Retomar'), 'as duas saídas são oferecidas no próprio item');
+  assert.ok(staleMarkup.includes('Corrigir estado') && staleMarkup.includes('Retomar do checkpoint'),
+    'as duas saídas são oferecidas no próprio item, cada uma com o seu nome');
 
   // Run interrompido no roteiro: não aparece como execução viva, e a recuperação
   // entra como decisão humana (o produto não corrige o estado por conta própria).
@@ -880,10 +885,179 @@ try {
     'e mostra a rejeição anterior, marcada como decisão substituída');
   assert.ok(timeline.every((entry) => !/sk-|token/i.test(entry.text)), 'nenhum segredo entra na timeline');
 
+  // ---------- 13. matriz da lista: o rótulo de cada botão e a ação real que ele dispara
+  // Regra do produto: a interface só oferece ação que o serviço aceita, e o nome do
+  // botão é o nome da ação. Cada estado abaixo é renderizado com os dados que a API
+  // devolve e, em seguida, a ação do botão é **chamada de verdade**: um botão que
+  // renderiza e devolve erro — ou a falta dele para uma ação aceita — falha aqui.
+  // Estados que o smoke não produz naturalmente (failed, paused, interrompido com
+  // plano) são gravados no disco do projeto temporário a partir do plano e do
+  // snapshot de um run real; o estado é fabricado, a ação executada em seguida não é.
+  const { runItemActions, RUN_ACTION_LABELS } = await vite.ssrLoadModule('/src/ForgeStudio.jsx');
+  const runsDirectory = path.join(projectRoot, '.lia-forge', 'runs');
+  const sourceSnapshot = JSON.parse(await fs.readFile(path.join(runsDirectory, runId, 'run.json'), 'utf8'));
+
+  /** Grava um run com o plano real do 2D aprovado e o estado pedido. */
+  const fabricateRun = async (fabricatedId, status, mutateSteps) => {
+    const directory = path.join(runsDirectory, fabricatedId);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.copyFile(path.join(runsDirectory, runId, 'plan.json'), path.join(directory, 'plan.json'));
+    const steps = mutateSteps(sourceSnapshot.steps.map((step) => ({ ...step })));
+    await fs.writeFile(path.join(directory, 'run.json'), `${JSON.stringify({
+      ...sourceSnapshot,
+      runId: fabricatedId,
+      status,
+      finishedAt: status === 'running' ? null : new Date().toISOString(),
+      steps,
+      summary: { ...sourceSnapshot.summary, finished: status === 'succeeded' },
+    }, null, 2)}\n`, 'utf8');
+    const listed = (await liaForgeApi.runs()).find((item) => item.runId === fabricatedId);
+    assert.ok(listed, `o run ${fabricatedId} (${status}) aparece na listagem`);
+    assert.equal(listed.status, status, `o estado gravado chega à lista como ${status}`);
+    return listed;
+  };
+
+  /** Rótulos dos botões dentro do bloco de ações do item (o botão da linha é abrir). */
+  const actionButtons = (markup) => {
+    const tail = markup.slice(markup.indexOf('forge-run-recover'));
+    if (!markup.includes('forge-run-recover')) return [];
+    return [...tail.matchAll(/<button[^>]*>([\s\S]*?)<\/button>/g)]
+      .map((match) => match[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+  };
+
+  /**
+   * Mantém o primeiro passo concluído (é o checkpoint que a retomada deve
+   * reaproveitar), marca o seguinte com o estado pedido e devolve o resto para
+   * pendente — a forma de um run que parou no meio, sem fingir conclusão.
+   */
+  const stoppedAfterFirstCheckpoint = (steps, state, error = null) => {
+    let kept = false;
+    let marked = false;
+    return steps.map((step) => {
+      if (step.state !== 'succeeded') return step;
+      if (!kept) { kept = true; return step; }
+      if (!marked) {
+        marked = true;
+        return { ...step, state, error, finishedAt: state === 'pending' ? null : new Date().toISOString(), outputs: state === 'pending' ? [] : step.outputs };
+      }
+      return { ...step, state: 'pending', outputs: [], error: null, finishedAt: null };
+    });
+  };
+  const failedSteps = (steps) => stoppedAfterFirstCheckpoint(steps, 'failed', {
+    code: 'WORKFLOW_FAILED',
+    message: 'falha simulada no meio da execução para exercitar a retomada',
+    requiresUserDecision: false,
+  });
+  const interruptedSteps = (steps) => stoppedAfterFirstCheckpoint(steps, 'running');
+
+  const matrixCases = [];
+
+  // concluído: nenhuma ação (o serviço recusa retomar e não há estado a corrigir)
+  const succeededItem = (await liaForgeApi.runs()).find((item) => item.runId === runId);
+  matrixCases.push(['succeeded', succeededItem, []]);
+
+  // bloqueado na revisão: nenhuma retomada, a saída é aprovar/rejeitar no painel
+  const blockedListed = (await liaForgeApi.runs()).find((item) => item.status === 'blocked');
+  matrixCases.push(['blocked', blockedListed, []]);
+
+  // falhou / pausou / foi cancelado: "Retomar"
+  matrixCases.push(['failed', await fabricateRun('run-matriz-failed', 'failed', failedSteps), [RUN_ACTION_LABELS.resumeFinished]]);
+  // `paused` é o estado que o engine grava quando a execução terminou com passos
+  // pendentes: um registro verdadeiro de parada, não um estado que mente. Por isso
+  // a lista não o marca como interrompido (senão ofereceria "Corrigir estado" para
+  // um run cujo estado já está certo) e `resumeRun` responde `interrupted: false`.
+  const pausedItem = await fabricateRun('run-matriz-paused', 'paused', failedSteps);
+  assert.equal(pausedItem.stale, false, 'run pausado não consta como interrompido');
+  matrixCases.push(['paused', pausedItem, [RUN_ACTION_LABELS.resumeFinished]]);
+  matrixCases.push(['cancelled', await fabricateRun('run-matriz-cancelled', 'cancelled', failedSteps), [RUN_ACTION_LABELS.resumeFinished]]);
+
+  // interrompidos: "Corrigir estado" + "Retomar do checkpoint" (um item para cada
+  // ação, porque a primeira ação muda o estado do run)
+  matrixCases.push(['running órfão (retomar)', await fabricateRun('run-matriz-interrompido', 'running', interruptedSteps),
+    [RUN_ACTION_LABELS.recoverState, RUN_ACTION_LABELS.resumeInterrupted]]);
+  matrixCases.push(['running órfão (corrigir)', await fabricateRun('run-matriz-interrompido-2', 'running', interruptedSteps),
+    [RUN_ACTION_LABELS.recoverState, RUN_ACTION_LABELS.resumeInterrupted]]);
+
+  // sem plano gravado: corrigir o estado continua possível, retomar não
+  const planlessListed = (await liaForgeApi.runs()).find((item) => item.runId === planlessId);
+  matrixCases.push(['sem plano gravado', planlessListed, [RUN_ACTION_LABELS.recoverState]]);
+
+  for (const [label, item, expected] of matrixCases) {
+    assert.ok(item, `existe um run real no estado ${label}`);
+    const markup = renderRunItem(item);
+    assert.deepEqual(actionButtons(markup), expected,
+      `os botões do run ${label} são exatamente os que o serviço aceita (${JSON.stringify(expected)})`);
+    const fromRule = [runItemActions(item).correct?.label, runItemActions(item).resume?.label].filter(Boolean);
+    assert.deepEqual(fromRule, expected,
+      `a regra compartilhada decide os mesmos botões para o run ${label} (${JSON.stringify(fromRule)})`);
+    if (expected.length === 0) {
+      assert.ok(runItemActions(item).note.length > 0 || !runItemActions(item).visible,
+        `run ${label} não fica sem explicação quando há algo a dizer`);
+    }
+  }
+
+  // execução viva agora: nenhum botão (variante de apresentação sobre um item real;
+  // o caso com processo vivo de verdade está em tests/run-lifecycle-smoke.mjs)
+  const liveMarkup = renderRunItem({ ...succeededItem, status: 'running', active: true, stale: false });
+  assert.deepEqual(actionButtons(liveMarkup), [], 'run em execução neste processo não oferece retomada nem correção de estado');
+  assert.ok(liveMarkup.includes('Em execução agora'), 'e diz que está executando agora');
+
+  // ---- a ação real de cada botão, pelo transporte HTTP
+  const resumedFailed = await liaForgeApi.resumeRun('run-matriz-failed', { reason: 'botão Retomar do run falho' });
+  assert.equal(resumedFailed.ok, true, 'retomar o run falho é aceito (o botão não devolve erro)');
+  assert.equal(resumedFailed.resumedFrom, 'failed', 'a resposta diz de que estado veio a retomada');
+  assert.equal(resumedFailed.interrupted, false, 'run falho não é execução interrompida');
+  assert.ok(resumedFailed.checkpointsReused >= 1, `os passos concluídos são reaproveitados (${resumedFailed.checkpointsReused})`);
+  assert.ok(['blocked', 'succeeded', 'failed'].includes(resumedFailed.result.status),
+    `a retomada segue até um estado real (${resumedFailed.result.status})`);
+
+  const resumedPaused = await liaForgeApi.resumeRun('run-matriz-paused', { reason: 'botão Retomar do run pausado' });
+  assert.equal(resumedPaused.ok, true, 'retomar o run pausado é aceito');
+  assert.equal(resumedPaused.resumedFrom, 'paused', 'e a resposta diz que veio de uma pausa');
+
+  const resumedCancelled = await liaForgeApi.resumeRun('run-matriz-cancelled', { reason: 'botão Retomar do run cancelado' });
+  assert.equal(resumedCancelled.ok, true, 'retomar o run cancelado é aceito');
+  assert.equal(resumedCancelled.resumedFrom, 'cancelled', 'e a resposta diz que veio de um cancelamento');
+
+  const resumedInterrupted = await liaForgeApi.resumeRun('run-matriz-interrompido', { reason: 'botão Retomar do checkpoint' });
+  assert.equal(resumedInterrupted.ok, true, 'retomar o run interrompido é aceito');
+  assert.equal(resumedInterrupted.interrupted, true, 'a resposta distingue a retomada de uma execução que nunca terminou');
+  assert.equal(resumedInterrupted.resumedFrom, 'running', 'o estado gravado era "em andamento"');
+  assert.ok(resumedInterrupted.checkpointsReused >= 1, `checkpoints reaproveitados (${resumedInterrupted.checkpointsReused})`);
+  assert.equal((await liaForgeApi.runs()).find((item) => item.runId === 'run-matriz-interrompido')?.stale, false,
+    'depois de retomado o run deixa de constar como interrompido');
+
+  const recovered = await liaForgeApi.cancelRun('run-matriz-interrompido-2', { reason: 'botão Corrigir estado' });
+  assert.equal(recovered.ok, true, 'corrigir o estado do run interrompido é aceito');
+  assert.equal(recovered.stale, true, 'e a resposta diz que não havia execução neste processo (não finge ter parado nada)');
+  const recoveredItem = (await liaForgeApi.runs()).find((item) => item.runId === 'run-matriz-interrompido-2');
+  assert.equal(recoveredItem.status, 'cancelled', 'o estado gravado passa a cancelado');
+  assert.deepEqual(actionButtons(renderRunItem(recoveredItem)), [RUN_ACTION_LABELS.resumeFinished],
+    'e o item passa a oferecer "Retomar" — o botão muda junto com o estado, sem recarregar regra nenhuma');
+
+  await assert.rejects(() => liaForgeApi.resumeRun(planlessId, { reason: 'sem plano gravado' }),
+    /plano original/, 'retomar sem o plano gravado é recusado com motivo — é por isso que o botão não aparece');
+
+  const refusedSucceeded = await liaForgeApi.resumeRun(runId);
+  assert.equal(refusedSucceeded.ok, false, 'retomar o run concluído é recusado (por isso ele não tem botão)');
+
+  // run bloqueado: retomar não resolve (o gate continua lá); aprovar resolve.
+  const blockedBefore = await liaForgeApi.readRun(blockedListed.runId);
+  const blockedStepId = blockedBefore.steps.find((step) => step.state === 'blocked' && step.review?.status === 'review-missing')?.id;
+  assert.ok(blockedStepId, 'o run bloqueado da matriz tem um passo esperando revisão');
+  const resumedBlocked = await liaForgeApi.resumeRun(blockedListed.runId, { reason: 'retomar sem revisar' });
+  assert.equal(resumedBlocked.ok, true, 'o serviço aceita retomar um run bloqueado…');
+  assert.equal(resumedBlocked.result.status, 'blocked', '…e ele para no mesmo gate: retomar não substitui a revisão');
+  assert.ok(resumedBlocked.result.steps.some((step) => step.id === blockedStepId && step.state === 'blocked'),
+    'o passo que esperava revisão continua esperando (a interface certa em não oferecer o botão)');
+  const unblocked = await liaForgeApi.reviewStep(blockedListed.runId, { stepId: blockedStepId, approved: true, reviewer: 'smoke-ui', note: 'a saída real do run bloqueado' });
+  assert.equal(unblocked.resumed, true, 'aprovar retoma o run a partir dos checkpoints — é essa a ação que a lista nomeia');
+
   const { default: App } = await vite.ssrLoadModule('/src/App.jsx');
   assert.equal(typeof App, 'function', 'App.jsx continua carregando com a página nova ligada');
 
-  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, revisão humana visível com histórico, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab, ciclo de vida do run, projeto, roteiro de 12 passos, run interrompido/cancelado na lista com as saídas que o serviço aceita; transporte ${liaForgeApi.transport}).`);
+  console.log(`Studio UI smoke test passed (cliente HTTP ↔ API ↔ serviço, revisão + retomada + exportação, revisão humana visível com histórico, rig entre runs, entradas pendentes, validações, providers, upload de referências, Comparison Lab, ciclo de vida do run, projeto, roteiro de 12 passos, run interrompido/cancelado na lista com as saídas que o serviço aceita, matriz de seis estados com o rótulo de cada botão e a ação real que ele dispara; transporte ${liaForgeApi.transport}).`);
 } finally {
   globalThis.fetch = nativeFetch;
   await vite.close();
